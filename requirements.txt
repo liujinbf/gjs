@@ -1,0 +1,3 @@
+PySide6
+MetaTrader5
+python-dotenv
