@@ -112,6 +112,11 @@ python main.py
 pip install -r requirements.txt
 ```
 
+如果你把项目推到 GitHub，仓库内已经附带基础测试工作流：
+
+- `push` 到 `main` 时会自动执行 `pytest -q`
+- 创建或更新 `Pull Request` 时也会自动跑测试
+
 ## 说明
 
 这个目录是独立项目雏形，不依赖当前仓库里的欧易、币安或模拟盘模块。
