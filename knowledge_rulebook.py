@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 
 from knowledge_governance import summarize_rule_governance
-from knowledge_base import KNOWLEDGE_DB_FILE, init_knowledge_base
+from knowledge_base import KNOWLEDGE_DB_FILE, open_knowledge_connection
 
 # N-012 修复：规则库 5 分钟内存缓存，避免每次 AI 研判都重查 SQLite
 import time as _time
@@ -18,10 +18,7 @@ _RULEBOOK_CACHE_TTL_SEC = 300       # 5 分钟
 
 def _connect(db_path: Path | str | None = None) -> sqlite3.Connection:
     target = Path(db_path) if db_path else KNOWLEDGE_DB_FILE
-    init_knowledge_base(db_path=target)
-    conn = sqlite3.connect(str(target))
-    conn.row_factory = sqlite3.Row
-    return conn
+    return open_knowledge_connection(target, ensure_schema=True)
 
 
 def _normalize_text(value: object) -> str:
@@ -170,4 +167,3 @@ def build_rulebook(
     # N-012 修复：写入缓存，TTL = 5 分钟
     _rulebook_cache[_cache_key] = {"result": result, "expires_at": _time.time() + _RULEBOOK_CACHE_TTL_SEC}
     return result
-

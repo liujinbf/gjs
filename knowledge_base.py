@@ -14,6 +14,7 @@ from app_config import PROJECT_DIR
 
 RUNTIME_DIR = PROJECT_DIR / ".runtime"
 KNOWLEDGE_DB_FILE = RUNTIME_DIR / "knowledge_base.db"
+SQLITE_TIMEOUT_SEC = 15.0
 
 _HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.*\S)\s*$")
 _NUMBERED_RE = re.compile(r"^\s*\d+[.)]\s+(.*\S)\s*$")
@@ -142,12 +143,28 @@ def _iter_candidate_rules(markdown_text: str) -> list[dict]:
     return result
 
 
+def _open_sqlite(target: Path) -> sqlite3.Connection:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(target), timeout=SQLITE_TIMEOUT_SEC)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    return conn
+
+
+def open_knowledge_connection(
+    db_path: Path | str | None = None,
+    ensure_schema: bool = True,
+) -> sqlite3.Connection:
+    target = Path(db_path) if db_path else KNOWLEDGE_DB_FILE
+    if ensure_schema:
+        init_knowledge_base(db_path=target)
+    return _open_sqlite(target)
+
+
 def _connect(db_path: Path | str | None = None) -> sqlite3.Connection:
     target = Path(db_path) if db_path else KNOWLEDGE_DB_FILE
-    target.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(target))
-    conn.row_factory = sqlite3.Row
-    return conn
+    return _open_sqlite(target)
 
 
 def init_knowledge_base(db_path: Path | str | None = None) -> Path:

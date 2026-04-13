@@ -124,3 +124,91 @@ def test_normal_sl_tp_still_works_after_fix():
     assert any("止盈" in r[0] for r in trades), f"找不到止盈记录，实际：{[r[0] for r in trades]}"
 
     shutil.rmtree(TEST_DIR, ignore_errors=True)
+
+
+def test_sim_engine_uses_wal_mode():
+    test_dir = _prepare_dir()
+    eng = _make_engine(test_dir, "wal_mode")
+
+    with eng._connect() as conn:
+        journal_mode = str(conn.execute("PRAGMA journal_mode;").fetchone()[0]).lower()
+        synchronous = int(conn.execute("PRAGMA synchronous;").fetchone()[0])
+
+    assert journal_mode == "wal"
+    assert synchronous == 1
+
+    del eng
+    gc.collect()
+    shutil.rmtree(TEST_DIR, ignore_errors=True)
+
+
+def test_long_position_uses_bid_for_stop_loss_trigger():
+    test_dir = _prepare_dir()
+    eng = _make_engine(test_dir, "bid_stop")
+
+    ok, msg = eng.execute_signal(
+        {"symbol": "XAUUSD", "action": "long", "price": 3300.0, "sl": 3299.0, "tp": 3360.0}
+    )
+    assert ok, f"开仓失败：{msg}"
+
+    eng.update_prices(
+        {
+            "XAUUSD": {
+                "latest": 3300.6,
+                "bid": 3298.8,
+                "ask": 3300.6,
+            }
+        }
+    )
+
+    del eng
+    gc.collect()
+
+    with sqlite3.connect(str(test_dir / "bid_stop.sqlite")) as conn:
+        conn.row_factory = sqlite3.Row
+        position_count = conn.execute("SELECT COUNT(*) FROM sim_positions WHERE status='open'").fetchone()[0]
+        trade = conn.execute(
+            "SELECT exit_price, reason FROM sim_trades WHERE user_id='system' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
+    assert position_count == 0, "多单应使用 Bid 命中止损后平仓"
+    assert abs(float(trade["exit_price"]) - 3298.8) < 1e-6
+    assert "止损" in str(trade["reason"])
+
+    shutil.rmtree(TEST_DIR, ignore_errors=True)
+
+
+def test_short_position_uses_ask_for_stop_loss_trigger():
+    test_dir = _prepare_dir()
+    eng = _make_engine(test_dir, "ask_stop")
+
+    ok, msg = eng.execute_signal(
+        {"symbol": "XAUUSD", "action": "short", "price": 3300.0, "sl": 3301.0, "tp": 3240.0}
+    )
+    assert ok, f"开仓失败：{msg}"
+
+    eng.update_prices(
+        {
+            "XAUUSD": {
+                "latest": 3300.4,
+                "bid": 3300.2,
+                "ask": 3301.2,
+            }
+        }
+    )
+
+    del eng
+    gc.collect()
+
+    with sqlite3.connect(str(test_dir / "ask_stop.sqlite")) as conn:
+        conn.row_factory = sqlite3.Row
+        position_count = conn.execute("SELECT COUNT(*) FROM sim_positions WHERE status='open'").fetchone()[0]
+        trade = conn.execute(
+            "SELECT exit_price, reason FROM sim_trades WHERE user_id='system' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
+    assert position_count == 0, "空单应使用 Ask 命中止损后平仓"
+    assert abs(float(trade["exit_price"]) - 3301.2) < 1e-6
+    assert "止损" in str(trade["reason"])
+
+    shutil.rmtree(TEST_DIR, ignore_errors=True)

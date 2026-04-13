@@ -11,7 +11,7 @@ import logging
 import math
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Any
 
 from app_config import PROJECT_DIR
 
@@ -26,7 +26,7 @@ class SimTradingEngine:
 
     def init_database(self):
         Path(self.db_file).parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.db_file) as conn:
+        with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS sim_accounts (
@@ -71,11 +71,24 @@ class SimTradingEngine:
                     reason TEXT
                 )
             ''')
+            cursor.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_sim_positions_user_symbol_open
+                ON sim_positions(user_id, symbol)
+                WHERE status='open'
+                """
+            )
             conn.commit()
 
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_file, timeout=15.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        return conn
+
     def get_account(self, user_id: str = "system") -> dict:
-        with sqlite3.connect(self.db_file) as conn:
-            conn.row_factory = sqlite3.Row
+        with self._connect() as conn:
             row = conn.execute("SELECT * FROM sim_accounts WHERE user_id = ?", (user_id,)).fetchone()
             if not row:
                 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -133,15 +146,6 @@ class SimTradingEngine:
             return False, "缺失点位数据（Entry, SL, TP）"
 
         account = self.get_account(user_id)
-        
-        # 检查是否已存在该品种的持仓
-        with sqlite3.connect(self.db_file) as conn:
-            pos = conn.execute(
-                "SELECT id FROM sim_positions WHERE user_id=? AND symbol=? AND status='open'",
-                (user_id, symbol)
-            ).fetchone()
-            if pos:
-                return False, f"{symbol} 已有活跃持仓，跳过"
 
         # 根据 2% 资金管理法则计算最优手数
         equity = float(account["equity"])
@@ -159,27 +163,39 @@ class SimTradingEngine:
 
         # 写入数据库
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with sqlite3.connect(self.db_file) as conn:
-            conn.execute('''
-                INSERT INTO sim_positions 
-                (user_id, symbol, action, entry_price, quantity, margin, stop_loss, take_profit, opened_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (user_id, symbol, action, entry_price, lots, required_margin, sl, tp, now))
-            
-            # 更新已用保证金
-            new_used_margin = float(account["used_margin"]) + required_margin
-            conn.execute(
-                "UPDATE sim_accounts SET used_margin=?, updated_at=? WHERE user_id=?", 
-                (new_used_margin, now, user_id)
-            )
-            conn.commit()
+        with self._connect() as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                updated = conn.execute(
+                    """
+                    UPDATE sim_accounts
+                    SET used_margin = used_margin + ?, updated_at = ?
+                    WHERE user_id = ?
+                      AND (balance - used_margin) >= ?
+                    """,
+                    (required_margin, now, user_id, required_margin),
+                )
+                if int(updated.rowcount or 0) <= 0:
+                    conn.rollback()
+                    return False, f"可用保证金不足（需 ${required_margin:.2f}，可用 ${available_margin:.2f}）"
+                conn.execute(
+                    """
+                    INSERT INTO sim_positions
+                    (user_id, symbol, action, entry_price, quantity, margin, stop_loss, take_profit, opened_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (user_id, symbol, action, entry_price, lots, required_margin, sl, tp, now),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError:
+                conn.rollback()
+                return False, f"{symbol} 已有活跃持仓，跳过"
 
         logging.info(f"🟢 模拟盘已开仓: {action.upper()} {symbol} (手数: {lots:.2f}, 风险率2%算力, 止损: {sl}, 止盈: {tp})")
         return True, f"成功开仓 {lots} 手 {symbol}"
 
     def get_open_positions(self, user_id: str = "system") -> List[dict]:
-        with sqlite3.connect(self.db_file) as conn:
-            conn.row_factory = sqlite3.Row
+        with self._connect() as conn:
             rows = conn.execute("SELECT * FROM sim_positions WHERE user_id=? AND status='open'", (user_id,)).fetchall()
             return [dict(r) for r in rows]
 
@@ -216,30 +232,51 @@ class SimTradingEngine:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (user_id, symbol, action, entry, exit_price, quantity, pnl, now, reason),
         )
-        account = conn.execute("SELECT * FROM sim_accounts WHERE user_id=?", (user_id,)).fetchone()
-        if account:
-            new_balance = float(account["balance"]) + pnl
-            new_used_margin = max(0.0, float(account["used_margin"]) - margin)
-            # P-001 修复：pnl恰好为0应算中性，不应计入 loss（平手不是业务失败）
-            win_add = 1 if pnl > 0 else 0
-            loss_add = 1 if pnl < 0 else 0
-            new_win = int(account["win_count"]) + win_add
-            new_loss = int(account["loss_count"]) + loss_add
-            new_total = float(account["total_profit"]) + pnl
-            conn.execute(
-                "UPDATE sim_accounts SET balance=?, used_margin=?, total_profit=?, win_count=?, loss_count=?, updated_at=? WHERE user_id=?",
-                (new_balance, new_used_margin, new_total, new_win, new_loss, now, user_id),
-            )
+        win_add = 1 if pnl > 0 else 0
+        loss_add = 1 if pnl < 0 else 0
+        conn.execute(
+            """
+            UPDATE sim_accounts
+            SET balance = balance + ?,
+                used_margin = MAX(0, used_margin - ?),
+                total_profit = total_profit + ?,
+                win_count = win_count + ?,
+                loss_count = loss_count + ?,
+                updated_at = ?
+            WHERE user_id = ?
+            """,
+            (pnl, margin, pnl, win_add, loss_add, now, user_id),
+        )
         emoji = "🟢" if pnl > 0 else "🔴"
         logging.info(f"{emoji} 模拟盘平仓通知：{action.upper()} {symbol} 以 {exit_price:.2f} 平仓。盈亏: ${pnl:.2f} ({reason})")
         return pnl
 
     def close_position(self, position_id: int, exit_price: float, reason: str, user_id: str = "system") -> None:
         """平仓结算逻辑（独立打开连接，供外部直接调用）。"""
-        with sqlite3.connect(self.db_file) as conn:
-            conn.row_factory = sqlite3.Row
+        with self._connect() as conn:
             self._close_position_with_conn(conn, position_id, exit_price, reason, user_id)
             conn.commit()
+
+    def _normalize_price_quote(self, value: Any) -> dict:
+        if isinstance(value, dict):
+            latest = float(value.get("latest", 0.0) or 0.0)
+            bid = float(value.get("bid", 0.0) or 0.0)
+            ask = float(value.get("ask", 0.0) or 0.0)
+        else:
+            latest = float(value or 0.0)
+            bid = 0.0
+            ask = 0.0
+        if latest <= 0 and bid > 0 and ask > 0:
+            latest = (bid + ask) / 2.0
+        elif latest <= 0 and bid > 0:
+            latest = bid
+        elif latest <= 0 and ask > 0:
+            latest = ask
+        return {
+            "latest": latest,
+            "bid": bid,
+            "ask": ask,
+        }
 
     def update_prices(self, price_map: dict, user_id: str = "system") -> None:
         """
@@ -247,33 +284,48 @@ class SimTradingEngine:
         如果触及止损止盈，则自动触发平仓。
         如果净值跌破已用保证金的50%（爆仓线），强制平掉所有亏损持仓。
         price_map = {'XAUUSD': 2000.5, 'EURUSD': ...}
+        或 {'XAUUSD': {'latest': 2000.5, 'bid': 2000.2, 'ask': 2000.8}}
         """
         positions = self.get_open_positions(user_id)
         if not positions:
             return
 
         total_floating_pnl = 0.0
-        with sqlite3.connect(self.db_file) as conn:
-            conn.row_factory = sqlite3.Row
+        with self._connect() as conn:
             for pos in positions:
                 symbol = pos["symbol"]
                 if symbol not in price_map:
                     total_floating_pnl += float(pos["floating_pnl"] or 0.0)
                     continue
 
-                current_price = float(price_map[symbol])
+                quote = self._normalize_price_quote(price_map[symbol])
+                latest_price = float(quote["latest"] or 0.0)
+                current_bid = float(quote["bid"] or 0.0)
+                current_ask = float(quote["ask"] or 0.0)
                 action = pos["action"]
                 entry = float(pos["entry_price"])
                 qty = float(pos["quantity"])
                 sl = float(pos["stop_loss"])
                 tp = float(pos["take_profit"])
                 contract_size = self._get_contract_size(symbol)
+                mark_price = latest_price
+                trigger_price = latest_price
+                if action == "long":
+                    if current_bid > 0:
+                        mark_price = current_bid
+                        trigger_price = current_bid
+                else:
+                    if current_ask > 0:
+                        mark_price = current_ask
+                        trigger_price = current_ask
+                if mark_price <= 0:
+                    continue
 
                 # 计算浮盈
                 if action == "long":
-                    pnl = (current_price - entry) * qty * contract_size
+                    pnl = (mark_price - entry) * qty * contract_size
                 else:
-                    pnl = (entry - current_price) * qty * contract_size
+                    pnl = (entry - mark_price) * qty * contract_size
 
                 total_floating_pnl += pnl
                 conn.execute("UPDATE sim_positions SET floating_pnl=? WHERE id=?", (pnl, pos["id"]))
@@ -282,19 +334,19 @@ class SimTradingEngine:
                 trigger_close = False
                 reason = ""
                 if action == "long":
-                    if current_price <= sl:
+                    if trigger_price <= sl:
                         trigger_close, reason = True, "命中系统保护止损"
-                    elif current_price >= tp:
+                    elif trigger_price >= tp:
                         trigger_close, reason = True, "命中目标止盈"
                 elif action == "short":
-                    if current_price >= sl:
+                    if trigger_price >= sl:
                         trigger_close, reason = True, "命中系统保护止损"
-                    elif current_price <= tp:
+                    elif trigger_price <= tp:
                         trigger_close, reason = True, "命中目标止盈"
 
                 if trigger_close:
                     # ✅ 使用共享连接版，避免嵌套 connect 导致 database is locked
-                    self._close_position_with_conn(conn, pos["id"], current_price, reason, user_id)
+                    self._close_position_with_conn(conn, pos["id"], trigger_price, reason, user_id)
                     conn.commit()
 
             # P-002 修复：只统计仍然 open 的仓位浮动盈亏，已平仓位的 pnl 已经结算进 balance，不再是「浮动」
@@ -338,7 +390,12 @@ class SimTradingEngine:
         ).fetchall()
         for pos in positions:
             symbol = pos["symbol"]
-            current_price = float(price_map.get(symbol, pos["entry_price"] or 0))
+            quote = self._normalize_price_quote(price_map.get(symbol, pos["entry_price"] or 0))
+            current_price = float(quote["latest"] or 0.0)
+            if pos["action"] == "long" and float(quote["bid"] or 0.0) > 0:
+                current_price = float(quote["bid"] or 0.0)
+            elif pos["action"] == "short" and float(quote["ask"] or 0.0) > 0:
+                current_price = float(quote["ask"] or 0.0)
             if current_price <= 0:
                 continue
             action = pos["action"]

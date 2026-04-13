@@ -1,4 +1,5 @@
 import copy
+import queue
 
 from PySide6.QtCore import QThread, QTimer, Signal, Qt
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QTabWidget, QVBoxLayout, QWidget
@@ -26,6 +27,8 @@ from mt5_gateway import shutdown_connection
 from notification import get_notification_status, send_ai_brief_notification, send_learning_report_notification, send_notifications
 from settings_dialog import MetalSettingsDialog
 from ui_panels import DashboardMetricsPanel, InsightPanel, LeftTabPanel, WatchListTable
+
+SNAPSHOT_TASK_QUEUE: queue.Queue = queue.Queue()
 
 
 class MonitorWorker(QThread):
@@ -111,13 +114,93 @@ class AiBriefWorker(QThread):
             self.error_signal.emit(str(exc))
 
 
-def run_knowledge_maintenance(config) -> dict:
+def _build_snapshot_live_quotes(snapshot: dict) -> dict:
+    result = {}
+    for item in list((snapshot or {}).get("items", []) or []):
+        symbol = str(item.get("symbol", "") or "").strip().upper()
+        latest_price = float(item.get("latest_price", 0.0) or 0.0)
+        bid = float(item.get("bid", 0.0) or 0.0)
+        ask = float(item.get("ask", 0.0) or 0.0)
+        if not symbol or max(latest_price, bid, ask) <= 0:
+            continue
+        result[symbol] = {
+            "latest": latest_price,
+            "bid": bid,
+            "ask": ask,
+        }
+    return result
+
+
+def process_snapshot_side_effects(
+    snapshot: dict,
+    config,
+    run_backtest: bool = False,
+) -> dict:
+    result = {
+        "log_lines": [],
+        "notify_status_changed": False,
+        "refresh_histories": False,
+        "sim_data_changed": False,
+        "snapshot_ids": [],
+        "snapshot_inserted_count": 0,
+    }
+
+    try:
+        knowledge_result = record_snapshot(snapshot)
+        inserted_count = int(knowledge_result.get("inserted_count", 0) or 0)
+        result["snapshot_inserted_count"] = inserted_count
+        result["snapshot_ids"] = [
+            int(item)
+            for item in list(knowledge_result.get("inserted_snapshot_ids", []) or [])
+            if int(item or 0) > 0
+        ]
+        if inserted_count > 0:
+            result["log_lines"].append(f"[知识库] 已写入 {inserted_count} 条市场快照样本。")
+    except Exception as exc:  # noqa: BLE001
+        result["log_lines"].append(f"[知识库] 快照写入失败：{exc}")
+
+    history_entries = build_snapshot_history_entries(snapshot)
+    history_count = append_history_entries(history_entries)
+    if history_count:
+        result["log_lines"].append(f"[提醒留痕] 新增 {history_count} 条关键提醒。")
+        result["refresh_histories"] = True
+
+    notify_result = send_notifications(history_entries, config)
+    for line in notify_result.get("messages", []):
+        result["log_lines"].append(f"[消息推送] {line}")
+    for line in notify_result.get("errors", []):
+        result["log_lines"].append(f"[消息推送失败] {line}")
+    if notify_result.get("messages") or notify_result.get("errors"):
+        result["notify_status_changed"] = True
+        result["refresh_histories"] = True
+
+    live_quotes = _build_snapshot_live_quotes(snapshot)
+    if live_quotes:
+        SIM_ENGINE.update_prices(live_quotes)
+        result["sim_data_changed"] = True
+
+    if run_backtest:
+        try:
+            from backtest_engine import run_backtest_evaluations
+
+            run_backtest_evaluations()
+        except Exception as exc:  # noqa: BLE001
+            result["log_lines"].append(f"[回测引擎] 评估失败（非致命）：{exc}")
+    return result
+
+
+def run_knowledge_maintenance(config, snapshot_ids: list[int] | None = None) -> dict:
     result = {
         "log_lines": [],
         "notify_status_changed": False,
     }
+    snapshot_ids = [int(item) for item in list(snapshot_ids or []) if int(item or 0) > 0]
+    if snapshot_ids:
+        match_result = match_rules_to_snapshots(snapshot_ids=snapshot_ids)
+        if int(match_result.get("matched_count", 0) or 0) > 0:
+            result["log_lines"].append(f"[知识库] 已新增 {match_result.get('matched_count', 0)} 条规则-样本映射。")
     outcome_result = backfill_snapshot_outcomes()
-    if int(outcome_result.get("labeled_count", 0) or 0) <= 0:
+    if int(outcome_result.get("labeled_count", 0) or 0) <= 0 and not result["log_lines"]:
         return result
 
     stats_30m = summarize_outcome_stats(horizon_min=30)
@@ -149,15 +232,40 @@ class KnowledgeSyncWorker(QThread):
     result_ready = Signal(dict)
     error_signal = Signal(str)
 
-    def __init__(self, config, parent=None):
+    def __init__(self, config, snapshot_ids: list[int] | None = None, parent=None):
         super().__init__(parent)
         self.config = copy.deepcopy(config)
+        self.snapshot_ids = list(snapshot_ids or [])
 
     def run(self):
         try:
-            self.result_ready.emit(run_knowledge_maintenance(self.config))
+            self.result_ready.emit(run_knowledge_maintenance(self.config, snapshot_ids=self.snapshot_ids))
         except Exception as exc:  # noqa: BLE001
             self.error_signal.emit(str(exc))
+
+
+class BackgroundTaskWorker(QThread):
+    result_ready = Signal(dict)
+    error_signal = Signal(str)
+
+    def run(self):
+        while True:
+            try:
+                task = SNAPSHOT_TASK_QUEUE.get()
+                if not isinstance(task, dict):
+                    continue
+                if str(task.get("kind", "") or "").strip() == "stop":
+                    return
+                if str(task.get("kind", "") or "").strip() == "snapshot_side_effects":
+                    self.result_ready.emit(
+                        process_snapshot_side_effects(
+                            dict(task.get("snapshot", {}) or {}),
+                            task.get("config"),
+                            run_backtest=bool(task.get("run_backtest", False)),
+                        )
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self.error_signal.emit(str(exc))
 
 
 class MetalMonitorWindow(QMainWindow):
@@ -169,13 +277,16 @@ class MetalMonitorWindow(QMainWindow):
         self._worker = None
         self._ai_worker = None
         self._knowledge_worker = None
+        self._snapshot_task_worker = None
         self._knowledge_sync_pending = False
+        self._pending_knowledge_snapshot_ids = set()
         self._polling_enabled = True
         self._last_snapshot = {}
         self._last_ai_auto_time = None  # 上次自动 AI 研判时间
         self._ai_auto_is_running = False  # 防止自动触发重叠
         self._last_external_source_warning_digest = ""
         self._build_ui()
+        self._start_background_task_worker()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh_snapshot)
         self._timer.start(self._config.refresh_interval_sec * 1000)
@@ -388,14 +499,46 @@ class MetalMonitorWindow(QMainWindow):
                 self._append_log(line)
         self._last_external_source_warning_digest = digest
 
-    def _schedule_knowledge_sync(self):
+    def _start_background_task_worker(self):
+        if self._snapshot_task_worker and self._snapshot_task_worker.isRunning():
+            return
+        self._snapshot_task_worker = BackgroundTaskWorker(self)
+        self._snapshot_task_worker.result_ready.connect(self._on_background_task_ready)
+        self._snapshot_task_worker.error_signal.connect(self._on_background_task_error)
+        self._snapshot_task_worker.start()
+
+    def _enqueue_snapshot_side_effects(self, snapshot: dict):
+        from datetime import datetime as _dt
+
+        run_backtest = False
+        _now = _dt.now()
+        _last = getattr(self, "_last_backtest_eval_time", None)
+        _interval_min = 10
+        if _last is None or (_now - _last).total_seconds() >= _interval_min * 60:
+            self._last_backtest_eval_time = _now
+            run_backtest = True
+        SNAPSHOT_TASK_QUEUE.put(
+            {
+                "kind": "snapshot_side_effects",
+                "snapshot": dict(snapshot or {}),
+                "config": copy.deepcopy(self._config),
+                "run_backtest": run_backtest,
+            }
+        )
+
+    def _schedule_knowledge_sync(self, snapshot_ids: list[int] | None = None):
+        for snapshot_id in list(snapshot_ids or []):
+            if int(snapshot_id or 0) > 0:
+                self._pending_knowledge_snapshot_ids.add(int(snapshot_id))
         if self._knowledge_worker and self._knowledge_worker.isRunning():
             if not self._knowledge_sync_pending:
                 self._append_log("[知识库] 后台回标仍在运行，本轮已标记为待续跑。")
             self._knowledge_sync_pending = True
             return
         self._knowledge_sync_pending = False
-        self._knowledge_worker = KnowledgeSyncWorker(self._config, self)
+        pending_ids = sorted(self._pending_knowledge_snapshot_ids)
+        self._pending_knowledge_snapshot_ids.clear()
+        self._knowledge_worker = KnowledgeSyncWorker(self._config, snapshot_ids=pending_ids, parent=self)
         self._knowledge_worker.result_ready.connect(self._on_knowledge_sync_ready)
         self._knowledge_worker.error_signal.connect(self._on_knowledge_sync_error)
         self._knowledge_worker.start()
@@ -418,6 +561,29 @@ class MetalMonitorWindow(QMainWindow):
         self._knowledge_worker = None
         self._append_log(f"[知识库] 后台回标失败：{str(message or '未知错误').strip()}")
         self._drain_pending_knowledge_sync()
+
+    def _on_background_task_ready(self, result: dict):
+        payload = dict(result or {})
+        for line in list(payload.get("log_lines", []) or []):
+            self._append_log(str(line or "").strip())
+        snapshot_ids = [
+            int(item)
+            for item in list(payload.get("snapshot_ids", []) or [])
+            if int(item or 0) > 0
+        ]
+        self._schedule_knowledge_sync(snapshot_ids=snapshot_ids)
+        if bool(payload.get("notify_status_changed", False)):
+            self._update_notify_status(self._last_snapshot)
+        if bool(payload.get("refresh_histories", False)):
+            self.left_panel.refresh_histories(self._last_snapshot)
+        if bool(payload.get("sim_data_changed", False)):
+            try:
+                self.sim_panel.update_data()
+            except Exception:
+                pass
+
+    def _on_background_task_error(self, message: str):
+        self._append_log(f"[后台任务] 执行失败：{str(message or '未知错误').strip()}")
 
     def toggle_polling(self):
         self._polling_enabled = not self._polling_enabled
@@ -492,69 +658,17 @@ class MetalMonitorWindow(QMainWindow):
         self.insight_panel.update_from_snapshot(snapshot)
         self.left_panel.update_from_snapshot(snapshot)
         self.right_table.update_from_snapshot(snapshot)
-
-        try:
-            knowledge_result = record_snapshot(snapshot)
-            if int(knowledge_result.get("inserted_count", 0) or 0) > 0:
-                self._append_log(f"[知识库] 已写入 {knowledge_result.get('inserted_count', 0)} 条市场快照样本。")
-                match_result = match_rules_to_snapshots(snapshot_ids=knowledge_result.get("inserted_snapshot_ids", []))
-                if int(match_result.get("matched_count", 0) or 0) > 0:
-                    self._append_log(f"[知识库] 已新增 {match_result.get('matched_count', 0)} 条规则-样本映射。")
-            self._schedule_knowledge_sync()
-        except Exception as exc:  # noqa: BLE001
-            self._append_log(f"[知识库] 写入或回标失败：{str(exc)}")
-
-        history_entries = build_snapshot_history_entries(snapshot)
-        history_count = append_history_entries(history_entries)
-        if history_count:
-            self._append_log(f"[提醒留痕] 新增 {history_count} 条关键提醒。")
-
-        notify_result = send_notifications(history_entries, self._config)
-        for line in notify_result.get("messages", []):
-            self._append_log(f"[消息推送] {line}")
-        for line in notify_result.get("errors", []):
-            self._append_log(f"[消息推送失败] {line}")
-
-        self.left_panel.refresh_histories(snapshot)
         self._append_log(
             f"[{snapshot.get('last_refresh_text', '--')}] "
             f"{snapshot.get('event_risk_mode_text', '正常观察')}（{snapshot.get('event_risk_mode_source_text', '手动模式')}） | "
             f"{snapshot.get('trade_grade', '只适合观察')} | "
             f"{snapshot.get('live_digest', '暂无有效报价')}"
         )
-        # 喂给模拟盘行情，监测是否爆仓/止损/止盈
-        live_prices = {}
-        for item in snapshot.get("items", []):
-            s = item.get("symbol")
-            p = item.get("latest_price")
-            if s and p:
-                live_prices[s] = float(p)
-        if live_prices:
-            SIM_ENGINE.update_prices(live_prices)
-            
-        # 刷新模拟盘战绩面板 UI
-        try:
-            self.sim_panel.update_data()
-        except Exception:
-            pass
-
+        self._enqueue_snapshot_side_effects(snapshot)
         self._log_external_source_status_changes(snapshot)
 
         # 快照完成后检查是否要自动触发 AI 研判
         self._check_ai_auto_brief()
-
-        # S-002 / N-007 修复：调用回测引擎评估历史 AI 信号，但限制频率（每10分钟最多一次）
-        try:
-            from backtest_engine import run_backtest_evaluations
-            from datetime import datetime as _dt
-            _now = _dt.now()
-            _last = getattr(self, "_last_backtest_eval_time", None)
-            _interval_min = 10  # 最小间隔10分钟
-            if _last is None or (_now - _last).total_seconds() >= _interval_min * 60:
-                self._last_backtest_eval_time = _now
-                run_backtest_evaluations()
-        except Exception as exc:  # noqa: BLE001
-            self._append_log(f"[回测引擎] 评估失败（非致命）：{exc}")
 
     def _on_snapshot_error(self, message: str):
         self._worker = None
@@ -739,5 +853,8 @@ class MetalMonitorWindow(QMainWindow):
             self._ai_worker.wait(1000)
         if self._knowledge_worker and self._knowledge_worker.isRunning():
             self._knowledge_worker.wait(1000)
+        if self._snapshot_task_worker and self._snapshot_task_worker.isRunning():
+            SNAPSHOT_TASK_QUEUE.put({"kind": "stop"})
+            self._snapshot_task_worker.wait(1500)
         shutdown_connection()
         super().closeEvent(event)

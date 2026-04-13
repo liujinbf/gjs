@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from knowledge_base import KNOWLEDGE_DB_FILE, init_knowledge_base
+from knowledge_base import KNOWLEDGE_DB_FILE, open_knowledge_connection
 
 SUPPORTED_RUNTIME_CATEGORIES = {"entry", "trend", "directional"}
 SKIP_RULE_MARKERS = {
@@ -57,10 +57,7 @@ DOMAIN_KEYWORDS = [
 
 def _connect(db_path: Path | str | None = None) -> sqlite3.Connection:
     target = Path(db_path) if db_path else KNOWLEDGE_DB_FILE
-    init_knowledge_base(db_path=target)
-    conn = sqlite3.connect(str(target))
-    conn.row_factory = sqlite3.Row
-    return conn
+    return open_knowledge_connection(target, ensure_schema=True)
 
 
 def _now_text(now: datetime | None = None) -> str:

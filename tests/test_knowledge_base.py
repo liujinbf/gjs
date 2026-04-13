@@ -4,7 +4,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from knowledge_base import extract_candidate_rules, import_markdown_source, seed_external_sources, summarize_knowledge_base
+from knowledge_base import (
+    extract_candidate_rules,
+    import_markdown_source,
+    open_knowledge_connection,
+    seed_external_sources,
+    summarize_knowledge_base,
+)
 from knowledge_sources import EXTERNAL_KNOWLEDGE_SOURCE_SEEDS
 
 
@@ -58,3 +64,14 @@ def test_seed_external_sources_registers_metadata_only(tmp_path):
     assert count == 3
     assert summary["source_count"] == 3
     assert summary["document_count"] == 0
+
+
+def test_knowledge_connection_uses_wal_mode(tmp_path):
+    db_path = tmp_path / "knowledge.db"
+
+    with open_knowledge_connection(db_path=db_path, ensure_schema=True) as conn:
+        journal_mode = str(conn.execute("PRAGMA journal_mode;").fetchone()[0]).lower()
+        synchronous = int(conn.execute("PRAGMA synchronous;").fetchone()[0])
+
+    assert journal_mode == "wal"
+    assert synchronous == 1
