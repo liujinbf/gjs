@@ -498,6 +498,9 @@ def test_build_snapshot_from_rows_exposes_risk_reward_fields_and_hides_inactive_
     assert xau["risk_reward_ratio"] > 0
     assert xau["risk_reward_stop_price"] > 0
     assert xau["risk_reward_target_price"] > 0
+    assert xau["risk_reward_target_price_2"] > xau["risk_reward_target_price"]
+    assert xau["risk_reward_position_text"]
+    assert xau["risk_reward_invalidation_text"]
     assert eur["latest_text"] == "--"
     assert "EURUSD" not in snapshot["live_digest"]
 

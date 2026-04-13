@@ -118,6 +118,10 @@ def _item_action_meta(item: dict, fallback_trade_meta: dict | None = None) -> di
         "risk_reward_ratio": float(item.get("risk_reward_ratio", 0.0) or 0.0),
         "stop_loss_price": float(item.get("risk_reward_stop_price", 0.0) or 0.0),
         "take_profit_1": float(item.get("risk_reward_target_price", 0.0) or 0.0),
+        "take_profit_2": float(item.get("risk_reward_target_price_2", 0.0) or 0.0),
+        "position_plan_text": _normalize_text(item.get("risk_reward_position_text", "")),
+        "entry_invalidation_text": _normalize_text(item.get("risk_reward_invalidation_text", "")),
+        "external_bias_note": _normalize_text(item.get("external_bias_note", "")),
         "rsi14": item.get("rsi14"),
         "ma20": item.get("ma20"),
         "ma50": item.get("ma50"),
@@ -130,6 +134,8 @@ def _item_action_meta(item: dict, fallback_trade_meta: dict | None = None) -> di
     }
     if result["take_profit_1"] <= 0:
         result.pop("take_profit_1", None)
+    if result["take_profit_2"] <= 0:
+        result.pop("take_profit_2", None)
     if result["stop_loss_price"] <= 0:
         result.pop("stop_loss_price", None)
     if result["risk_reward_ratio"] <= 0:
@@ -241,6 +247,9 @@ def _build_structure_entries(
             signal_side,
             _normalize_text(item.get("trade_grade_detail", "")),
             _normalize_text(item.get("risk_reward_context_text", "")),
+            _normalize_text(item.get("risk_reward_position_text", "")),
+            _normalize_text(item.get("risk_reward_invalidation_text", "")),
+            _normalize_text(item.get("external_bias_note", "")),
         ]
         event_note = _normalize_text(item.get("event_note", ""))
         if event_note:
@@ -261,6 +270,42 @@ def _build_structure_entries(
             )
         )
     return result
+
+
+def _build_external_source_entries(snapshot: dict, trade_meta: dict, snapshot_event_meta: dict) -> list[dict]:
+    occurred_at = str(snapshot.get("last_refresh_text", "") or "").strip()
+    entries = []
+    source_specs = [
+        ("event_feed_status_text", "source", "事件源状态提醒", "event_feed"),
+        ("macro_news_status_text", "source", "资讯流状态提醒", "macro_news"),
+        ("macro_data_status_text", "source", "宏观数据状态提醒", "macro_data"),
+    ]
+    for key, category, title, source_key in source_specs:
+        detail = _normalize_text(snapshot.get(key, ""))
+        if not detail:
+            continue
+        tone = ""
+        if "拉取失败" in detail:
+            tone = "warning"
+        elif any(keyword in detail for keyword in ("继续使用", "尚未配置", "未解析", "规格为空")):
+            tone = "accent"
+        if not tone:
+            continue
+        entries.append(
+            _build_entry(
+                category,
+                title,
+                detail,
+                tone,
+                occurred_at,
+                extra={
+                    "source_name": source_key,
+                    **trade_meta,
+                    **snapshot_event_meta,
+                },
+            )
+        )
+    return entries
 
 
 def build_snapshot_history_entries(snapshot: dict, history_file: Path | None = None) -> list[dict]:
@@ -343,6 +388,7 @@ def build_snapshot_history_entries(snapshot: dict, history_file: Path | None = N
                 extra={**trade_meta, **snapshot_event_meta},
             )
         )
+    entries.extend(_build_external_source_entries(snapshot, trade_meta, snapshot_event_meta))
     entries.extend(
         _build_spread_recovery_entries(
             snapshot,

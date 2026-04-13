@@ -205,6 +205,30 @@ def test_pick_notify_entries_allows_structure_entry_when_risk_reward_is_good():
     shutil.rmtree(state_dir)
 
 
+def test_pick_notify_entries_allows_source_alert_entry():
+    state_dir = ROOT / ".runtime_test_notify_source"
+    if state_dir.exists():
+        shutil.rmtree(state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_file = state_dir / "notify_state.json"
+
+    entries = [
+        {
+            "occurred_at": "2026-04-12 10:20:00",
+            "category": "source",
+            "title": "宏观数据状态提醒",
+            "detail": "结构化宏观数据拉取失败：timeout",
+            "tone": "warning",
+            "signature": "source-1",
+            "source_name": "macro_data",
+        }
+    ]
+    picked = notification.pick_notify_entries(entries, _build_config(), state_file=state_file)
+    assert len(picked) == 1
+    assert picked[0]["title"] == "宏观数据状态提醒"
+    shutil.rmtree(state_dir)
+
+
 def test_send_notifications_aggregates_same_group_entries(monkeypatch):
     state_dir = ROOT / ".runtime_test_notify_aggregate"
     if state_dir.exists():
@@ -435,14 +459,22 @@ def test_build_markdown_includes_risk_reward_action_levels():
             "detail": "结构和报价相对干净。",
             "trade_grade": "可轻仓试仓",
             "trade_grade_detail": "可作为候选机会观察。",
+            "external_bias_note": "宏观数据：美国10年期实际利率 当前值 1.85，较前值 -0.06，背景偏多",
             "risk_reward_ratio": 2.4,
             "stop_loss_price": 4748.0,
             "take_profit_1": 4788.0,
+            "take_profit_2": 4810.0,
+            "position_plan_text": "可轻仓试仓，优先分两段止盈，第一目标落袋后再看延续。",
+            "entry_invalidation_text": "若价格重新跌回 4748.00 下方，当前多头结构可视为失效。",
         }
     )
+    assert "外部背景：宏观数据：美国10年期实际利率 当前值 1.85，较前值 -0.06，背景偏多" in markdown
     assert "预算盈亏比：1:2.40" in markdown
     assert "止损位：4,748.00" in markdown
     assert "目标位1：4,788.00" in markdown
+    assert "目标位2：4,810.00" in markdown
+    assert "仓位节奏：可轻仓试仓，优先分两段止盈，第一目标落袋后再看延续。" in markdown
+    assert "失效条件：若价格重新跌回 4748.00 下方，当前多头结构可视为失效。" in markdown
 
 
 def test_send_test_notification_returns_channel_messages(monkeypatch):

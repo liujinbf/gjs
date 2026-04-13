@@ -87,6 +87,9 @@ def test_build_snapshot_history_entries_adds_structure_entry_with_action_meta():
                 "risk_reward_context_text": "多头预估止损 4748.00，目标 4788.00，当前盈亏比约 2.40:1",
                 "risk_reward_stop_price": 4748.0,
                 "risk_reward_target_price": 4788.0,
+                "risk_reward_target_price_2": 4810.0,
+                "risk_reward_position_text": "可轻仓试仓，优先分两段止盈，第一目标落袋后再看延续。",
+                "risk_reward_invalidation_text": "若价格重新跌回 4748.00 下方，当前多头结构可视为失效。",
             }
         ],
         "alert_text": "",
@@ -98,6 +101,30 @@ def test_build_snapshot_history_entries_adds_structure_entry_with_action_meta():
     assert structure_entry["risk_reward_ratio"] == 2.4
     assert structure_entry["stop_loss_price"] == 4748.0
     assert structure_entry["take_profit_1"] == 4788.0
+    assert structure_entry["take_profit_2"] == 4810.0
+    assert "两段止盈" in structure_entry["position_plan_text"]
+
+
+def test_build_snapshot_history_entries_adds_external_source_alerts():
+    snapshot = {
+        "last_refresh_text": "2026-04-12 12:00:00",
+        "trade_grade": "只适合观察",
+        "trade_grade_detail": "先观察。",
+        "trade_next_review": "等待数据恢复。",
+        "runtime_status_cards": [],
+        "spread_focus_cards": [],
+        "items": [],
+        "alert_text": "",
+        "macro_news_status_text": "外部资讯流拉取失败：network timeout",
+        "macro_data_status_text": "结构化宏观数据拉取失败，继续使用20分钟前缓存：2 条。",
+    }
+    entries = build_snapshot_history_entries(snapshot)
+    titles = [item["title"] for item in entries]
+    assert "资讯流状态提醒" in titles
+    assert "宏观数据状态提醒" in titles
+    source_entry = next(item for item in entries if item["title"] == "资讯流状态提醒")
+    assert source_entry["category"] == "source"
+    assert source_entry["tone"] == "warning"
 
 
 def test_append_history_entries_dedupes_recent_signatures():

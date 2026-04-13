@@ -27,6 +27,9 @@ def _build_markdown(entry: dict) -> str:
     event_importance_text = _normalize_text(entry.get("event_importance_text", ""))
     event_scope_text      = _normalize_text(entry.get("event_scope_text", ""))
     event_note            = _normalize_text(entry.get("event_note", ""))
+    external_bias_note    = _normalize_text(entry.get("external_bias_note", ""))
+    position_plan_text    = _normalize_text(entry.get("position_plan_text", ""))
+    entry_invalidation_text = _normalize_text(entry.get("entry_invalidation_text", ""))
     aggregate_count       = int(entry.get("aggregate_count", 0) or 0)
     notify_mode_text      = _normalize_text(entry.get("notify_mode_text", ""))
 
@@ -50,7 +53,7 @@ def _build_markdown(entry: dict) -> str:
     # ── 分类 emoji 映射 ──
     CATEGORY_EMOJI = {
         "spread": "⚠️", "recovery": "✅", "structure": "📐",
-        "event": "📅", "ai": "🤖", "general": "📊",
+        "event": "📅", "source": "🛰️", "ai": "🤖", "general": "📊",
     }
     emoji = CATEGORY_EMOJI.get(category, "📊")
 
@@ -110,6 +113,8 @@ def _build_markdown(entry: dict) -> str:
         action_lines.append(f"  - 建议：**{trade_grade}**")
     if trade_grade_detail:
         action_lines.append(f"  - 原因：{trade_grade_detail}")
+    if external_bias_note:
+        action_lines.append(f"  - 外部背景：{external_bias_note}")
     if risk_reward_ratio:
         try:
             action_lines.append(f"  - 预算盈亏比：1:{float(risk_reward_ratio):.2f}")
@@ -130,6 +135,10 @@ def _build_markdown(entry: dict) -> str:
             action_lines.append(f"  - 目标位2：{float(take_profit_2):,.2f}")
         except (TypeError, ValueError):
             pass
+    if position_plan_text:
+        action_lines.append(f"  - 仓位节奏：{position_plan_text}")
+    if entry_invalidation_text:
+        action_lines.append(f"  - 失效条件：{entry_invalidation_text}")
     if trade_next_review:
         action_lines.append(f"  - 下次复核：{trade_next_review}")
     if action_lines:
