@@ -1,0 +1,84 @@
+[
+  {
+    "provider": "fred",
+    "name": "美国10年期实际利率（黄金/白银）",
+    "series_id": "DFII10",
+    "api_key_env": "FRED_API_KEY",
+    "symbols": ["XAUUSD", "XAGUSD"],
+    "importance": "high",
+    "bias_mode": "higher_bearish"
+  },
+  {
+    "provider": "fred",
+    "name": "美国10年期国债收益率（黄金/白银）",
+    "series_id": "DGS10",
+    "api_key_env": "FRED_API_KEY",
+    "symbols": ["XAUUSD", "XAGUSD"],
+    "importance": "high",
+    "bias_mode": "higher_bearish"
+  },
+  {
+    "provider": "fred",
+    "name": "联邦基金有效利率（黄金/白银）",
+    "series_id": "DFF",
+    "api_key_env": "FRED_API_KEY",
+    "symbols": ["XAUUSD", "XAGUSD"],
+    "importance": "medium",
+    "bias_mode": "higher_bearish"
+  },
+  {
+    "provider": "bls",
+    "name": "美国失业率（黄金/白银/EURUSD）",
+    "series_id": "LNS14000000",
+    "registration_key_env": "BLS_API_KEY",
+    "start_year": 2025,
+    "end_year": 2026,
+    "symbols": ["XAUUSD", "XAGUSD", "EURUSD"],
+    "importance": "high",
+    "bias_mode": "lower_bearish"
+  },
+  {
+    "provider": "bls",
+    "name": "美国失业率（USDJPY）",
+    "series_id": "LNS14000000",
+    "registration_key_env": "BLS_API_KEY",
+    "start_year": 2025,
+    "end_year": 2026,
+    "symbols": ["USDJPY"],
+    "importance": "high",
+    "bias_mode": "lower_bullish"
+  },
+  {
+    "provider": "bls",
+    "name": "美国总非农就业人数（黄金/白银/EURUSD）",
+    "series_id": "CES0000000001",
+    "registration_key_env": "BLS_API_KEY",
+    "start_year": 2025,
+    "end_year": 2026,
+    "symbols": ["XAUUSD", "XAGUSD", "EURUSD"],
+    "importance": "high",
+    "bias_mode": "higher_bearish"
+  },
+  {
+    "provider": "bls",
+    "name": "美国总非农就业人数（USDJPY）",
+    "series_id": "CES0000000001",
+    "registration_key_env": "BLS_API_KEY",
+    "start_year": 2025,
+    "end_year": 2026,
+    "symbols": ["USDJPY"],
+    "importance": "high",
+    "bias_mode": "higher_bullish"
+  },
+  {
+    "provider": "treasury",
+    "name": "美国10年期实际收益率（Treasury直连）",
+    "url": "https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v1/accounting/od/avg_interest_rates?filter=security_desc:eq:Treasury%20Inflation-Protected%20Securities%20(TIPS),record_date:gte:2025-01-01&sort=-record_date&page[size]=2",
+    "value_field": "avg_interest_rate_amt",
+    "time_field": "record_date",
+    "source_label": "U.S. Treasury FiscalData",
+    "symbols": ["XAUUSD", "XAGUSD"],
+    "importance": "medium",
+    "bias_mode": "higher_bearish"
+  }
+]

@@ -37,16 +37,33 @@ def _dedupe_keep_order(items):
             result.append(item)
     return result
 
+# 常见品种的中文别名映射辞典
+SYMBOL_ALIAS_MAP = {
+    "黄金": "XAUUSD",
+    "白银": "XAGUSD",
+    "欧美": "EURUSD",
+    "欧元": "EURUSD",
+    "美日": "USDJPY",
+    "日元": "USDJPY",
+    "磅美": "GBPUSD",
+    "镑美": "GBPUSD",
+    "英镑": "GBPUSD",
+    "澳美": "AUDUSD",
+    "原油": "USOIL",
+    "比特币": "BTCUSD",
+    "以太坊": "ETHUSD",
+}
 
 def extract_supported_symbols(raw_text: str) -> list[str]:
-    """过滤并去重，仅保留项目支持的 MT5 标准品种。"""
+    """过滤并去重，保留用户输入的品种，支持中文别名转换。"""
     raw = str(raw_text or "").replace("；", ",").replace("，", ",").replace(" ", ",")
-    allowed = {"XAUUSD", "XAGUSD", "EURUSD", "USDJPY"}
     cleaned = []
     for item in raw.split(","):
-        symbol = str(item or "").strip().upper()
-        if symbol in allowed:
-            cleaned.append(symbol)
+        symbol = str(item or "").strip()
+        if symbol:
+            # 先去映射表里找找有没有匹配的中文（部分大写化不影响中文）
+            mapped_symbol = SYMBOL_ALIAS_MAP.get(symbol, symbol).upper()
+            cleaned.append(mapped_symbol)
     return _dedupe_keep_order(cleaned)
 
 
@@ -75,10 +92,22 @@ class MetalMonitorConfig:
     ai_model: str
     ai_push_enabled: bool
     ai_push_summary_only: bool
+    ai_auto_interval_min: int = 0
     event_auto_mode_enabled: bool = False
     event_schedule_text: str = ""
     event_pre_window_min: int = 30
     event_post_window_min: int = 15
+    event_feed_enabled: bool = False
+    event_feed_url: str = ""
+    event_feed_refresh_min: int = 60
+    macro_news_feed_enabled: bool = False
+    macro_news_feed_urls: str = ""
+    macro_news_feed_refresh_min: int = 30
+    macro_data_feed_enabled: bool = False
+    macro_data_feed_specs: str = ""
+    macro_data_feed_refresh_min: int = 60
+    learning_push_enabled: bool = False
+    learning_push_min_interval_hour: int = 12
 
 
 def _clean_env_value(value: object) -> str:
@@ -206,6 +235,25 @@ def get_runtime_config() -> MetalMonitorConfig:
         event_post_window_min = max(5, int(str(os.getenv("EVENT_POST_WINDOW_MIN", "15") or "15").strip()))
     except ValueError:
         event_post_window_min = 15
+    try:
+        event_feed_refresh_min = max(5, int(str(os.getenv("EVENT_FEED_REFRESH_MIN", "60") or "60").strip()))
+    except ValueError:
+        event_feed_refresh_min = 60
+    try:
+        macro_news_feed_refresh_min = max(5, int(str(os.getenv("MACRO_NEWS_FEED_REFRESH_MIN", "30") or "30").strip()))
+    except ValueError:
+        macro_news_feed_refresh_min = 30
+    try:
+        macro_data_feed_refresh_min = max(5, int(str(os.getenv("MACRO_DATA_FEED_REFRESH_MIN", "60") or "60").strip()))
+    except ValueError:
+        macro_data_feed_refresh_min = 60
+    try:
+        learning_push_min_interval_hour = max(
+            1,
+            int(str(os.getenv("LEARNING_PUSH_MIN_INTERVAL_HOUR", "12") or "12").strip()),
+        )
+    except ValueError:
+        learning_push_min_interval_hour = 12
 
     return MetalMonitorConfig(
         symbols=symbols,
@@ -223,11 +271,29 @@ def get_runtime_config() -> MetalMonitorConfig:
         ai_model=str(os.getenv("AI_MODEL", "deepseek-ai/DeepSeek-R1") or "deepseek-ai/DeepSeek-R1").strip(),
         ai_push_enabled=_parse_bool_env("AI_PUSH_ENABLED", default=False),
         ai_push_summary_only=_parse_bool_env("AI_PUSH_SUMMARY_ONLY", default=True),
+        ai_auto_interval_min=max(0, int(str(os.getenv("AI_AUTO_INTERVAL_MIN", "0") or "0").strip() or "0")),
         event_auto_mode_enabled=_parse_bool_env("EVENT_AUTO_MODE_ENABLED", default=False),
         event_schedule_text=str(os.getenv("EVENT_SCHEDULES", "") or "").strip(),
         event_pre_window_min=event_pre_window_min,
         event_post_window_min=event_post_window_min,
+        event_feed_enabled=_parse_bool_env("EVENT_FEED_ENABLED", default=False),
+        event_feed_url=str(os.getenv("EVENT_FEED_URL", "") or "").strip(),
+        event_feed_refresh_min=event_feed_refresh_min,
+        macro_news_feed_enabled=_parse_bool_env("MACRO_NEWS_FEED_ENABLED", default=False),
+        macro_news_feed_urls=str(os.getenv("MACRO_NEWS_FEED_URLS", "") or "").strip(),
+        macro_news_feed_refresh_min=macro_news_feed_refresh_min,
+        macro_data_feed_enabled=_parse_bool_env("MACRO_DATA_FEED_ENABLED", default=False),
+        macro_data_feed_specs=str(os.getenv("MACRO_DATA_FEED_SPECS", "") or "").strip(),
+        macro_data_feed_refresh_min=macro_data_feed_refresh_min,
+        learning_push_enabled=_parse_bool_env("LEARNING_PUSH_ENABLED", default=False),
+        learning_push_min_interval_hour=learning_push_min_interval_hour,
     )
+
+
+def _set_env_key(key: str, value: str) -> None:
+    """同步写入 .env 文件与内存环境变量，消除重复赋值。"""
+    set_key(str(ENV_FILE), key, value)
+    os.environ[key] = value
 
 
 def save_runtime_config(config: MetalMonitorConfig) -> None:
@@ -236,44 +302,35 @@ def save_runtime_config(config: MetalMonitorConfig) -> None:
         ENV_FILE.write_text("", encoding="utf-8")
 
     symbols_text = ",".join(normalize_symbols(",".join(config.symbols)))
-    set_key(str(ENV_FILE), "TARGET_SYMBOLS", symbols_text)
-    set_key(str(ENV_FILE), "REFRESH_INTERVAL_SEC", str(max(5, int(config.refresh_interval_sec))))
-    set_key(str(ENV_FILE), "EVENT_RISK_MODE", normalize_event_risk_mode(config.event_risk_mode))
-    set_key(str(ENV_FILE), "MT5_PATH", str(config.mt5_path or "").strip())
-    set_key(str(ENV_FILE), "MT5_LOGIN", str(config.mt5_login or "").strip())
-    set_key(str(ENV_FILE), "MT5_PASSWORD", str(config.mt5_password or "").strip())
-    set_key(str(ENV_FILE), "MT5_SERVER", str(config.mt5_server or "").strip())
-    set_key(str(ENV_FILE), "DINGTALK_WEBHOOK", str(config.dingtalk_webhook or "").strip())
-    set_key(str(ENV_FILE), "PUSHPLUS_TOKEN", str(config.pushplus_token or "").strip())
-    set_key(str(ENV_FILE), "NOTIFY_COOLDOWN_MIN", str(max(5, int(config.notify_cooldown_min))))
-    set_key(str(ENV_FILE), "AI_API_KEY", str(config.ai_api_key or "").strip())
-    set_key(str(ENV_FILE), "AI_API_BASE", str(config.ai_api_base or "").strip())
-    set_key(str(ENV_FILE), "AI_MODEL", str(config.ai_model or "").strip())
-    set_key(str(ENV_FILE), "AI_PUSH_ENABLED", "1" if bool(config.ai_push_enabled) else "0")
-    set_key(str(ENV_FILE), "AI_PUSH_SUMMARY_ONLY", "1" if bool(config.ai_push_summary_only) else "0")
-    set_key(str(ENV_FILE), "EVENT_AUTO_MODE_ENABLED", "1" if bool(config.event_auto_mode_enabled) else "0")
-    set_key(str(ENV_FILE), "EVENT_SCHEDULES", str(config.event_schedule_text or "").strip())
-    set_key(str(ENV_FILE), "EVENT_PRE_WINDOW_MIN", str(max(5, int(config.event_pre_window_min))))
-    set_key(str(ENV_FILE), "EVENT_POST_WINDOW_MIN", str(max(5, int(config.event_post_window_min))))
-    set_key(str(ENV_FILE), LEGACY_MIGRATION_DONE_KEY, "1")
-
-    os.environ["TARGET_SYMBOLS"] = symbols_text
-    os.environ["REFRESH_INTERVAL_SEC"] = str(max(5, int(config.refresh_interval_sec)))
-    os.environ["EVENT_RISK_MODE"] = normalize_event_risk_mode(config.event_risk_mode)
-    os.environ["MT5_PATH"] = str(config.mt5_path or "").strip()
-    os.environ["MT5_LOGIN"] = str(config.mt5_login or "").strip()
-    os.environ["MT5_PASSWORD"] = str(config.mt5_password or "").strip()
-    os.environ["MT5_SERVER"] = str(config.mt5_server or "").strip()
-    os.environ["DINGTALK_WEBHOOK"] = str(config.dingtalk_webhook or "").strip()
-    os.environ["PUSHPLUS_TOKEN"] = str(config.pushplus_token or "").strip()
-    os.environ["NOTIFY_COOLDOWN_MIN"] = str(max(5, int(config.notify_cooldown_min)))
-    os.environ["AI_API_KEY"] = str(config.ai_api_key or "").strip()
-    os.environ["AI_API_BASE"] = str(config.ai_api_base or "").strip()
-    os.environ["AI_MODEL"] = str(config.ai_model or "").strip()
-    os.environ["AI_PUSH_ENABLED"] = "1" if bool(config.ai_push_enabled) else "0"
-    os.environ["AI_PUSH_SUMMARY_ONLY"] = "1" if bool(config.ai_push_summary_only) else "0"
-    os.environ["EVENT_AUTO_MODE_ENABLED"] = "1" if bool(config.event_auto_mode_enabled) else "0"
-    os.environ["EVENT_SCHEDULES"] = str(config.event_schedule_text or "").strip()
-    os.environ["EVENT_PRE_WINDOW_MIN"] = str(max(5, int(config.event_pre_window_min)))
-    os.environ["EVENT_POST_WINDOW_MIN"] = str(max(5, int(config.event_post_window_min)))
-    os.environ[LEGACY_MIGRATION_DONE_KEY] = "1"
+    _set_env_key("TARGET_SYMBOLS", symbols_text)
+    _set_env_key("REFRESH_INTERVAL_SEC", str(max(5, int(config.refresh_interval_sec))))
+    _set_env_key("EVENT_RISK_MODE", normalize_event_risk_mode(config.event_risk_mode))
+    _set_env_key("MT5_PATH", str(config.mt5_path or "").strip())
+    _set_env_key("MT5_LOGIN", str(config.mt5_login or "").strip())
+    _set_env_key("MT5_PASSWORD", str(config.mt5_password or "").strip())
+    _set_env_key("MT5_SERVER", str(config.mt5_server or "").strip())
+    _set_env_key("DINGTALK_WEBHOOK", str(config.dingtalk_webhook or "").strip())
+    _set_env_key("PUSHPLUS_TOKEN", str(config.pushplus_token or "").strip())
+    _set_env_key("NOTIFY_COOLDOWN_MIN", str(max(5, int(config.notify_cooldown_min))))
+    _set_env_key("AI_API_KEY", str(config.ai_api_key or "").strip())
+    _set_env_key("AI_API_BASE", str(config.ai_api_base or "").strip())
+    _set_env_key("AI_MODEL", str(config.ai_model or "").strip())
+    _set_env_key("AI_PUSH_ENABLED", "1" if bool(config.ai_push_enabled) else "0")
+    _set_env_key("AI_PUSH_SUMMARY_ONLY", "1" if bool(config.ai_push_summary_only) else "0")
+    _set_env_key("AI_AUTO_INTERVAL_MIN", str(max(0, int(config.ai_auto_interval_min))))
+    _set_env_key("EVENT_AUTO_MODE_ENABLED", "1" if bool(config.event_auto_mode_enabled) else "0")
+    _set_env_key("EVENT_SCHEDULES", str(config.event_schedule_text or "").strip())
+    _set_env_key("EVENT_PRE_WINDOW_MIN", str(max(5, int(config.event_pre_window_min))))
+    _set_env_key("EVENT_POST_WINDOW_MIN", str(max(5, int(config.event_post_window_min))))
+    _set_env_key("EVENT_FEED_ENABLED", "1" if bool(config.event_feed_enabled) else "0")
+    _set_env_key("EVENT_FEED_URL", str(config.event_feed_url or "").strip())
+    _set_env_key("EVENT_FEED_REFRESH_MIN", str(max(5, int(config.event_feed_refresh_min))))
+    _set_env_key("MACRO_NEWS_FEED_ENABLED", "1" if bool(config.macro_news_feed_enabled) else "0")
+    _set_env_key("MACRO_NEWS_FEED_URLS", str(config.macro_news_feed_urls or "").strip())
+    _set_env_key("MACRO_NEWS_FEED_REFRESH_MIN", str(max(5, int(config.macro_news_feed_refresh_min))))
+    _set_env_key("MACRO_DATA_FEED_ENABLED", "1" if bool(config.macro_data_feed_enabled) else "0")
+    _set_env_key("MACRO_DATA_FEED_SPECS", str(config.macro_data_feed_specs or "").strip())
+    _set_env_key("MACRO_DATA_FEED_REFRESH_MIN", str(max(5, int(config.macro_data_feed_refresh_min))))
+    _set_env_key("LEARNING_PUSH_ENABLED", "1" if bool(config.learning_push_enabled) else "0")
+    _set_env_key("LEARNING_PUSH_MIN_INTERVAL_HOUR", str(max(1, int(config.learning_push_min_interval_hour))))
+    _set_env_key(LEGACY_MIGRATION_DONE_KEY, "1")

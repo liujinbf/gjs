@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from app_config import PROJECT_DIR
+from runtime_utils import parse_time as _parse_time_impl
 
 RUNTIME_DIR = PROJECT_DIR / ".runtime"
 AI_HISTORY_FILE = RUNTIME_DIR / "ai_brief_history.jsonl"
@@ -49,6 +50,7 @@ def build_ai_history_entry(result: dict, snapshot: dict, push_result: dict | Non
         "symbols": symbols,
         "summary_line": _pick_summary_line(content),
         "content": content,
+        "rulebook_summary_text": _normalize_text((result or {}).get("rulebook_summary_text", "")),
         "snapshot_time": str((snapshot or {}).get("last_refresh_text", "") or "").strip(),
         "status_hint": _normalize_text((snapshot or {}).get("status_hint", "")),
         "alert_text": _normalize_text((snapshot or {}).get("alert_text", "")),
@@ -116,16 +118,9 @@ def read_recent_ai_history(limit: int = 5, history_file: Path | None = None) -> 
     return list(reversed(result))
 
 
+# P-004 修复：局部 _parse_time 委托给公共 runtime_utils.parse_time，消除重复定义
 def _parse_time(value: str) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
-        try:
-            return datetime.strptime(text, fmt)
-        except ValueError:
-            continue
-    return None
+    return _parse_time_impl(value)
 
 
 def summarize_recent_ai_history(days: int = 7, history_file: Path | None = None, now: datetime | None = None) -> dict:

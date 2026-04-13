@@ -29,6 +29,9 @@ def test_build_snapshot_history_entries_collects_spread_macro_and_session_items(
             {"title": "XAUUSD 点差高警戒", "detail": "当前点差明显放大。", "tone": "warning"},
             {"title": "点差状态稳定", "detail": "当前稳定。", "tone": "success"},
         ],
+        "event_risk_mode_text": "事件前高敏",
+        "event_active_name": "美国 CPI",
+        "event_active_time_text": "2026-04-12 20:30:00",
         "items": [
             {
                 "symbol": "XAUUSD",
@@ -37,6 +40,9 @@ def test_build_snapshot_history_entries_collects_spread_macro_and_session_items(
                 "trade_grade": "当前不宜出手",
                 "trade_grade_detail": "点差明显放大，先不要追单。",
                 "trade_next_review": "等点差恢复正常后再看。",
+                "event_importance_text": "高影响",
+                "event_scope_text": "XAUUSD",
+                "event_note": "高影响窗口：美国 CPI 将于 2026-04-12 20:30:00 落地，当前品种先别抢第一脚。",
             }
         ],
         "alert_text": "贵金属提醒：非农前后先盯点差。",
@@ -49,6 +55,8 @@ def test_build_snapshot_history_entries_collects_spread_macro_and_session_items(
     assert "点差状态稳定" not in titles
     spread_entry = next(item for item in entries if item["title"] == "XAUUSD 点差高警戒")
     assert spread_entry["trade_grade"] == "当前不宜出手"
+    assert spread_entry["event_importance_text"] == "高影响"
+    assert "高影响窗口" in spread_entry["event_note"]
     macro_entry = next(item for item in entries if item["title"] == "宏观提醒")
     assert macro_entry["trade_grade"] == "等待事件落地"
 
@@ -101,6 +109,14 @@ def test_summarize_recent_history_aggregates_categories():
             "signature": "macro-1",
         },
         {
+            "occurred_at": "2026-04-11 14:30:00",
+            "category": "recovery",
+            "title": "XAUUSD 点差已恢复",
+            "detail": "当前点差已回落。",
+            "tone": "success",
+            "signature": "recovery-1",
+        },
+        {
             "occurred_at": "2026-04-12 07:45:00",
             "category": "session",
             "title": "休市 / 暂停提醒",
@@ -109,14 +125,120 @@ def test_summarize_recent_history_aggregates_categories():
             "signature": "session-1",
         },
     ]
-    assert append_history_entries(entries, history_file=history_file) == 3
+    assert append_history_entries(entries, history_file=history_file) == 4
     stats = summarize_recent_history(days=7, history_file=history_file, now=datetime(2026, 4, 12, 12, 0, 0))
-    assert stats["total_count"] == 3
+    assert stats["total_count"] == 4
     assert stats["spread_count"] == 1
+    assert stats["recovery_count"] == 1
     assert stats["macro_count"] == 1
     assert stats["session_count"] == 1
     assert stats["latest_title"] == "休市 / 暂停提醒"
-    assert "最近 7 天共记录 3 条关键提醒" in stats["summary_text"]
+    assert "最近 7 天共记录 4 条关键提醒" in stats["summary_text"]
+    shutil.rmtree(history_dir)
+
+
+def test_build_snapshot_history_entries_adds_spread_recovery_when_latest_event_was_spread():
+    history_dir = ROOT / ".runtime_test_recovery"
+    if history_dir.exists():
+        shutil.rmtree(history_dir)
+    history_dir.mkdir(parents=True, exist_ok=True)
+    history_file = history_dir / "alert_history.jsonl"
+    append_history_entries(
+        [
+            {
+                "occurred_at": "2026-04-12 10:00:00",
+                "category": "spread",
+                "title": "XAUUSD 点差高警戒",
+                "detail": "当前点差明显放大。",
+                "tone": "warning",
+                "signature": "spread-recovery-source",
+                "symbol": "XAUUSD",
+            }
+        ],
+        history_file=history_file,
+    )
+
+    snapshot = {
+        "last_refresh_text": "2026-04-12 10:20:00",
+        "trade_grade": "可轻仓试仓",
+        "trade_grade_detail": "报价重新干净。",
+        "trade_next_review": "继续观察。",
+        "runtime_status_cards": [],
+        "spread_focus_cards": [{"title": "点差状态稳定", "detail": "当前稳定。", "tone": "success"}],
+        "items": [
+            {
+                "symbol": "XAUUSD",
+                "latest_price": 4759.82,
+                "spread_points": 18.0,
+                "tone": "success",
+                "has_live_quote": True,
+                "trade_grade": "可轻仓试仓",
+                "trade_grade_detail": "报价重新干净。",
+                "trade_next_review": "继续观察。",
+            }
+        ],
+        "alert_text": "",
+    }
+    entries = build_snapshot_history_entries(snapshot, history_file=history_file)
+    recovery_entry = next(item for item in entries if item["category"] == "recovery")
+    assert recovery_entry["title"] == "XAUUSD 点差已恢复"
+    assert "已明显收敛" in recovery_entry["detail"]
+    shutil.rmtree(history_dir)
+
+
+def test_build_snapshot_history_entries_skips_recovery_when_latest_event_already_recovered():
+    history_dir = ROOT / ".runtime_test_recovery_skip"
+    if history_dir.exists():
+        shutil.rmtree(history_dir)
+    history_dir.mkdir(parents=True, exist_ok=True)
+    history_file = history_dir / "alert_history.jsonl"
+    append_history_entries(
+        [
+            {
+                "occurred_at": "2026-04-12 10:00:00",
+                "category": "spread",
+                "title": "XAUUSD 点差高警戒",
+                "detail": "当前点差明显放大。",
+                "tone": "warning",
+                "signature": "spread-recovery-old",
+                "symbol": "XAUUSD",
+            },
+            {
+                "occurred_at": "2026-04-12 10:10:00",
+                "category": "recovery",
+                "title": "XAUUSD 点差已恢复",
+                "detail": "当前点差已回落。",
+                "tone": "success",
+                "signature": "spread-recovery-new",
+                "symbol": "XAUUSD",
+            },
+        ],
+        history_file=history_file,
+    )
+
+    snapshot = {
+        "last_refresh_text": "2026-04-12 10:20:00",
+        "trade_grade": "可轻仓试仓",
+        "trade_grade_detail": "报价重新干净。",
+        "trade_next_review": "继续观察。",
+        "runtime_status_cards": [],
+        "spread_focus_cards": [{"title": "点差状态稳定", "detail": "当前稳定。", "tone": "success"}],
+        "items": [
+            {
+                "symbol": "XAUUSD",
+                "latest_price": 4759.82,
+                "spread_points": 18.0,
+                "tone": "success",
+                "has_live_quote": True,
+                "trade_grade": "可轻仓试仓",
+                "trade_grade_detail": "报价重新干净。",
+                "trade_next_review": "继续观察。",
+            }
+        ],
+        "alert_text": "",
+    }
+    entries = build_snapshot_history_entries(snapshot, history_file=history_file)
+    assert not any(item["category"] == "recovery" for item in entries)
     shutil.rmtree(history_dir)
 
 

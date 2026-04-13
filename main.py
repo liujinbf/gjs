@@ -9,6 +9,11 @@ from ui import MetalMonitorWindow
 def main() -> int:
     load_project_env()
     app = QApplication(sys.argv)
+    
+    # 注入全局现代化样式
+    import style
+    app.setStyleSheet(style.GLOBAL_APP_STYLE)
+    
     window = MetalMonitorWindow()
     window.show()
     return app.exec()

@@ -1,9 +1,33 @@
+# === 敏感配置（绝不入库）===
 .env
+.env.local
+.env.*.local
+
+# === 运行时状态与数据（本地生成，不入库）===
 .runtime/
 .test_sandbox/
+.runtime_test_*/
+新建文件夹/
+
+# === 知识库与数据库（含用户数据，不入库）===
+*.sqlite
+*.sqlite3
+*.db
+
+# === 日志文件 ===
+*.log
+error_log.txt
+
+# === Python 编译缓存 ===
 .pytest_cache/
 __pycache__/
 tests/__pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# === IDE/系统文件 ===
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

@@ -34,6 +34,7 @@
 - 当前“事件窗口面板”提供的是结构性提醒，不是实时经济日历
 - `EVENT_RISK_MODE` 目前仍以手动切换为主，尚未接入自动事件识别
 - 现在已支持“事件计划驱动的自动纪律切换”，但事件时间仍需你手动维护
+- 现在也支持接入外部 JSON 事件源，并与手填计划合并；只是默认还没有内置第三方日历供应商
 
 ## 启动方式
 
@@ -59,6 +60,17 @@ python main.py
 - `EVENT_SCHEDULES`
 - `EVENT_PRE_WINDOW_MIN`
 - `EVENT_POST_WINDOW_MIN`
+- `EVENT_FEED_ENABLED`
+- `EVENT_FEED_URL`
+- `EVENT_FEED_REFRESH_MIN`
+- `MACRO_NEWS_FEED_ENABLED`
+- `MACRO_NEWS_FEED_URLS`
+- `MACRO_NEWS_FEED_REFRESH_MIN`
+- `MACRO_DATA_FEED_ENABLED`
+- `MACRO_DATA_FEED_SPECS`
+- `MACRO_DATA_FEED_REFRESH_MIN`
+- `LEARNING_PUSH_ENABLED`
+- `LEARNING_PUSH_MIN_INTERVAL_HOUR`
 - `DINGTALK_WEBHOOK`
 - `PUSHPLUS_TOKEN`
 - `NOTIFY_COOLDOWN_MIN`
@@ -81,6 +93,61 @@ python main.py
   - `2026-04-15 20:30|美国 CPI;2026-04-16 02:00|联储利率决议`
 - `EVENT_PRE_WINDOW_MIN` 控制事件前多久自动进入高敏阶段
 - `EVENT_POST_WINDOW_MIN` 控制事件后多久维持观察阶段
+- `EVENT_FEED_ENABLED=1` 后，可从外部 JSON 事件源自动拉取事件，并和手填 `EVENT_SCHEDULES` 合并
+- `EVENT_FEED_URL` 支持本地 JSON 文件路径或 `https://...` 地址，兼容以下结构：
+  - `[{"time":"2026-04-15 20:30","name":"美国 CPI","importance":"high","symbols":["XAUUSD","EURUSD"]}]`
+  - `{"events":[{"time":"2026-04-16T02:00:00+08:00","title":"联储利率决议","importance":"high","symbols":"XAUUSD,USDJPY"}]}`
+- 如果事件源同时提供结果值，也支持直接带：
+  - `actual`
+  - `forecast`
+  - `previous`
+  - `unit`
+  - `better_when`
+- `better_when` 可选：
+  - `higher_bullish`
+  - `higher_bearish`
+  - `lower_bullish`
+  - `lower_bearish`
+- 这样系统会把“数据结果偏多 / 偏空 / 中性”的解释直接并入快照摘要、AI 研判和后续推送链
+- `EVENT_FEED_REFRESH_MIN` 控制外部事件源缓存时长，避免每轮刷新都重复拉取
+- `MACRO_NEWS_FEED_ENABLED=1` 后，系统会读取外部 RSS / Atom 资讯流，并把高相关资讯摘要并入快照、AI 研判和学习推送链
+- `MACRO_NEWS_FEED_URLS` 支持用分号分隔多个 RSS / Atom 地址或本地 XML 文件，例如 ECB 的 `https://www.ecb.europa.eu/rss/press.html;https://www.ecb.europa.eu/rss/statpress.html`
+- `MACRO_NEWS_FEED_REFRESH_MIN` 控制资讯流缓存时长，避免每轮刷新都重复抓取
+- `MACRO_DATA_FEED_ENABLED=1` 后，系统会读取结构化宏观数据源，并把最新数值、前值变化和方向提示并入快照
+- `MACRO_DATA_FEED_SPECS` 建议填写本地 JSON 规格文件路径，里面可配置 `fred / bls / treasury / generic_json` 四类数据源
+- `MACRO_DATA_FEED_REFRESH_MIN` 控制结构化宏观数据缓存时长
+- 仓库内已经附带第一版官方规格样例：[macro_data_sources.official.json](/C:/Users/Administrator/Desktop/贵金属机器人/macro_data_sources.official.json)
+- 如果你准备直接试跑，可以把 `.env` 中的 `MACRO_DATA_FEED_SPECS` 指向 `macro_data_sources.official.json`
+- 其中 `FRED` 需要 `FRED_API_KEY`，`BLS` 可匿名调用但建议配置 `BLS_API_KEY` 以获得更稳定的频率和参数支持
+- `LEARNING_PUSH_ENABLED=1` 后，知识库在形成新的规则学习摘要时，会自动向已配置渠道推送一份精简学习日报
+
+结构化宏观数据规格示例：
+
+```json
+[
+  {
+    "provider": "fred",
+    "name": "美国10年期实际利率",
+    "series_id": "DFII10",
+    "api_key_env": "FRED_API_KEY",
+    "symbols": ["XAUUSD", "XAGUSD"],
+    "importance": "high",
+    "bias_mode": "higher_bearish"
+  },
+  {
+    "provider": "bls",
+    "name": "美国失业率",
+    "series_id": "LNS14000000",
+    "registration_key_env": "BLS_API_KEY",
+    "start_year": 2025,
+    "end_year": 2026,
+    "symbols": ["XAUUSD", "EURUSD", "USDJPY"],
+    "importance": "high",
+    "bias_mode": "lower_bullish"
+  }
+]
+```
+- `LEARNING_PUSH_MIN_INTERVAL_HOUR` 控制学习日报的最小推送间隔，避免规则刚有一点波动就反复刷屏
 - 如果你希望显式指定终端位置，可以填写 `MT5_PATH`
 - 如果需要主动提醒，可以填写 `DINGTALK_WEBHOOK` 或 `PUSHPLUS_TOKEN`
 - 推送默认只针对关键提醒（例如点差异常、MT5 断连、休市/流动性异常），并按 `NOTIFY_COOLDOWN_MIN` 节流

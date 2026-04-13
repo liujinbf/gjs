@@ -1,0 +1,398 @@
+"""
+提醒留痕存储：负责构造、写入和读取本地提醒历史。
+"""
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from app_config import PROJECT_DIR
+
+RUNTIME_DIR = PROJECT_DIR / ".runtime"
+HISTORY_FILE = RUNTIME_DIR / "alert_history.jsonl"
+MAX_HISTORY_LINES = 500
+
+
+def _normalize_text(value: str) -> str:
+    return " ".join(str(value or "").replace("\n", " ").split()).strip()
+
+
+def _build_price_bucket(price: float, bucket_size: float = 10.0) -> str:
+    """将价格映射到固定区间桶号，防止小幅噪音造成过度推送，同时允许行情出现明显移动后重新推送。"""
+    if price <= 0:
+        return "0"
+    return str(int(price / max(0.0001, float(bucket_size))))
+
+
+def _build_time_bucket() -> str:
+    """返回当前「小时」标识，同一小时内相同内容不重复推送，换个小时后允许重推。"""
+    return datetime.now().strftime("%Y%m%d%H")
+
+
+def _build_entry(category: str, title: str, detail: str, tone: str, occurred_at: str, extra: dict | None = None) -> dict:
+    clean_title = _normalize_text(title)
+    clean_detail = _normalize_text(detail)
+    clean_tone = str(tone or "neutral").strip() or "neutral"
+    extra_dict = extra or {}
+
+    # ── 动态签名：加入时间桶 + 价格桶，确保行情变化或新时段能重新推送 ──
+    # 时间桶：同一小时内同类提醒不重复，但每小时允许刷新一次
+    time_bucket = _build_time_bucket()
+    # 价格桶：价格变动超过 10 个点位即视为新状态（金/银/汇率通用，按绝对值取整即可）
+    price = float(extra_dict.get("baseline_latest_price", 0.0) or 0.0)
+    spread = float(extra_dict.get("baseline_spread_points", 0.0) or 0.0)
+    price_bucket = _build_price_bucket(price) if price > 0 else ""
+    spread_bucket = str(int(spread)) if spread > 0 else ""
+    sig_parts = [clean_title, clean_tone, time_bucket]
+    if price_bucket:
+        sig_parts.append(price_bucket)
+    if spread_bucket:
+        sig_parts.append(f"spd{spread_bucket}")
+    signature = "|".join(sig_parts)
+
+    payload = {
+        "occurred_at": str(occurred_at or "").strip(),
+        "category": str(category or "general").strip() or "general",
+        "title": clean_title,
+        "detail": clean_detail,
+        "tone": clean_tone,
+        "signature": signature,
+    }
+    if isinstance(extra, dict):
+        payload.update(extra)
+    return payload
+
+
+def _snapshot_trade_meta(snapshot: dict) -> dict:
+    return {
+        "trade_grade": str(snapshot.get("trade_grade", "") or "").strip(),
+        "trade_grade_detail": _normalize_text(snapshot.get("trade_grade_detail", "")),
+        "trade_next_review": _normalize_text(snapshot.get("trade_next_review", "")),
+    }
+
+
+def _snapshot_event_meta(snapshot: dict) -> dict:
+    return {
+        "event_mode_text": str(snapshot.get("event_risk_mode_text", "") or "").strip(),
+        "event_name": str(snapshot.get("event_active_name", "") or "").strip(),
+        "event_time_text": str(snapshot.get("event_active_time_text", "") or "").strip(),
+        "event_importance_text": str(snapshot.get("event_active_importance_text", "") or "").strip(),
+        "event_scope_text": str(snapshot.get("event_active_scope_text", "") or "").strip(),
+        "event_note": "",
+    }
+
+
+def _item_event_meta(item: dict, fallback: dict | None = None) -> dict:
+    base = dict(fallback or {})
+    item_name = str(item.get("event_active_name", "") or "").strip()
+    item_note = _normalize_text(item.get("event_note", ""))
+    if item_name:
+        base["event_name"] = item_name
+    item_time_text = str(item.get("event_active_time_text", "") or "").strip()
+    if item_time_text:
+        base["event_time_text"] = item_time_text
+    item_importance_text = str(item.get("event_importance_text", "") or "").strip()
+    if item_importance_text:
+        base["event_importance_text"] = item_importance_text
+    item_scope_text = str(item.get("event_scope_text", "") or "").strip()
+    if item_scope_text:
+        base["event_scope_text"] = item_scope_text
+    if item_note:
+        base["event_note"] = item_note
+    item_mode_text = str(item.get("event_mode_text", "") or "").strip()
+    if item_mode_text:
+        base["event_mode_text"] = item_mode_text
+    return base
+
+
+def _find_latest_symbol_event(symbol: str, history_file: Path | None = None) -> dict | None:
+    target_symbol = str(symbol or "").strip().upper()
+    if not target_symbol:
+        return None
+    history = read_full_history(history_file=history_file)
+    for entry in reversed(history):
+        entry_symbol = str(entry.get("symbol", "") or "").strip().upper()
+        if entry_symbol != target_symbol:
+            continue
+        category = str(entry.get("category", "") or "").strip().lower()
+        if category in {"spread", "recovery"}:
+            return entry
+    return None
+
+
+def _build_spread_recovery_entries(
+    snapshot: dict,
+    items_by_symbol: dict[str, dict],
+    trade_meta: dict,
+    snapshot_event_meta: dict,
+    history_file: Path | None = None,
+    lookback_hours: int = 12,
+) -> list[dict]:
+    occurred_at = str(snapshot.get("last_refresh_text", "") or "").strip()
+    current_time = _parse_occurred_at(occurred_at)
+    if current_time is None:
+        return []
+
+    result = []
+    lookback = timedelta(hours=max(1, int(lookback_hours)))
+    for symbol, item in items_by_symbol.items():
+        if str(item.get("tone", "") or "").strip().lower() != "success":
+            continue
+        if not bool(item.get("has_live_quote", False)):
+            continue
+
+        latest_event = _find_latest_symbol_event(symbol, history_file=history_file)
+        if not latest_event:
+            continue
+        if str(latest_event.get("category", "") or "").strip().lower() != "spread":
+            continue
+
+        latest_occurred_at = _parse_occurred_at(latest_event.get("occurred_at", ""))
+        if latest_occurred_at is None or current_time - latest_occurred_at > lookback:
+            continue
+
+        current_spread_points = float(item.get("spread_points", 0.0) or 0.0)
+        detail = (
+            f"{symbol} 当前点差已回落到 {current_spread_points:.0f} 点，"
+            f"相较上一轮异常提醒（{str(latest_event.get('title', '点差异常') or '点差异常').strip()}）已明显收敛。"
+        )
+        event_note = _normalize_text(item.get("event_note", ""))
+        if event_note:
+            detail += f" {event_note}"
+
+        result.append(
+            _build_entry(
+                "recovery",
+                f"{symbol} 点差已恢复",
+                detail,
+                "success",
+                occurred_at,
+                extra={
+                    "symbol": symbol,
+                    "baseline_latest_price": float(item.get("latest_price", 0.0) or 0.0),
+                    "baseline_spread_points": current_spread_points,
+                    "trade_grade": str(item.get("trade_grade", "") or "").strip() or trade_meta.get("trade_grade", ""),
+                    "trade_grade_detail": _normalize_text(item.get("trade_grade_detail", "")) or trade_meta.get("trade_grade_detail", ""),
+                    "trade_next_review": _normalize_text(item.get("trade_next_review", "")) or trade_meta.get("trade_next_review", ""),
+                    "recovered_from_title": str(latest_event.get("title", "") or "").strip(),
+                    "recovered_from_time": str(latest_event.get("occurred_at", "") or "").strip(),
+                    **_item_event_meta(item, fallback=snapshot_event_meta),
+                },
+            )
+        )
+    return result
+
+
+def build_snapshot_history_entries(snapshot: dict, history_file: Path | None = None) -> list[dict]:
+    if not isinstance(snapshot, dict):
+        return []
+
+    occurred_at = str(snapshot.get("last_refresh_text", "") or "").strip()
+    entries = []
+    items_by_symbol = {
+        str(item.get("symbol", "") or "").strip().upper(): item
+        for item in list(snapshot.get("items", []) or [])
+        if str(item.get("symbol", "") or "").strip()
+    }
+
+    runtime_cards = list(snapshot.get("runtime_status_cards", []) or [])
+    trade_meta = _snapshot_trade_meta(snapshot)
+    snapshot_event_meta = _snapshot_event_meta(snapshot)
+    if runtime_cards:
+        primary = runtime_cards[0]
+        tone = str(primary.get("tone", "neutral") or "neutral")
+        if tone in {"negative", "warning"}:
+            entries.append(
+                _build_entry(
+                    "mt5",
+                    primary.get("title", "MT5 状态提醒"),
+                    primary.get("detail", ""),
+                    tone,
+                    occurred_at,
+                    extra={**trade_meta, **snapshot_event_meta},
+                )
+            )
+
+    if len(runtime_cards) > 1:
+        secondary = runtime_cards[1]
+        title = str(secondary.get("title", "") or "").strip()
+        if title and title not in {"市场活跃度正常"}:
+            entries.append(
+                _build_entry(
+                    "session",
+                    title,
+                    secondary.get("detail", ""),
+                    secondary.get("tone", "neutral"),
+                    occurred_at,
+                    extra={**trade_meta, **snapshot_event_meta},
+                )
+            )
+
+    for card in list(snapshot.get("spread_focus_cards", []) or []):
+        title = str(card.get("title", "") or "").strip()
+        if not title or title == "点差状态稳定":
+            continue
+        symbol = title.split(" ", 1)[0].strip().upper()
+        item = items_by_symbol.get(symbol, {})
+        entries.append(
+            _build_entry(
+                "spread",
+                title,
+                card.get("detail", ""),
+                card.get("tone", "neutral"),
+                occurred_at,
+                extra={
+                    "symbol": symbol,
+                    "baseline_latest_price": float(item.get("latest_price", 0.0) or 0.0),
+                    "baseline_spread_points": float(item.get("spread_points", 0.0) or 0.0),
+                    "trade_grade": str(item.get("trade_grade", "") or "").strip() or trade_meta.get("trade_grade", ""),
+                    "trade_grade_detail": _normalize_text(item.get("trade_grade_detail", "")) or trade_meta.get("trade_grade_detail", ""),
+                    "trade_next_review": _normalize_text(item.get("trade_next_review", "")) or trade_meta.get("trade_next_review", ""),
+                    **_item_event_meta(item, fallback=snapshot_event_meta),
+                },
+            )
+        )
+
+    alert_text = _normalize_text(snapshot.get("alert_text", ""))
+    if alert_text:
+        entries.append(
+            _build_entry(
+                "macro",
+                "宏观提醒",
+                alert_text,
+                "warning",
+                occurred_at,
+                extra={**trade_meta, **snapshot_event_meta},
+            )
+        )
+    entries.extend(
+        _build_spread_recovery_entries(
+            snapshot,
+            items_by_symbol,
+            trade_meta,
+            snapshot_event_meta,
+            history_file=history_file,
+        )
+    )
+
+    unique_entries = []
+    seen = set()
+    for entry in entries:
+        signature = str(entry.get("signature", "") or "").strip()
+        if not signature or signature in seen:
+            continue
+        seen.add(signature)
+        unique_entries.append(entry)
+    return unique_entries
+
+
+def append_history_entries(entries: list[dict], history_file: Path | None = None) -> int:
+    target = Path(history_file) if history_file else HISTORY_FILE
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    recent_signatures = set()
+    if target.exists():
+        try:
+            recent_lines = [line.strip() for line in target.read_text(encoding="utf-8").splitlines() if line.strip()][-20:]
+            for line in recent_lines:
+                try:
+                    recent_signatures.add(str(json.loads(line).get("signature", "") or "").strip())
+                except json.JSONDecodeError:
+                    continue
+        except OSError:
+            recent_signatures = set()
+
+    append_lines = []
+    for entry in entries or []:
+        signature = str(entry.get("signature", "") or "").strip()
+        if not signature or signature in recent_signatures:
+            continue
+        recent_signatures.add(signature)
+        append_lines.append(json.dumps(entry, ensure_ascii=False))
+
+    if not append_lines:
+        return 0
+
+    with target.open("a", encoding="utf-8") as handle:
+        for line in append_lines:
+            handle.write(line + "\n")
+
+    try:
+        lines = [line for line in target.read_text(encoding="utf-8").splitlines() if line.strip()]
+        if len(lines) > MAX_HISTORY_LINES:
+            trimmed = lines[-MAX_HISTORY_LINES:]
+            target.write_text("\n".join(trimmed) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+    return len(append_lines)
+
+
+def read_recent_history(limit: int = 8, history_file: Path | None = None) -> list[dict]:
+    target = Path(history_file) if history_file else HISTORY_FILE
+    if not target.exists():
+        return []
+
+    try:
+        lines = [line.strip() for line in target.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except OSError:
+        return []
+
+    result = []
+    for line in lines[-max(1, int(limit)):]:
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            result.append(payload)
+    return list(reversed(result))
+
+
+def read_full_history(history_file: Path | None = None) -> list[dict]:
+    target = Path(history_file) if history_file else HISTORY_FILE
+    if not target.exists():
+        return []
+
+    try:
+        lines = [line.strip() for line in target.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except OSError:
+        return []
+
+    result = []
+    for line in lines:
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            result.append(payload)
+    return result
+
+
+def build_latest_symbol_event_map(
+    history_file: Path | None = None,
+    categories: set[str] | None = None,
+) -> dict[str, dict]:
+    category_filter = {str(item or "").strip().lower() for item in set(categories or {"spread", "recovery"}) if str(item or "").strip()}
+    result = {}
+    for entry in reversed(read_full_history(history_file=history_file)):
+        symbol = str(entry.get("symbol", "") or "").strip().upper()
+        category = str(entry.get("category", "") or "").strip().lower()
+        if not symbol or category not in category_filter or symbol in result:
+            continue
+        result[symbol] = entry
+    return result
+
+
+def _parse_occurred_at(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None

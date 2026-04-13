@@ -19,6 +19,7 @@ def test_build_ai_history_entry_keeps_summary_and_push_state():
         {
             "model": "deepseek-chat",
             "content": "当前结论：只适合观察。\n方向判断：黄金偏强。\n风险点：点差可能放大。\n行动建议：等待回踩。",
+            "rulebook_summary_text": "当前优先遵守 1 条已验证规则。",
         },
         {
             "last_refresh_text": "2026-04-12 18:20:00",
@@ -31,6 +32,7 @@ def test_build_ai_history_entry_keeps_summary_and_push_state():
     assert entry["summary_line"] == "当前结论：只适合观察。"
     assert entry["push_sent"] is True
     assert entry["symbols"] == ["XAUUSD"]
+    assert entry["rulebook_summary_text"] == "当前优先遵守 1 条已验证规则。"
 
 
 def test_append_and_summarize_ai_history():
