@@ -180,6 +180,31 @@ def test_pick_notify_entries_allows_recovery_entry():
     shutil.rmtree(state_dir)
 
 
+def test_pick_notify_entries_allows_structure_entry_when_risk_reward_is_good():
+    state_dir = ROOT / ".runtime_test_notify_structure"
+    if state_dir.exists():
+        shutil.rmtree(state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_file = state_dir / "notify_state.json"
+
+    entries = [
+        {
+            "occurred_at": "2026-04-12 10:20:00",
+            "category": "structure",
+            "title": "XAUUSD 结构候选",
+            "detail": "结构和报价相对干净，可继续观察。",
+            "tone": "success",
+            "signature": "structure-1",
+            "symbol": "XAUUSD",
+            "risk_reward_ratio": 2.1,
+        }
+    ]
+    picked = notification.pick_notify_entries(entries, _build_config(), state_file=state_file)
+    assert len(picked) == 1
+    assert picked[0]["title"] == "XAUUSD 结构候选"
+    shutil.rmtree(state_dir)
+
+
 def test_send_notifications_aggregates_same_group_entries(monkeypatch):
     state_dir = ROOT / ".runtime_test_notify_aggregate"
     if state_dir.exists():
@@ -399,6 +424,25 @@ def test_build_markdown_includes_event_window_details():
     )
     assert "欧元区通胀 | 2026-04-15 20:30 | 高影响 | EURUSD" in markdown
     assert "提醒：高影响窗口：欧元区通胀将于 2026-04-15 20:30 落地，当前品种先别抢第一脚。" in markdown
+
+
+def test_build_markdown_includes_risk_reward_action_levels():
+    markdown = notification._build_markdown(
+        {
+            "occurred_at": "2026-04-12 10:20:00",
+            "category": "structure",
+            "title": "XAUUSD 结构候选",
+            "detail": "结构和报价相对干净。",
+            "trade_grade": "可轻仓试仓",
+            "trade_grade_detail": "可作为候选机会观察。",
+            "risk_reward_ratio": 2.4,
+            "stop_loss_price": 4748.0,
+            "take_profit_1": 4788.0,
+        }
+    )
+    assert "预算盈亏比：1:2.40" in markdown
+    assert "止损位：4,748.00" in markdown
+    assert "目标位1：4,788.00" in markdown
 
 
 def test_send_test_notification_returns_channel_messages(monkeypatch):

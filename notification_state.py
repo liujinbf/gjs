@@ -85,6 +85,13 @@ def _get_notify_priority(entry: dict) -> int:
         return 5
     if category == "session":
         return 3
+    if category == "structure":
+        rr_ratio = float(entry.get("risk_reward_ratio", 0.0) or 0.0)
+        if rr_ratio >= 2.0:
+            return 3
+        if rr_ratio >= 1.3:
+            return 2
+        return 0
     if category == "recovery":
         return 3 if importance == "high" else 2
     if category == "macro":
@@ -125,6 +132,8 @@ def _build_notify_group_key(entry: dict) -> str:
     title = str(entry.get("title", "") or "").strip()
     if category == "spread" or "点差" in title:
         return f"spread::{symbol or title}"
+    if category == "structure":
+        return f"structure::{symbol or title or 'setup'}"
     if category == "macro":
         return f"macro::{event_name or title or 'macro'}"
     if category == "recovery":

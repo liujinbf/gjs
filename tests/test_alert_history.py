@@ -61,6 +61,45 @@ def test_build_snapshot_history_entries_collects_spread_macro_and_session_items(
     assert macro_entry["trade_grade"] == "等待事件落地"
 
 
+def test_build_snapshot_history_entries_adds_structure_entry_with_action_meta():
+    snapshot = {
+        "last_refresh_text": "2026-04-12 12:00:00",
+        "trade_grade": "可轻仓试仓",
+        "trade_grade_detail": "结构相对干净，可继续观察。",
+        "trade_next_review": "10 分钟后复核。",
+        "runtime_status_cards": [],
+        "spread_focus_cards": [{"title": "点差状态稳定", "detail": "当前稳定。", "tone": "success"}],
+        "items": [
+            {
+                "symbol": "XAUUSD",
+                "latest_price": 4759.82,
+                "spread_points": 17.0,
+                "has_live_quote": True,
+                "tone": "success",
+                "trade_grade": "可轻仓试仓",
+                "trade_grade_source": "structure",
+                "trade_grade_detail": "结构相对干净，可继续观察。",
+                "trade_next_review": "10 分钟后复核。",
+                "signal_side_text": "【↑ 多头参考】",
+                "risk_reward_ready": True,
+                "risk_reward_state": "favorable",
+                "risk_reward_ratio": 2.4,
+                "risk_reward_context_text": "多头预估止损 4748.00，目标 4788.00，当前盈亏比约 2.40:1",
+                "risk_reward_stop_price": 4748.0,
+                "risk_reward_target_price": 4788.0,
+            }
+        ],
+        "alert_text": "",
+    }
+
+    entries = build_snapshot_history_entries(snapshot)
+    structure_entry = next(item for item in entries if item["category"] == "structure")
+    assert structure_entry["title"] == "XAUUSD 结构候选"
+    assert structure_entry["risk_reward_ratio"] == 2.4
+    assert structure_entry["stop_loss_price"] == 4748.0
+    assert structure_entry["take_profit_1"] == 4788.0
+
+
 def test_append_history_entries_dedupes_recent_signatures():
     history_dir = ROOT / ".runtime_test"
     if history_dir.exists():

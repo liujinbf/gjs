@@ -14,6 +14,7 @@ from mt5_sim_trading import SIM_ENGINE
 from backtest_engine import extract_signal_meta
 from event_feed import apply_event_feed_to_snapshot, load_event_feed, merge_event_schedule_texts
 from event_schedule import resolve_event_risk_context
+from external_signal_context import apply_external_signal_context
 from knowledge_feedback import refresh_rule_feedback_scores, summarize_feedback_stats
 from knowledge_governance import build_learning_report, refresh_rule_governance
 from knowledge_runtime import backfill_snapshot_outcomes, record_snapshot, summarize_outcome_stats
@@ -77,6 +78,7 @@ class MonitorWorker(QThread):
                 symbols=self.symbols,
             )
             snapshot = apply_macro_data_to_snapshot(snapshot, macro_data_result)
+            snapshot = apply_external_signal_context(snapshot, event_context=event_context)
             # 宏观数据注入完成后，构建状态卡片写回快照
             from monitor_cards import build_macro_data_status_card
             snapshot["macro_data_status_cards"] = build_macro_data_status_card(

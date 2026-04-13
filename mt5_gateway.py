@@ -206,8 +206,11 @@ def fetch_quotes(symbols: list[str], include_inactive: bool = True) -> list[dict
         ask = float(getattr(tick, "ask", 0.0) or 0.0) if tick is not None else 0.0
         last = float(getattr(tick, "last", 0.0) or 0.0) if tick is not None else 0.0
         latest = last if last > 0 else ((bid + ask) / 2.0 if max(bid, ask) > 0 else 0.0)
-        spread = float(getattr(info, "spread", 0.0) or 0.0) if info is not None else 0.0
         point = float(getattr(info, "point", 0.0) or 0.0) if info is not None else 0.0
+        if point > 0 and bid > 0 and ask > 0 and ask >= bid:
+            spread = round(max((ask - bid) / point, 0.0), 6)
+        else:
+            spread = float(getattr(info, "spread", 0.0) or 0.0) if info is not None else 0.0
         tick_time = int(getattr(tick, "time", 0) or 0) if tick is not None else 0
         intraday_context = build_empty_intraday_context()
         multi_timeframe_context = {

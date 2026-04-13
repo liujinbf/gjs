@@ -39,6 +39,7 @@ def _build_markdown(entry: dict) -> str:
     boll_lower  = entry.get("bollinger_lower")
     change_pct  = entry.get("change_pct_24h")
     latest_price = entry.get("baseline_latest_price")
+    risk_reward_ratio = entry.get("risk_reward_ratio")
     stop_loss_price = entry.get("stop_loss_price")
     take_profit_1   = entry.get("take_profit_1")
     take_profit_2   = entry.get("take_profit_2")
@@ -109,6 +110,11 @@ def _build_markdown(entry: dict) -> str:
         action_lines.append(f"  - 建议：**{trade_grade}**")
     if trade_grade_detail:
         action_lines.append(f"  - 原因：{trade_grade_detail}")
+    if risk_reward_ratio:
+        try:
+            action_lines.append(f"  - 预算盈亏比：1:{float(risk_reward_ratio):.2f}")
+        except (TypeError, ValueError):
+            pass
     if stop_loss_price:
         try:
             action_lines.append(f"  - 止损位：{float(stop_loss_price):,.2f}")

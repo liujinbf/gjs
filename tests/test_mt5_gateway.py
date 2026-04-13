@@ -179,3 +179,31 @@ def test_fetch_quotes_includes_intraday_context(monkeypatch):
     assert rows[0]["key_level_state"] in {"near_high", "mid_range", "breakout_above"}
     assert rows[0]["breakout_ready"] is True
     assert "retest_state" in rows[0]
+
+
+def test_fetch_quotes_prefers_live_bid_ask_spread_over_symbol_info(monkeypatch):
+    class FakeMt5:
+        TIMEFRAME_M5 = 5
+        TIMEFRAME_M15 = 15
+        TIMEFRAME_H1 = 60
+
+        @staticmethod
+        def symbol_select(symbol, enable):
+            return False
+
+        @staticmethod
+        def symbol_info(symbol):
+            return SimpleNamespace(spread=99.0, point=0.01)
+
+        @staticmethod
+        def symbol_info_tick(symbol):
+            return SimpleNamespace(time=1_000, bid=4759.74, ask=4759.91, last=4759.82)
+
+    monkeypatch.setattr(mt5_gateway, "mt5", FakeMt5)
+    monkeypatch.setattr(mt5_gateway, "HAS_MT5", True)
+    monkeypatch.setattr(mt5_gateway, "initialize_connection", lambda: (True, "ok"))
+    monkeypatch.setattr(mt5_gateway, "_is_live_tick", lambda tick, now_ts=None, max_age_sec=180: True)
+
+    rows = mt5_gateway.fetch_quotes(["XAUUSD"])
+    assert len(rows) == 1
+    assert rows[0]["spread_points"] == 17.0

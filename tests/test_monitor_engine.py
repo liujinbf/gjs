@@ -455,6 +455,53 @@ def test_build_snapshot_from_rows_keeps_all_symbols():
     assert "alert_state_text" in snapshot["items"][0]
 
 
+def test_build_snapshot_from_rows_exposes_risk_reward_fields_and_hides_inactive_prices():
+    snapshot = build_snapshot_from_rows(
+        ["XAUUSD", "EURUSD"],
+        [
+            {
+                "symbol": "XAUUSD",
+                "latest_price": 4810.0,
+                "bid": 4809.9,
+                "ask": 4810.1,
+                "spread_points": 20,
+                "point": 0.01,
+                "status": "实时报价",
+                "has_live_quote": True,
+                "intraday_bias": "bullish",
+                "multi_timeframe_alignment": "aligned",
+                "multi_timeframe_bias": "bullish",
+                "breakout_state": "confirmed_above",
+                "breakout_direction": "bullish",
+                "key_level_high": 4800.0,
+                "key_level_low": 4700.0,
+                "key_level_state": "breakout_above",
+            },
+            {
+                "symbol": "EURUSD",
+                "latest_price": 1.17270,
+                "bid": 1.17259,
+                "ask": 1.17280,
+                "spread_points": 21,
+                "point": 0.00001,
+                "status": "休市或暂无实时报价",
+                "has_live_quote": False,
+            },
+        ],
+        True,
+        "MT5 连接成功。",
+        event_risk_mode="normal",
+    )
+    xau = next(item for item in snapshot["items"] if item["symbol"] == "XAUUSD")
+    eur = next(item for item in snapshot["items"] if item["symbol"] == "EURUSD")
+    assert xau["risk_reward_ready"] is True
+    assert xau["risk_reward_ratio"] > 0
+    assert xau["risk_reward_stop_price"] > 0
+    assert xau["risk_reward_target_price"] > 0
+    assert eur["latest_text"] == "--"
+    assert "EURUSD" not in snapshot["live_digest"]
+
+
 def test_build_snapshot_from_rows_creates_warning_spread_focus_card():
     snapshot = build_snapshot_from_rows(
         ["XAUUSD"],

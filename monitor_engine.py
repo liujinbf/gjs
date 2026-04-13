@@ -279,7 +279,7 @@ def build_snapshot_from_rows(
                 "bid": float(row.get("bid", 0.0) or 0.0),
                 "ask": float(row.get("ask", 0.0) or 0.0),
                 "tick_time": int(row.get("tick_time", 0) or 0),
-                "latest_text": format_quote_price(latest_price, point) if latest_price > 0 else "--",
+                "latest_text": format_quote_price(latest_price, point) if has_live_quote and latest_price > 0 else "--",
                 "quote_text": build_quote_structure_text(row),
                 "status_text": str(row.get("status", "暂无快照") or "暂无快照"),
                 "macro_focus": build_symbol_macro_focus(symbol),
@@ -306,8 +306,12 @@ def build_snapshot_from_rows(
                 "retest_state": str(row.get("retest_state", "") or "").strip(),
                 "retest_state_text": str(row.get("retest_state_text", "") or "").strip(),
                 "risk_reward_context_text": str(enriched_row.get("risk_reward_context_text", "") or "").strip(),
+                "risk_reward_ready": bool(enriched_row.get("risk_reward_ready", False)),
                 "risk_reward_state": str(enriched_row.get("risk_reward_state", "") or "").strip(),
                 "risk_reward_state_text": str(enriched_row.get("risk_reward_state_text", "") or "").strip(),
+                "risk_reward_ratio": float(enriched_row.get("risk_reward_ratio", 0.0) or 0.0),
+                "risk_reward_stop_price": float(enriched_row.get("risk_reward_stop_price", 0.0) or 0.0),
+                "risk_reward_target_price": float(enriched_row.get("risk_reward_target_price", 0.0) or 0.0),
                 "execution_note": " ".join(segment for segment in execution_segments if segment),
                 "trade_grade": trade_grade["grade"],
                 "trade_grade_detail": trade_grade["detail"],
@@ -423,7 +427,11 @@ def build_snapshot_from_rows(
     if connection_message:
         summary_lines.append(connection_message)
 
-    live_digest = [f"{item['symbol']} {item['latest_text']}" for item in items if item["latest_text"] != "--"]
+    live_digest = [
+        f"{item['symbol']} {item['latest_text']}"
+        for item in items
+        if bool(item.get("has_live_quote", False)) and item["latest_text"] != "--"
+    ]
     event_mode = str(event_risk_mode or "normal").strip().lower()
     transition_summary_text = "；".join(
         [

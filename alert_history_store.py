@@ -106,6 +106,37 @@ def _item_event_meta(item: dict, fallback: dict | None = None) -> dict:
     return base
 
 
+def _item_action_meta(item: dict, fallback_trade_meta: dict | None = None) -> dict:
+    trade_meta = dict(fallback_trade_meta or {})
+    result = {
+        "baseline_latest_price": float(item.get("latest_price", 0.0) or 0.0),
+        "baseline_spread_points": float(item.get("spread_points", 0.0) or 0.0),
+        "trade_grade": str(item.get("trade_grade", "") or "").strip() or trade_meta.get("trade_grade", ""),
+        "trade_grade_detail": _normalize_text(item.get("trade_grade_detail", "")) or trade_meta.get("trade_grade_detail", ""),
+        "trade_next_review": _normalize_text(item.get("trade_next_review", "")) or trade_meta.get("trade_next_review", ""),
+        "risk_reward_ready": bool(item.get("risk_reward_ready", False)),
+        "risk_reward_ratio": float(item.get("risk_reward_ratio", 0.0) or 0.0),
+        "stop_loss_price": float(item.get("risk_reward_stop_price", 0.0) or 0.0),
+        "take_profit_1": float(item.get("risk_reward_target_price", 0.0) or 0.0),
+        "rsi14": item.get("rsi14"),
+        "ma20": item.get("ma20"),
+        "ma50": item.get("ma50"),
+        "change_pct_24h": item.get("change_pct_24h"),
+        "bollinger_upper": item.get("bollinger_upper"),
+        "bollinger_mid": item.get("bollinger_mid"),
+        "bollinger_lower": item.get("bollinger_lower"),
+        "signal_side": str(item.get("signal_side", "") or "").strip(),
+        "signal_side_text": str(item.get("signal_side_text", "") or "").strip(),
+    }
+    if result["take_profit_1"] <= 0:
+        result.pop("take_profit_1", None)
+    if result["stop_loss_price"] <= 0:
+        result.pop("stop_loss_price", None)
+    if result["risk_reward_ratio"] <= 0:
+        result.pop("risk_reward_ratio", None)
+    return result
+
+
 def _find_latest_symbol_event(symbol: str, history_file: Path | None = None) -> dict | None:
     target_symbol = str(symbol or "").strip().upper()
     if not target_symbol:
@@ -170,13 +201,61 @@ def _build_spread_recovery_entries(
                 occurred_at,
                 extra={
                     "symbol": symbol,
-                    "baseline_latest_price": float(item.get("latest_price", 0.0) or 0.0),
+                    **_item_action_meta(item, fallback_trade_meta=trade_meta),
                     "baseline_spread_points": current_spread_points,
-                    "trade_grade": str(item.get("trade_grade", "") or "").strip() or trade_meta.get("trade_grade", ""),
-                    "trade_grade_detail": _normalize_text(item.get("trade_grade_detail", "")) or trade_meta.get("trade_grade_detail", ""),
-                    "trade_next_review": _normalize_text(item.get("trade_next_review", "")) or trade_meta.get("trade_next_review", ""),
                     "recovered_from_title": str(latest_event.get("title", "") or "").strip(),
                     "recovered_from_time": str(latest_event.get("occurred_at", "") or "").strip(),
+                    **_item_event_meta(item, fallback=snapshot_event_meta),
+                },
+            )
+        )
+    return result
+
+
+def _build_structure_entries(
+    snapshot: dict,
+    items_by_symbol: dict[str, dict],
+    trade_meta: dict,
+    snapshot_event_meta: dict,
+) -> list[dict]:
+    occurred_at = str(snapshot.get("last_refresh_text", "") or "").strip()
+    result = []
+    for symbol, item in items_by_symbol.items():
+        if not bool(item.get("has_live_quote", False)):
+            continue
+        if _normalize_text(item.get("trade_grade", "")) != "可轻仓试仓":
+            continue
+        if _normalize_text(item.get("trade_grade_source", "")) not in {"structure", "setup"}:
+            continue
+        if str(item.get("tone", "") or "").strip().lower() != "success":
+            continue
+        if not bool(item.get("risk_reward_ready", False)):
+            continue
+        risk_reward_state = str(item.get("risk_reward_state", "") or "").strip().lower()
+        if risk_reward_state not in {"favorable", "acceptable"}:
+            continue
+
+        signal_side = str(item.get("signal_side_text", "") or "").strip() or "等待方向进一步确认"
+        detail_parts = [
+            f"{symbol} 当前结构和报价相对干净，可继续作为候选机会观察。",
+            signal_side,
+            _normalize_text(item.get("trade_grade_detail", "")),
+            _normalize_text(item.get("risk_reward_context_text", "")),
+        ]
+        event_note = _normalize_text(item.get("event_note", ""))
+        if event_note:
+            detail_parts.append(event_note)
+        detail = " ".join(part for part in detail_parts if part)
+        result.append(
+            _build_entry(
+                "structure",
+                f"{symbol} 结构候选",
+                detail,
+                "success",
+                occurred_at,
+                extra={
+                    "symbol": symbol,
+                    **_item_action_meta(item, fallback_trade_meta=trade_meta),
                     **_item_event_meta(item, fallback=snapshot_event_meta),
                 },
             )
@@ -244,15 +323,13 @@ def build_snapshot_history_entries(snapshot: dict, history_file: Path | None = N
                 occurred_at,
                 extra={
                     "symbol": symbol,
-                    "baseline_latest_price": float(item.get("latest_price", 0.0) or 0.0),
-                    "baseline_spread_points": float(item.get("spread_points", 0.0) or 0.0),
-                    "trade_grade": str(item.get("trade_grade", "") or "").strip() or trade_meta.get("trade_grade", ""),
-                    "trade_grade_detail": _normalize_text(item.get("trade_grade_detail", "")) or trade_meta.get("trade_grade_detail", ""),
-                    "trade_next_review": _normalize_text(item.get("trade_next_review", "")) or trade_meta.get("trade_next_review", ""),
+                    **_item_action_meta(item, fallback_trade_meta=trade_meta),
                     **_item_event_meta(item, fallback=snapshot_event_meta),
                 },
             )
         )
+
+    entries.extend(_build_structure_entries(snapshot, items_by_symbol, trade_meta, snapshot_event_meta))
 
     alert_text = _normalize_text(snapshot.get("alert_text", ""))
     if alert_text:
