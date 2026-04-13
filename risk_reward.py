@@ -14,6 +14,9 @@ def build_empty_risk_reward_context() -> dict:
         "risk_reward_target_price_2": 0.0,
         "risk_reward_position_text": "",
         "risk_reward_invalidation_text": "",
+        "risk_reward_entry_zone_low": 0.0,
+        "risk_reward_entry_zone_high": 0.0,
+        "risk_reward_entry_zone_text": "",
     }
 
 
@@ -60,43 +63,65 @@ def analyze_risk_reward(row: dict) -> dict:
     stop_price = 0.0
     target_price = 0.0
     target_price_2 = 0.0
+    entry_zone_low = 0.0
+    entry_zone_high = 0.0
     if direction == "bullish":
         if retest_state == "confirmed_support":
             stop_price = key_high - range_price * 0.05
             target_price = current_price + range_price * 0.60
             target_price_2 = current_price + range_price * 1.00
+            entry_zone_low = key_high - range_price * 0.02
+            entry_zone_high = key_high + range_price * 0.08
         elif breakout_state == "confirmed_above":
             stop_price = key_high - range_price * 0.08
             target_price = current_price + range_price * 0.55
             target_price_2 = current_price + range_price * 0.90
+            entry_zone_low = key_high
+            entry_zone_high = key_high + range_price * 0.10
         else:
             stop_price = key_low - range_price * 0.05
             target_price = key_high
             target_price_2 = current_price + range_price * 0.45
+            entry_zone_low = max(key_low + range_price * 0.10, current_price - range_price * 0.08)
+            entry_zone_high = min(key_low + range_price * 0.25, current_price)
             if key_state == "near_high":
                 target_price = current_price + range_price * 0.10
                 target_price_2 = current_price + range_price * 0.30
+                entry_zone_low = current_price - range_price * 0.04
+                entry_zone_high = current_price + range_price * 0.01
     else:
         if retest_state == "confirmed_resistance":
             stop_price = key_low + range_price * 0.05
             target_price = current_price - range_price * 0.60
             target_price_2 = current_price - range_price * 1.00
+            entry_zone_low = key_low - range_price * 0.08
+            entry_zone_high = key_low + range_price * 0.02
         elif breakout_state == "confirmed_below":
             stop_price = key_low + range_price * 0.08
             target_price = current_price - range_price * 0.55
             target_price_2 = current_price - range_price * 0.90
+            entry_zone_low = key_low - range_price * 0.10
+            entry_zone_high = key_low
         else:
             stop_price = key_high + range_price * 0.05
             target_price = key_low
             target_price_2 = current_price - range_price * 0.45
+            entry_zone_low = max(key_high - range_price * 0.25, current_price)
+            entry_zone_high = min(key_high - range_price * 0.10, current_price + range_price * 0.08)
             if key_state == "near_low":
                 target_price = current_price - range_price * 0.10
                 target_price_2 = current_price - range_price * 0.30
+                entry_zone_low = current_price - range_price * 0.01
+                entry_zone_high = current_price + range_price * 0.04
 
     risk = abs(current_price - stop_price)
     reward = abs(target_price - current_price)
     if min(risk, reward) <= 0:
         return build_empty_risk_reward_context()
+    if entry_zone_low <= 0 or entry_zone_high <= 0:
+        return build_empty_risk_reward_context()
+
+    entry_zone_low, entry_zone_high = sorted((entry_zone_low, entry_zone_high))
 
     ratio = reward / risk
     if ratio >= 2.0:
@@ -122,6 +147,10 @@ def analyze_risk_reward(row: dict) -> dict:
         if direction == "bullish"
         else f"若价格重新站回 {stop_price:.2f} 上方，当前{direction_text}结构可视为失效。"
     )
+    entry_zone_text = (
+        f"观察进场区间 {entry_zone_low:.2f} - {entry_zone_high:.2f}，"
+        "若价格直接远离该区间，就不建议追。"
+    )
     return {
         "risk_reward_ready": True,
         "risk_reward_state": state,
@@ -134,4 +163,7 @@ def analyze_risk_reward(row: dict) -> dict:
         "risk_reward_target_price_2": target_price_2,
         "risk_reward_position_text": position_text,
         "risk_reward_invalidation_text": invalidation_text,
+        "risk_reward_entry_zone_low": entry_zone_low,
+        "risk_reward_entry_zone_high": entry_zone_high,
+        "risk_reward_entry_zone_text": entry_zone_text,
     }

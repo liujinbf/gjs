@@ -226,6 +226,11 @@ def _build_item_lines(snapshot: dict) -> str:
         rr_context = str(item.get("risk_reward_context_text", "") or "").strip()
         rr_stop = float(item.get("risk_reward_stop_price", 0.0) or 0.0)
         rr_target = float(item.get("risk_reward_target_price", 0.0) or 0.0)
+        rr_target_2 = float(item.get("risk_reward_target_price_2", 0.0) or 0.0)
+        rr_entry_zone = str(item.get("risk_reward_entry_zone_text", "") or "").strip()
+        rr_position_text = str(item.get("risk_reward_position_text", "") or "").strip()
+        rr_invalidation_text = str(item.get("risk_reward_invalidation_text", "") or "").strip()
+        external_bias_note = str(item.get("external_bias_note", "") or "").strip()
         if rr_ready and rr_ratio > 0:
             rr_eval = (
                 "优质(盈亏比良好)" if rr_ratio >= 2.0
@@ -234,11 +239,19 @@ def _build_item_lines(snapshot: dict) -> str:
             )
             line += (
                 f"\n  系统预算盈亏比: 1:{rr_ratio:.1f}——{rr_eval}"
-                f" | 止损参考价:{rr_stop:.2f} 目标参考价:{rr_target:.2f}"
+                f" | 止损参考价:{rr_stop:.2f} 目标1参考价:{rr_target:.2f} 目标2参考价:{rr_target_2:.2f}"
                 f" | (详情:{rr_context})"
             )
+            if rr_entry_zone:
+                line += f"\n  观察进场区间: {rr_entry_zone}"
+            if rr_position_text:
+                line += f"\n  仓位节奏: {rr_position_text}"
+            if rr_invalidation_text:
+                line += f"\n  结构失效条件: {rr_invalidation_text}"
         else:
             line += "\n  系统预算盈亏比: 暂无法计算(方向不明或关键位数据不足)"
+        if external_bias_note:
+            line += f"\n  外部背景修正: {external_bias_note}"
         # 注明周期数据可用性，防止AI自行添加没有数据支撒的周期判断
         line += "\n  [注意]当前将技术指标仅基于H1周期，请不要凭空推测M15/M30/H4等其他周期的共振情况。如具有多周期数据则会在技术指标行中标注。"
         lines.append(line)

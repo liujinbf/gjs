@@ -30,6 +30,7 @@ def _build_markdown(entry: dict) -> str:
     external_bias_note    = _normalize_text(entry.get("external_bias_note", ""))
     position_plan_text    = _normalize_text(entry.get("position_plan_text", ""))
     entry_invalidation_text = _normalize_text(entry.get("entry_invalidation_text", ""))
+    entry_zone_text       = _normalize_text(entry.get("entry_zone_text", ""))
     aggregate_count       = int(entry.get("aggregate_count", 0) or 0)
     notify_mode_text      = _normalize_text(entry.get("notify_mode_text", ""))
 
@@ -135,6 +136,8 @@ def _build_markdown(entry: dict) -> str:
             action_lines.append(f"  - 目标位2：{float(take_profit_2):,.2f}")
         except (TypeError, ValueError):
             pass
+    if entry_zone_text:
+        action_lines.append(f"  - 观察区间：{entry_zone_text}")
     if position_plan_text:
         action_lines.append(f"  - 仓位节奏：{position_plan_text}")
     if entry_invalidation_text:

@@ -464,6 +464,7 @@ def test_build_markdown_includes_risk_reward_action_levels():
             "stop_loss_price": 4748.0,
             "take_profit_1": 4788.0,
             "take_profit_2": 4810.0,
+            "entry_zone_text": "观察进场区间 4760.00 - 4770.00，若价格直接远离该区间，就不建议追。",
             "position_plan_text": "可轻仓试仓，优先分两段止盈，第一目标落袋后再看延续。",
             "entry_invalidation_text": "若价格重新跌回 4748.00 下方，当前多头结构可视为失效。",
         }
@@ -473,6 +474,7 @@ def test_build_markdown_includes_risk_reward_action_levels():
     assert "止损位：4,748.00" in markdown
     assert "目标位1：4,788.00" in markdown
     assert "目标位2：4,810.00" in markdown
+    assert "观察区间：观察进场区间 4760.00 - 4770.00，若价格直接远离该区间，就不建议追。" in markdown
     assert "仓位节奏：可轻仓试仓，优先分两段止盈，第一目标落袋后再看延续。" in markdown
     assert "失效条件：若价格重新跌回 4748.00 下方，当前多头结构可视为失效。" in markdown
 

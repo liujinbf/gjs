@@ -88,6 +88,7 @@ def test_build_snapshot_history_entries_adds_structure_entry_with_action_meta():
                 "risk_reward_stop_price": 4748.0,
                 "risk_reward_target_price": 4788.0,
                 "risk_reward_target_price_2": 4810.0,
+                "risk_reward_entry_zone_text": "观察进场区间 4760.00 - 4770.00，若价格直接远离该区间，就不建议追。",
                 "risk_reward_position_text": "可轻仓试仓，优先分两段止盈，第一目标落袋后再看延续。",
                 "risk_reward_invalidation_text": "若价格重新跌回 4748.00 下方，当前多头结构可视为失效。",
             }
@@ -103,6 +104,7 @@ def test_build_snapshot_history_entries_adds_structure_entry_with_action_meta():
     assert structure_entry["take_profit_1"] == 4788.0
     assert structure_entry["take_profit_2"] == 4810.0
     assert "两段止盈" in structure_entry["position_plan_text"]
+    assert "观察进场区间" in structure_entry["detail"]
 
 
 def test_build_snapshot_history_entries_adds_external_source_alerts():

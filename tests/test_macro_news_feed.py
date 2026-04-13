@@ -47,6 +47,7 @@ def test_load_macro_news_feed_reads_local_rss_and_filters_by_symbols(tmp_path):
     assert result["item_count"] >= 1
     assert any("ECB" in item["title"] or item["source"] == "ECB Feed" for item in result["items"])
     assert all("USDJPY" not in list(item.get("symbols", []) or []) for item in result["items"])
+    assert any(item.get("bias_by_symbol", {}).get("EURUSD") == "bullish" for item in result["items"])
 
 
 def test_load_macro_news_feed_falls_back_to_cache_when_source_fails(tmp_path):
@@ -107,3 +108,37 @@ def test_apply_macro_news_to_snapshot_appends_digest():
     assert "资讯流：" in result["summary_text"]
     assert "ECB policy decision" in result["market_text"]
     assert result["macro_news_status_text"] == "外部资讯流已同步：2 条高相关更新。"
+
+
+def test_load_macro_news_feed_infers_bearish_bias_for_gold_from_hawkish_fed(tmp_path):
+    source_file = tmp_path / "macro_gold.xml"
+    cache_file = tmp_path / "macro_gold_cache.json"
+    source_file.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Fed Feed</title>
+    <item>
+      <title>Powell stays hawkish as higher yields pressure gold</title>
+      <description>Markets price higher for longer after strong payroll and sticky inflation.</description>
+      <pubDate>Mon, 13 Apr 2026 09:00:00 GMT</pubDate>
+      <link>https://example.com/fed-1</link>
+    </item>
+  </channel>
+</rss>
+""",
+        encoding="utf-8",
+    )
+
+    result = load_macro_news_feed(
+        enabled=True,
+        source_text=str(source_file),
+        refresh_min=30,
+        symbols=["XAUUSD"],
+        now=datetime(2026, 4, 13, 18, 0, 0),
+        cache_file=cache_file,
+    )
+
+    assert result["status"] == "fresh"
+    assert result["items"][0]["bias_by_symbol"]["XAUUSD"] == "bearish"
+    assert "XAUUSD 偏空" in result["summary_text"]

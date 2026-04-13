@@ -42,6 +42,15 @@ def test_build_snapshot_prompt_contains_symbols_and_alerts():
                 "status_text": "实时报价",
                 "macro_focus": "重点看非农、CPI 和联储。",
                 "execution_note": "点差稳定，可继续观察。",
+                "risk_reward_ready": True,
+                "risk_reward_ratio": 2.1,
+                "risk_reward_stop_price": 4748.0,
+                "risk_reward_target_price": 4788.0,
+                "risk_reward_target_price_2": 4810.0,
+                "risk_reward_entry_zone_text": "观察进场区间 4760.00 - 4770.00，若价格直接远离该区间，就不建议追。",
+                "risk_reward_position_text": "可轻仓试仓，优先分两段止盈。",
+                "risk_reward_invalidation_text": "若价格重新跌回 4748.00 下方，结构视为失效。",
+                "external_bias_note": "资讯流：Fed Feed《Powell stays hawkish as yields rise》对 XAUUSD 当前更偏空",
             }
         ],
     }
@@ -59,6 +68,8 @@ def test_build_snapshot_prompt_contains_symbols_and_alerts():
     assert "执行建议" in prompt
     assert "当前有效规则集" in prompt
     assert "暂不采用规则" in prompt
+    assert "观察进场区间" in prompt
+    assert "外部背景修正" in prompt
 
 
 def test_full_prompt_assets_are_independent():

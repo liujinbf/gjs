@@ -106,6 +106,30 @@ def _pick_macro_data_item(symbol: str, snapshot: dict) -> dict | None:
     return candidates[0]
 
 
+def _pick_macro_news_item(symbol: str, snapshot: dict) -> dict | None:
+    target_symbol = _normalize_text(symbol).upper()
+    candidates = []
+    for item in list(snapshot.get("macro_news_items", []) or []):
+        bias_by_symbol = dict(item.get("bias_by_symbol", {}) or {})
+        bias = _normalize_text(bias_by_symbol.get(target_symbol, "")).lower()
+        if bias not in {"bullish", "bearish"}:
+            continue
+        if not _symbol_matches(target_symbol, item.get("symbols", [])):
+            continue
+        candidates.append(dict(item))
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda current: (
+            _importance_rank(current.get("importance", "")),
+            _normalize_text(current.get("published_at", "")),
+            _normalize_text(current.get("title", "")),
+        ),
+        reverse=True,
+    )
+    return candidates[0]
+
+
 def _build_event_note(event_item: dict) -> str:
     summary = _normalize_text(event_item.get("result_summary_text", ""))
     if summary:
@@ -127,6 +151,16 @@ def _build_macro_note(macro_item: dict) -> str:
         parts.append(delta_text)
     parts.append(f"背景{direction_text}")
     return "，".join(parts)
+
+
+def _build_macro_news_note(symbol: str, news_item: dict) -> str:
+    symbol_key = _normalize_text(symbol).upper()
+    bias_by_symbol = dict(news_item.get("bias_by_symbol", {}) or {})
+    bias = _normalize_text(bias_by_symbol.get(symbol_key, "")).lower()
+    bias_text = "偏多" if bias == "bullish" else ("偏空" if bias == "bearish" else "中性")
+    source = _normalize_text(news_item.get("source", "")) or "外部资讯流"
+    title = _normalize_text(news_item.get("title", "")) or "最新资讯"
+    return f"资讯流：{source}《{title}》对 {symbol_key} 当前更偏{bias_text}"
 
 
 def _replace_summary_line(summary_text: str, prefix: str, line: str) -> str:
@@ -153,6 +187,7 @@ def apply_external_signal_context(snapshot: dict, event_context: dict | None = N
         signal_bias = _resolve_signal_bias(item)
         event_item = _pick_event_result_item(symbol, payload)
         macro_item = _pick_macro_data_item(symbol, payload)
+        macro_news_item = _pick_macro_news_item(symbol, payload)
 
         external_notes = []
         strongest_conflict_rank = 0
@@ -168,6 +203,11 @@ def apply_external_signal_context(snapshot: dict, event_context: dict | None = N
                 macro_item,
                 _normalize_text((macro_item or {}).get("direction", "")).lower(),
                 _build_macro_note(macro_item) if macro_item else "",
+            ),
+            (
+                macro_news_item,
+                _normalize_text((dict((macro_news_item or {}).get("bias_by_symbol", {}) or {}).get(symbol, ""))).lower(),
+                _build_macro_news_note(symbol, macro_news_item) if macro_news_item else "",
             ),
         ):
             if not source_item or source_bias not in {"bullish", "bearish"} or not note_text:

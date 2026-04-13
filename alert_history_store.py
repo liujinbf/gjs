@@ -121,6 +121,9 @@ def _item_action_meta(item: dict, fallback_trade_meta: dict | None = None) -> di
         "take_profit_2": float(item.get("risk_reward_target_price_2", 0.0) or 0.0),
         "position_plan_text": _normalize_text(item.get("risk_reward_position_text", "")),
         "entry_invalidation_text": _normalize_text(item.get("risk_reward_invalidation_text", "")),
+        "entry_zone_low": float(item.get("risk_reward_entry_zone_low", 0.0) or 0.0),
+        "entry_zone_high": float(item.get("risk_reward_entry_zone_high", 0.0) or 0.0),
+        "entry_zone_text": _normalize_text(item.get("risk_reward_entry_zone_text", "")),
         "external_bias_note": _normalize_text(item.get("external_bias_note", "")),
         "rsi14": item.get("rsi14"),
         "ma20": item.get("ma20"),
@@ -136,6 +139,10 @@ def _item_action_meta(item: dict, fallback_trade_meta: dict | None = None) -> di
         result.pop("take_profit_1", None)
     if result["take_profit_2"] <= 0:
         result.pop("take_profit_2", None)
+    if result["entry_zone_low"] <= 0:
+        result.pop("entry_zone_low", None)
+    if result["entry_zone_high"] <= 0:
+        result.pop("entry_zone_high", None)
     if result["stop_loss_price"] <= 0:
         result.pop("stop_loss_price", None)
     if result["risk_reward_ratio"] <= 0:
@@ -247,6 +254,7 @@ def _build_structure_entries(
             signal_side,
             _normalize_text(item.get("trade_grade_detail", "")),
             _normalize_text(item.get("risk_reward_context_text", "")),
+            _normalize_text(item.get("risk_reward_entry_zone_text", "")),
             _normalize_text(item.get("risk_reward_position_text", "")),
             _normalize_text(item.get("risk_reward_invalidation_text", "")),
             _normalize_text(item.get("external_bias_note", "")),

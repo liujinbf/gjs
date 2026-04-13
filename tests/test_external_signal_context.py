@@ -84,3 +84,44 @@ def test_apply_external_signal_context_keeps_candidate_when_macro_aligns():
     assert item["trade_grade"] == "可轻仓试仓"
     assert "宏观数据" in item["execution_note"]
     assert "外部背景与当前结构同向" in result["summary_text"]
+
+
+def test_apply_external_signal_context_downgrades_conflicting_macro_news():
+    snapshot = {
+        "status_tone": "success",
+        "event_risk_mode": "normal",
+        "summary_text": "出手分级：可轻仓试仓。结构相对干净，可作为候选机会。",
+        "items": [
+            {
+                "symbol": "XAUUSD",
+                "trade_grade": "可轻仓试仓",
+                "trade_grade_source": "structure",
+                "trade_grade_detail": "结构相对干净，可作为候选机会。",
+                "trade_next_review": "10 分钟后复核。",
+                "execution_note": "可轻仓试仓：结构相对干净。",
+                "signal_side": "long",
+                "alert_state_text": "结构候选",
+                "alert_state_detail": "当前执行面相对干净。",
+                "alert_state_tone": "success",
+                "alert_state_rank": 2,
+            }
+        ],
+        "event_feed_items": [],
+        "macro_data_items": [],
+        "macro_news_items": [
+            {
+                "title": "Powell stays hawkish as yields rise",
+                "source": "Fed Feed",
+                "importance": "high",
+                "published_at": "2026-04-13 17:30:00",
+                "symbols": ["XAUUSD"],
+                "bias_by_symbol": {"XAUUSD": "bearish"},
+            }
+        ],
+    }
+
+    result = apply_external_signal_context(snapshot)
+    item = result["items"][0]
+    assert item["trade_grade"] == "只适合观察"
+    assert "资讯流" in item["execution_note"]
+    assert "Powell stays hawkish" in item["trade_grade_detail"]

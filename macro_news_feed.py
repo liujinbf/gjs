@@ -55,6 +55,43 @@ SYMBOL_KEYWORDS = {
     "EURUSD": {"ecb", "lagarde", "euro area", "eurozone", "euro", "federal reserve", "powell", "dollar", "cpi", "pce"},
     "USDJPY": {"boj", "bank of japan", "ueda", "yen", "japan", "treasury", "yield", "federal reserve", "powell"},
 }
+USD_HAWKISH_KEYWORDS = {
+    "hawkish",
+    "rate hike",
+    "higher for longer",
+    "sticky inflation",
+    "hot inflation",
+    "strong payroll",
+    "strong labor",
+    "higher yield",
+    "yields rise",
+    "stronger dollar",
+}
+USD_DOVISH_KEYWORDS = {
+    "dovish",
+    "rate cut",
+    "easing",
+    "cooling inflation",
+    "soft inflation",
+    "weak payroll",
+    "weak labor",
+    "lower yield",
+    "yields fall",
+    "weaker dollar",
+}
+ECB_HAWKISH_KEYWORDS = {
+    "ecb hawkish",
+    "lagarde hawkish",
+    "rate hike",
+    "policy tightening",
+    "higher rates",
+    "inflation remains in focus",
+    "inflation still in focus",
+    "inflation remains the focus",
+}
+ECB_DOVISH_KEYWORDS = {"ecb dovish", "lagarde dovish", "rate cut", "policy easing", "lower rates"}
+BOJ_HAWKISH_KEYWORDS = {"boj hawkish", "ueda hawkish", "tightening", "yield hike", "higher rates", "yen stronger"}
+BOJ_DOVISH_KEYWORDS = {"boj dovish", "ueda dovish", "policy easing", "more stimulus", "yen weaker"}
 
 
 def _normalize_text(value: object) -> str:
@@ -182,6 +219,53 @@ def _infer_importance(title: str, summary: str) -> str:
     return "low"
 
 
+def _text_contains_any(text: str, keywords: set[str]) -> bool:
+    return any(keyword in text for keyword in keywords)
+
+
+def _infer_symbol_news_bias(symbol: str, title: str, summary: str, source: str) -> str:
+    symbol_key = str(symbol or "").strip().upper()
+    text = f"{_normalize_text(title)} {_normalize_text(summary)} {_normalize_text(source)}".lower()
+
+    if symbol_key in {"XAUUSD", "XAGUSD"}:
+        if _text_contains_any(text, USD_HAWKISH_KEYWORDS):
+            return "bearish"
+        if _text_contains_any(text, USD_DOVISH_KEYWORDS):
+            return "bullish"
+    elif symbol_key == "EURUSD":
+        if _text_contains_any(text, ECB_HAWKISH_KEYWORDS):
+            return "bullish"
+        if _text_contains_any(text, ECB_DOVISH_KEYWORDS):
+            return "bearish"
+        if _text_contains_any(text, USD_HAWKISH_KEYWORDS):
+            return "bearish"
+        if _text_contains_any(text, USD_DOVISH_KEYWORDS):
+            return "bullish"
+    elif symbol_key == "USDJPY":
+        if _text_contains_any(text, BOJ_HAWKISH_KEYWORDS):
+            return "bearish"
+        if _text_contains_any(text, BOJ_DOVISH_KEYWORDS):
+            return "bullish"
+        if _text_contains_any(text, USD_HAWKISH_KEYWORDS):
+            return "bullish"
+        if _text_contains_any(text, USD_DOVISH_KEYWORDS):
+            return "bearish"
+    return "neutral"
+
+
+def _build_bias_summary_text(symbols: list[str], title: str, summary: str, source: str) -> tuple[dict[str, str], str]:
+    bias_by_symbol = {}
+    summaries = []
+    for symbol in list(symbols or []):
+        bias = _infer_symbol_news_bias(symbol, title, summary, source)
+        if bias not in {"bullish", "bearish"}:
+            continue
+        bias_by_symbol[str(symbol).strip().upper()] = bias
+        bias_text = "偏多" if bias == "bullish" else "偏空"
+        summaries.append(f"{str(symbol).strip().upper()} {bias_text}")
+    return bias_by_symbol, "；".join(summaries)
+
+
 def _source_name_from_url(url: str) -> str:
     host = (urlparse(str(url or "").strip()).netloc or "").lower()
     if "ecb.europa.eu" in host:
@@ -269,6 +353,7 @@ def _parse_feed_items(xml_text: str, source_url: str, watch_symbols: list[str] |
         seen.add(signature)
         symbols = _infer_symbols(title, summary, watch_symbols=watch_symbols)
         importance = _infer_importance(title, summary)
+        bias_by_symbol, bias_summary_text = _build_bias_summary_text(symbols, title, summary, _normalize_text(item.get("source", "")) or source_name)
         normalized.append(
             {
                 "title": title,
@@ -278,6 +363,8 @@ def _parse_feed_items(xml_text: str, source_url: str, watch_symbols: list[str] |
                 "source": _normalize_text(item.get("source", "")) or source_name,
                 "importance": importance,
                 "symbols": symbols,
+                "bias_by_symbol": bias_by_symbol,
+                "bias_summary_text": bias_summary_text,
             }
         )
     return normalized
@@ -308,10 +395,14 @@ def _format_digest(items: list[dict]) -> str:
     for item in items[:3]:
         title = _normalize_text(item.get("title", ""))
         source = _normalize_text(item.get("source", ""))
+        bias_summary_text = _normalize_text(item.get("bias_summary_text", ""))
         if source:
-            highlights.append(f"{source}：{title}")
+            text = f"{source}：{title}"
         else:
-            highlights.append(title)
+            text = title
+        if bias_summary_text:
+            text += f"（{bias_summary_text}）"
+        highlights.append(text)
     return f"外部资讯流：近一轮抓到 {len(items)} 条高相关更新，最新包括 {'；'.join(highlights)}。"
 
 
