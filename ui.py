@@ -19,7 +19,7 @@ from external_signal_context import apply_external_signal_context
 from knowledge_feedback import refresh_rule_feedback_scores, summarize_feedback_stats
 from knowledge_governance import build_learning_report, refresh_rule_governance
 from knowledge_ai_signals import record_ai_signal, summarize_recent_ai_signals
-from knowledge_ml import annotate_snapshot_with_model, train_probability_model
+from knowledge_ml import annotate_snapshot_with_model, apply_model_probability_context, train_probability_model
 from knowledge_runtime import backfill_snapshot_outcomes, record_snapshot, summarize_outcome_stats
 from knowledge_scoring import match_rules_to_snapshots, refresh_rule_scores, summarize_rule_scores
 from macro_data_feed import apply_macro_data_to_snapshot, load_macro_data_feed
@@ -839,6 +839,7 @@ class MetalMonitorWindow(QMainWindow):
         self._worker = None
         self.btn_refresh.setEnabled(True)
         snapshot = annotate_snapshot_with_model(snapshot)
+        snapshot = apply_model_probability_context(snapshot)
         self._last_snapshot = dict(snapshot or {})
         self._set_status_badge(snapshot.get("status_badge", "MT5 未连接"), snapshot.get("status_tone", "negative"))
         self.lbl_status_hint.setText(snapshot.get("status_hint", ""))

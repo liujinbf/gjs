@@ -17,6 +17,8 @@ from knowledge_base import KNOWLEDGE_DB_FILE, open_knowledge_connection
 MODEL_NAME = "naive-edge-v1"
 MIN_TRAIN_SAMPLES = 20
 MIN_FEATURE_SAMPLES = 4
+LOW_PROBABILITY_BLOCK = 0.48
+HIGH_PROBABILITY_CONFIRM = 0.68
 
 
 def _connect(db_path: Path | str | None = None) -> sqlite3.Connection:
@@ -356,3 +358,81 @@ def annotate_snapshot_with_model(snapshot: dict, db_path: Path | str | None = No
     else:
         result["model_probability_summary_text"] = "本地模型样本仍不足，暂不提供胜率概率。"
     return result
+
+
+def _replace_summary_line(summary_text: str, prefix: str, line: str) -> str:
+    lines = [str(current or "") for current in str(summary_text or "").splitlines()]
+    replaced = False
+    for index, current in enumerate(lines):
+        if current.startswith(prefix):
+            lines[index] = line
+            replaced = True
+            break
+    if not replaced:
+        lines.append(line)
+    return "\n".join(current for current in lines if _normalize_text(current))
+
+
+def apply_model_probability_context(snapshot: dict) -> dict:
+    payload = dict(snapshot or {})
+    items = []
+    model_notes = []
+
+    for raw_item in list(payload.get("items", []) or []):
+        item = dict(raw_item or {})
+        probability = float(item.get("model_win_probability", 0.0) or 0.0)
+        model_ready = bool(item.get("model_ready", False))
+        grade = _normalize_text(item.get("trade_grade", ""))
+        symbol = _normalize_text(item.get("symbol", "")).upper()
+
+        if model_ready and grade == "可轻仓试仓" and probability < LOW_PROBABILITY_BLOCK:
+            item["trade_grade"] = "只适合观察"
+            item["trade_grade_source"] = "model"
+            detail = _normalize_text(item.get("trade_grade_detail", ""))
+            item["trade_grade_detail"] = (
+                f"{detail} 本地模型参考胜率仅约 {probability * 100:.0f}%，"
+                "说明当前结构虽然好看，但历史延续率还不够，先别急着动手。"
+            ).strip()
+            item["trade_next_review"] = "建议等下一轮结构确认或模型胜率回到更健康区间后再复核。"
+            item["alert_state_text"] = "模型概率偏低"
+            item["alert_state_detail"] = item["trade_grade_detail"]
+            item["alert_state_tone"] = "accent"
+            item["alert_state_rank"] = max(int(item.get("alert_state_rank", 0) or 0), 3)
+            model_notes.append(f"{symbol} 模型参考胜率约 {probability * 100:.0f}%，已从候选机会降级为观察。")
+        elif model_ready and grade == "可轻仓试仓" and probability >= HIGH_PROBABILITY_CONFIRM:
+            detail = _normalize_text(item.get("trade_grade_detail", ""))
+            item["trade_grade_detail"] = (
+                f"{detail} 本地模型参考胜率约 {probability * 100:.0f}%，"
+                "历史样本对当前结构有一定背书，但仍只按轻仓候选处理。"
+            ).strip()
+            model_notes.append(f"{symbol} 模型参考胜率约 {probability * 100:.0f}%，与当前候选结构基本一致。")
+
+        items.append(item)
+
+    payload["items"] = items
+    if model_notes:
+        payload["summary_text"] = _replace_summary_line(
+            str(payload.get("summary_text", "") or ""),
+            "模型参考：",
+            f"模型参考：{'；'.join(model_notes[:3])}",
+        )
+
+        from monitor_rules import build_portfolio_trade_grade
+
+        connected = str(payload.get("status_tone", "") or "").strip().lower() == "success"
+        portfolio_grade = build_portfolio_trade_grade(
+            items,
+            connected,
+            event_risk_mode=str(payload.get("event_risk_mode", "normal") or "normal"),
+            event_context=None,
+        )
+        payload["trade_grade"] = portfolio_grade["grade"]
+        payload["trade_grade_detail"] = portfolio_grade["detail"]
+        payload["trade_next_review"] = portfolio_grade["next_review"]
+        payload["trade_grade_tone"] = portfolio_grade["tone"]
+        payload["summary_text"] = _replace_summary_line(
+            str(payload.get("summary_text", "") or ""),
+            "出手分级：",
+            f"出手分级：{portfolio_grade['grade']}。{portfolio_grade['detail']}",
+        )
+    return payload

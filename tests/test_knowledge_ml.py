@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from knowledge_ml import annotate_snapshot_with_model, train_probability_model
+from knowledge_ml import annotate_snapshot_with_model, apply_model_probability_context, train_probability_model
 from knowledge_runtime import backfill_snapshot_outcomes, record_snapshot
 
 
@@ -80,3 +80,59 @@ def test_train_probability_model_and_annotate_snapshot(tmp_path):
     assert item["model_ready"] is True
     assert 0.05 <= item["model_win_probability"] <= 0.95
     assert "本地模型参考胜率" in item["model_note"]
+
+
+def test_apply_model_probability_context_downgrades_low_probability_setup():
+    snapshot = {
+        "status_tone": "success",
+        "event_risk_mode": "normal",
+        "summary_text": "出手分级：可轻仓试仓。结构相对干净，可作为候选机会。",
+        "trade_grade": "可轻仓试仓",
+        "trade_grade_detail": "结构相对干净，可作为候选机会。",
+        "items": [
+            {
+                "symbol": "XAUUSD",
+                "trade_grade": "可轻仓试仓",
+                "trade_grade_detail": "结构相对干净，可作为候选机会。",
+                "trade_next_review": "10 分钟后复核。",
+                "trade_grade_source": "structure",
+                "alert_state_text": "结构候选",
+                "alert_state_rank": 2,
+                "model_ready": True,
+                "model_win_probability": 0.42,
+            }
+        ],
+    }
+    result = apply_model_probability_context(snapshot)
+    item = result["items"][0]
+    assert item["trade_grade"] == "只适合观察"
+    assert item["trade_grade_source"] == "model"
+    assert "本地模型参考胜率仅约 42%" in item["trade_grade_detail"]
+    assert result["trade_grade"] == "只适合观察"
+    assert "模型参考：" in result["summary_text"]
+
+
+def test_apply_model_probability_context_keeps_high_probability_setup_as_candidate():
+    snapshot = {
+        "status_tone": "success",
+        "event_risk_mode": "normal",
+        "summary_text": "出手分级：可轻仓试仓。结构相对干净，可作为候选机会。",
+        "trade_grade": "可轻仓试仓",
+        "trade_grade_detail": "结构相对干净，可作为候选机会。",
+        "items": [
+            {
+                "symbol": "XAUUSD",
+                "trade_grade": "可轻仓试仓",
+                "trade_grade_detail": "结构相对干净，可作为候选机会。",
+                "trade_next_review": "10 分钟后复核。",
+                "trade_grade_source": "structure",
+                "model_ready": True,
+                "model_win_probability": 0.74,
+            }
+        ],
+    }
+    result = apply_model_probability_context(snapshot)
+    item = result["items"][0]
+    assert item["trade_grade"] == "可轻仓试仓"
+    assert "本地模型参考胜率约 74%" in item["trade_grade_detail"]
+    assert result["trade_grade"] == "可轻仓试仓"
