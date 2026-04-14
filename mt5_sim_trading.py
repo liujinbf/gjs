@@ -93,7 +93,7 @@ class SimTradingEngine:
             if not row:
                 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 conn.execute(
-                    "INSERT INTO sim_accounts (user_id, balance, equity, updated_at) VALUES (?, ?, ?, ?)",
+                    "INSERT OR IGNORE INTO sim_accounts (user_id, balance, equity, updated_at) VALUES (?, ?, ?, ?)",
                     (user_id, 100000.0, 100000.0, now)
                 )
                 conn.commit()

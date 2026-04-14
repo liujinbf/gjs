@@ -55,10 +55,10 @@ def _post_json(url: str, payload: dict, api_key: str, timeout: int = 90) -> dict
 
 
 def _post_json_with_headers(url: str, payload: dict, headers: dict[str, str], timeout: int = 90) -> dict:
-    """N-002 修复：通用 JSON POST 请求，使用 socket.setdefaulttimeout 保护连接阶段超时。
-    N-006 修复：合并原来两个 99% 相同的函数，消除代码重复。
+    """通用 JSON POST 请求。
+
+    只使用 urlopen 自身的 timeout 参数，避免污染全局 socket 默认超时。
     """
-    import socket as _socket
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = request.Request(
         url=str(url).strip(),
@@ -66,9 +66,6 @@ def _post_json_with_headers(url: str, payload: dict, headers: dict[str, str], ti
         headers=headers,
         method="POST",
     )
-    # N-002：socket 全局超时保护连接阶段（DNS 解析 + TCP 握手），防止无限卡住
-    prev_timeout = _socket.getdefaulttimeout()
-    _socket.setdefaulttimeout(timeout)
     try:
         with request.urlopen(req, timeout=timeout) as response:
             text = response.read().decode("utf-8", errors="ignore")
@@ -77,8 +74,6 @@ def _post_json_with_headers(url: str, payload: dict, headers: dict[str, str], ti
         raise RuntimeError(f"HTTP {exc.code}: {detail or exc.reason}") from exc
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(str(exc)) from exc
-    finally:
-        _socket.setdefaulttimeout(prev_timeout)  # 恢复原有全局超时
 
     try:
         return json.loads(text)

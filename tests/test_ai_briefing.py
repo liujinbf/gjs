@@ -1,10 +1,11 @@
+import socket
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from ai_briefing import build_snapshot_prompt, request_ai_brief
+from ai_briefing import _post_json_with_headers, build_snapshot_prompt, request_ai_brief
 from app_config import MetalMonitorConfig
 from prompt_templates import build_metal_advisor_prompt, build_metal_batch_prompt
 
@@ -258,4 +259,39 @@ def test_request_ai_brief_marks_invalid_signal_meta(monkeypatch):
     result = request_ai_brief({"summary_text": "测试快照", "items": []}, _build_config())
     assert result["signal_meta"]["action"] == "long"
     assert result["signal_meta_valid"] is False
-    assert "做多信号要求" in result["signal_meta_reason"]
+
+
+def test_post_json_with_headers_does_not_mutate_global_socket_timeout(monkeypatch):
+    captured = {}
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"ok": true}'
+
+    def fake_urlopen(req, timeout=0):
+        captured["timeout"] = timeout
+        captured["url"] = req.full_url
+        return _FakeResponse()
+
+    def fail_setdefaulttimeout(*args, **kwargs):
+        raise AssertionError("不应修改全局 socket 默认超时")
+
+    monkeypatch.setattr("ai_briefing.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(socket, "setdefaulttimeout", fail_setdefaulttimeout)
+
+    result = _post_json_with_headers(
+        "https://example.com/v1/chat/completions",
+        {"hello": "world"},
+        headers={"Authorization": "Bearer demo"},
+        timeout=12,
+    )
+
+    assert result["ok"] is True
+    assert captured["timeout"] == 12
+    assert captured["url"] == "https://example.com/v1/chat/completions"

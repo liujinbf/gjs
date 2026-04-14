@@ -45,7 +45,9 @@ def _read_cache(cache_file: Path) -> dict:
 
 def _write_cache(cache_file: Path, payload: dict) -> None:
     cache_file.parent.mkdir(parents=True, exist_ok=True)
-    cache_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_file = cache_file.with_suffix(f"{cache_file.suffix}.tmp")
+    temp_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_file.replace(cache_file)
 
 
 def _parse_cache_time(value: object) -> datetime | None:

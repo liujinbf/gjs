@@ -212,3 +212,53 @@ def test_short_position_uses_ask_for_stop_loss_trigger():
     assert "止损" in str(trade["reason"])
 
     shutil.rmtree(TEST_DIR, ignore_errors=True)
+
+
+def test_get_account_uses_insert_or_ignore_for_first_time_creation(monkeypatch):
+    executed_sql: list[str] = []
+    row_payload = {
+        "user_id": "system",
+        "balance": 100000.0,
+        "equity": 100000.0,
+        "used_margin": 0.0,
+        "total_profit": 0.0,
+        "win_count": 0,
+        "loss_count": 0,
+        "updated_at": "2026-04-14 10:00:00",
+    }
+
+    class _FakeCursor:
+        def __init__(self, row=None):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class _FakeConn:
+        def __init__(self):
+            self._select_count = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params=()):
+            executed_sql.append(str(sql))
+            if str(sql).startswith("SELECT"):
+                self._select_count += 1
+                return _FakeCursor(None if self._select_count == 1 else row_payload)
+            return _FakeCursor(None)
+
+        def commit(self):
+            return None
+
+    eng = object.__new__(SimTradingEngine)
+    eng.db_file = str(TEST_DIR / "fake.sqlite")
+    monkeypatch.setattr(eng, "_connect", lambda: _FakeConn())
+
+    account = SimTradingEngine.get_account(eng)
+
+    assert account["balance"] == 100000.0
+    assert any("INSERT OR IGNORE INTO sim_accounts" in sql for sql in executed_sql)

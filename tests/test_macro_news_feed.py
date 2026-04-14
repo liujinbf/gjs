@@ -5,7 +5,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from macro_news_feed import apply_macro_news_to_snapshot, load_macro_news_feed
+import macro_news_feed
+from macro_news_feed import _write_cache, apply_macro_news_to_snapshot, load_macro_news_feed
 
 
 def test_load_macro_news_feed_reads_local_rss_and_filters_by_symbols(tmp_path):
@@ -142,3 +143,13 @@ def test_load_macro_news_feed_infers_bearish_bias_for_gold_from_hawkish_fed(tmp_
     assert result["status"] == "fresh"
     assert result["items"][0]["bias_by_symbol"]["XAUUSD"] == "bearish"
     assert "XAUUSD 偏空" in result["summary_text"]
+
+
+def test_macro_news_cache_write_is_atomic(tmp_path):
+    cache_file = tmp_path / "macro_news_cache.json"
+
+    _write_cache(cache_file, {"status": "fresh", "items": [{"title": "demo"}]})
+
+    assert cache_file.exists()
+    assert not cache_file.with_suffix(".json.tmp").exists()
+    assert macro_news_feed._read_cache(cache_file)["status"] == "fresh"

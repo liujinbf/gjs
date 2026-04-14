@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import macro_data_feed
-from macro_data_feed import apply_macro_data_to_snapshot, load_macro_data_feed
+from macro_data_feed import _write_cache, apply_macro_data_to_snapshot, load_macro_data_feed
 
 
 def test_load_macro_data_feed_supports_fred_and_bls_specs(monkeypatch, tmp_path):
@@ -305,3 +305,13 @@ def test_official_json_file_is_valid_and_has_new_providers():
     for spec in specs:
         missing = required_keys - set(spec.keys())
         assert not missing, f"条目 {spec.get('name', '?')} 缺少字段 {missing}"
+
+
+def test_macro_data_cache_write_is_atomic(tmp_path):
+    cache_file = tmp_path / "macro_cache.json"
+
+    _write_cache(cache_file, {"status": "fresh", "items": [1, 2, 3]})
+
+    assert cache_file.exists()
+    assert not cache_file.with_suffix(".json.tmp").exists()
+    assert macro_data_feed._read_cache(cache_file)["status"] == "fresh"

@@ -1,4 +1,5 @@
 import os
+import queue
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -109,3 +110,17 @@ def test_process_snapshot_side_effects_runs_io_chain(monkeypatch):
     assert any("知识库" in line for line in result["log_lines"])
     assert any("消息推送" in line for line in result["log_lines"])
     assert any("模拟盘规则跟单" in line for line in result["log_lines"])
+
+
+def test_queue_latest_task_drops_oldest_snapshot_when_full(monkeypatch):
+    task_queue = queue.Queue(maxsize=1)
+    task_queue.put({"kind": "snapshot_side_effects", "snapshot": {"last_refresh_text": "old"}})
+    monkeypatch.setattr(ui, "SNAPSHOT_TASK_QUEUE", task_queue)
+
+    dropped_count = ui._queue_latest_task(
+        {"kind": "snapshot_side_effects", "snapshot": {"last_refresh_text": "new"}}
+    )
+
+    assert dropped_count == 1
+    queued = task_queue.get_nowait()
+    assert queued["snapshot"]["last_refresh_text"] == "new"

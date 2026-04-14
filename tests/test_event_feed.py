@@ -6,7 +6,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from event_feed import apply_event_feed_to_snapshot, build_schedule_text_from_payload, build_structured_event_items, load_event_feed, merge_event_schedule_texts
+import event_feed
+from event_feed import _write_cache, apply_event_feed_to_snapshot, build_schedule_text_from_payload, build_structured_event_items, load_event_feed, merge_event_schedule_texts
 
 
 def test_build_schedule_text_from_payload_supports_nested_events():
@@ -166,3 +167,13 @@ def test_apply_event_feed_to_snapshot_appends_result_summary():
     assert "事件结果：" in result["summary_text"]
     assert "美国 CPI" in result["market_text"]
     assert result["event_result_item_count"] == 1
+
+
+def test_event_feed_cache_write_is_atomic(tmp_path):
+    cache_file = tmp_path / "event_cache.json"
+
+    _write_cache(cache_file, {"source": "demo", "item_count": 3})
+
+    assert cache_file.exists()
+    assert not cache_file.with_suffix(".json.tmp").exists()
+    assert event_feed._read_cache(cache_file)["item_count"] == 3

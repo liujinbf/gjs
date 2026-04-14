@@ -30,8 +30,44 @@ from settings_dialog import MetalSettingsDialog
 from sim_signal_bridge import build_rule_sim_signal
 from ui_panels import DashboardMetricsPanel, InsightPanel, LeftTabPanel, WatchListTable
 
-SNAPSHOT_TASK_QUEUE: queue.Queue = queue.Queue()
+SNAPSHOT_TASK_QUEUE: queue.Queue = queue.Queue(maxsize=100)
 MACRO_SYNC_INTERVAL_MS = 15 * 60 * 1000
+
+
+def _queue_latest_task(task_payload: dict) -> int:
+    """将最新后台任务入队；若队列已满，优先淘汰最旧任务。"""
+    dropped_count = 0
+    while True:
+        try:
+            SNAPSHOT_TASK_QUEUE.put(task_payload, block=False)
+            return dropped_count
+        except queue.Full:
+            try:
+                dropped = SNAPSHOT_TASK_QUEUE.get_nowait()
+            except queue.Empty as exc:
+                raise queue.Full from exc
+            if isinstance(dropped, dict) and str(dropped.get("kind", "") or "").strip() == "stop":
+                # 理论上运行期不会遇到 stop；若遇到则保守失败，避免吞掉停机信号。
+                try:
+                    SNAPSHOT_TASK_QUEUE.put(dropped, block=False)
+                except queue.Full:
+                    pass
+                raise queue.Full
+            dropped_count += 1
+
+
+def _queue_stop_task() -> None:
+    """关闭窗口时确保停机信号可入队；必要时丢弃过期快照任务。"""
+    stop_task = {"kind": "stop"}
+    while True:
+        try:
+            SNAPSHOT_TASK_QUEUE.put(stop_task, block=False)
+            return
+        except queue.Full:
+            try:
+                SNAPSHOT_TASK_QUEUE.get_nowait()
+            except queue.Empty:
+                return
 
 
 def _load_external_feeds(runtime_config, symbols: list[str], cache_only: bool) -> dict:
@@ -635,7 +671,7 @@ class MetalMonitorWindow(QMainWindow):
         if _last is None or (_now - _last).total_seconds() >= _interval_min * 60:
             self._last_backtest_eval_time = _now
             run_backtest = True
-        SNAPSHOT_TASK_QUEUE.put(
+        dropped_count = _queue_latest_task(
             {
                 "kind": "snapshot_side_effects",
                 "snapshot": dict(snapshot or {}),
@@ -643,6 +679,8 @@ class MetalMonitorWindow(QMainWindow):
                 "run_backtest": run_backtest,
             }
         )
+        if dropped_count > 0:
+            self._append_log(f"[警告] 后台任务堆积，已丢弃 {dropped_count} 条过期风控与通知任务。")
 
     def _schedule_knowledge_sync(self, snapshot_ids: list[int] | None = None):
         for snapshot_id in list(snapshot_ids or []):
@@ -1033,7 +1071,7 @@ class MetalMonitorWindow(QMainWindow):
         if self._macro_worker and self._macro_worker.isRunning():
             self._macro_worker.wait(2000)
         if self._snapshot_task_worker and self._snapshot_task_worker.isRunning():
-            SNAPSHOT_TASK_QUEUE.put({"kind": "stop"})
+            _queue_stop_task()
             self._snapshot_task_worker.wait(1500)
         shutdown_connection()
         super().closeEvent(event)
