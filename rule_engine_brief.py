@@ -182,6 +182,25 @@ def _get_event_text(snapshot: dict) -> str:
     return "暂无重大宏观窗口，关注盘中价格结构变化。"
 
 
+def _describe_model_probability(snapshot: dict, item: dict) -> str:
+    summary = _ss(snapshot.get("model_probability_summary_text", ""), "")
+    model_ready = bool(item.get("model_ready", False))
+    if not model_ready:
+        return summary or "本地模型样本仍不足，暂不提供概率参考。"
+
+    probability = _sf(item.get("model_win_probability"))
+    confidence = _ss(item.get("model_confidence_text", ""), "")
+    note = _ss(item.get("model_note", ""), "")
+    parts = [f"当前结构参考胜率约 {probability * 100:.0f}%"]
+    if confidence:
+        parts.append(f"信心级别：{confidence}")
+    if note:
+        parts.append(note)
+    if summary:
+        parts.insert(0, summary)
+    return "；".join(part for part in parts if part)
+
+
 def _get_rulebook_text(snapshot: dict | None = None) -> str:
     """从知识库拉取当前有效规则摘要（最多取前 3 条）。"""
     try:
@@ -232,6 +251,7 @@ def generate_rule_engine_brief(snapshot: dict) -> dict:
     vix_text = _get_vix_text(snapshot)
     event_text = _get_event_text(snapshot)
     rule_text = _get_rulebook_text(snapshot)
+    model_text = _describe_model_probability(snapshot, item)
 
     # 布林带止损/目标 fallback（若 R/R 计算完成则用 R/R 数据）
     boll_upper = _sf(item.get("bollinger_upper"))
@@ -286,6 +306,7 @@ def generate_rule_engine_brief(snapshot: dict) -> dict:
         f"• MACD：{macd_text}"
         f"{h4_line}"
         f"{vix_line}\n"
+        f"• 概率：{model_text}\n"
         f"• 情绪：规则引擎无情绪量化能力，请结合近期 K 线形态人工判断。\n"
         f"\n"
         f"🛠️ 执行建议：{exec_text}\n"

@@ -7,8 +7,8 @@
 3. 保持"硬核数据 + 大白话"双轨风格，既专业又易读
 """
 
-PROMPT_VERSION = "metal-monitor-v2.1"
-ADVISOR_PROMPT_VERSION = "metal-monitor-advisor-v2.1"
+PROMPT_VERSION = "metal-monitor-v2.2"
+ADVISOR_PROMPT_VERSION = "metal-monitor-advisor-v2.2"
 
 AI_BRIEF_SYSTEM_PROMPT = (
     "你是一位拥有 15 年经验的「贵金属与外汇资深量化交易教练」。\n"
@@ -89,6 +89,8 @@ AI_BRIEF_TASK_TEMPLATE = """\
 }}
 8. 若当前结论是观望，action 必须填 neutral，price/sl/tp 一律填 0。
 9. summary_text 内禁止再嵌入 TRACKER_META、HTML 注释或额外 JSON。
+10. 若“本地概率模型”模块提供了参考胜率，必须在正文里明确说明它与当前结论是"一致"还是"冲突"。
+11. 当本地模型参考胜率低于 50% 时，禁止把该机会写成明确进场建议，最多只能写成观察或等待确认。
 
 运行概览：
 {summary_text}
@@ -101,6 +103,9 @@ AI_BRIEF_TASK_TEMPLATE = """\
 
 宏观结构性数据（WorldBank，长期周期参考）：
 {macro_data_text}
+
+本地概率模型（只作辅助，不可单独替代风控）：
+{local_model_text}
 
 当前有效规则集：
 {rulebook_text}
@@ -343,6 +348,27 @@ def _build_macro_data_lines(snapshot: dict) -> str:
     return "\n".join(lines)
 
 
+def _build_local_model_lines(snapshot: dict) -> str:
+    summary = str(snapshot.get("model_probability_summary_text", "") or "").strip()
+    item_lines = []
+    for item in list(snapshot.get("items", []) or []):
+        if not bool(item.get("model_ready", False)):
+            continue
+        symbol = str(item.get("symbol", "--") or "--").strip()
+        probability = float(item.get("model_win_probability", 0.0) or 0.0) * 100.0
+        confidence_text = str(item.get("model_confidence_text", "") or "").strip()
+        note = str(item.get("model_note", "") or "").strip()
+        line = f"- {symbol}：参考胜率 {probability:.0f}%"
+        if confidence_text:
+            line += f"（{confidence_text}）"
+        if note:
+            line += f"，{note}"
+        item_lines.append(line)
+    if item_lines:
+        return "\n".join(([summary] if summary else []) + item_lines[:3]).strip()
+    return summary or "本地模型样本仍不足，暂不提供胜率概率。"
+
+
 def build_metal_brief_prompt(snapshot: dict, rulebook: dict | None = None) -> str:
     rulebook = dict(rulebook or {})
     return AI_BRIEF_TASK_TEMPLATE.format(
@@ -350,6 +376,7 @@ def build_metal_brief_prompt(snapshot: dict, rulebook: dict | None = None) -> st
         alert_text=str(snapshot.get("alert_text", "") or "").strip() or "暂无提醒横条",
         market_text=str(snapshot.get("market_text", "") or "").strip() or "暂无市场提示",
         macro_data_text=_build_macro_data_lines(snapshot),
+        local_model_text=_build_local_model_lines(snapshot),
         rulebook_text=str(rulebook.get("active_rules_text", "") or "").strip() or "暂无已验证规则，优先服从当前快照。",
         regime_rulebook_text=str(rulebook.get("regime_rules_text", "") or "").strip() or "当前环境样本仍不足，先参考全局规则。",
         regime_watch_rulebook_text=str(rulebook.get("regime_watch_rules_text", "") or "").strip() or "当前环境暂无明确观察规则。",

@@ -36,6 +36,7 @@ def test_build_snapshot_prompt_contains_symbols_and_alerts():
         "alert_text": "贵金属提醒：先盯点差和美元方向。",
         "market_text": "黄金优先看非农和 CPI。",
         "regime_tag": "trend_expansion",
+        "model_probability_summary_text": "本地模型平均参考胜率约 71%。",
         "items": [
             {
                 "symbol": "XAUUSD",
@@ -45,6 +46,10 @@ def test_build_snapshot_prompt_contains_symbols_and_alerts():
                 "regime_text": "趋势扩张",
                 "macro_focus": "重点看非农、CPI 和联储。",
                 "execution_note": "点差稳定，可继续观察。",
+                "model_ready": True,
+                "model_win_probability": 0.74,
+                "model_confidence_text": "中等信心",
+                "model_note": "本地模型参考胜率约 74%。主要依据：regime_tag=trend_expansion（样本 88，胜率 69%）。",
                 "risk_reward_ready": True,
                 "risk_reward_ratio": 2.1,
                 "risk_reward_stop_price": 4748.0,
@@ -79,6 +84,9 @@ def test_build_snapshot_prompt_contains_symbols_and_alerts():
     assert "暂不采用规则" in prompt
     assert "观察进场区间" in prompt
     assert "外部背景修正" in prompt
+    assert "本地概率模型" in prompt
+    assert "本地模型平均参考胜率约 71%" in prompt
+    assert "参考胜率 74%" in prompt
 
 
 def test_full_prompt_assets_are_independent():
