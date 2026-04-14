@@ -476,6 +476,7 @@ def test_build_snapshot_from_rows_exposes_risk_reward_fields_and_hides_inactive_
                 "key_level_high": 4800.0,
                 "key_level_low": 4700.0,
                 "key_level_state": "breakout_above",
+                "atr14": 10.0,
             },
             {
                 "symbol": "EURUSD",
@@ -495,6 +496,7 @@ def test_build_snapshot_from_rows_exposes_risk_reward_fields_and_hides_inactive_
     xau = next(item for item in snapshot["items"] if item["symbol"] == "XAUUSD")
     eur = next(item for item in snapshot["items"] if item["symbol"] == "EURUSD")
     assert xau["risk_reward_ready"] is True
+    assert xau["atr14"] == 10.0
     assert xau["risk_reward_ratio"] > 0
     assert xau["risk_reward_stop_price"] > 0
     assert xau["risk_reward_target_price"] > 0
@@ -504,6 +506,7 @@ def test_build_snapshot_from_rows_exposes_risk_reward_fields_and_hides_inactive_
     assert xau["risk_reward_entry_zone_low"] > 0
     assert xau["risk_reward_entry_zone_high"] >= xau["risk_reward_entry_zone_low"]
     assert xau["risk_reward_entry_zone_text"]
+    assert "ATR(14)" in xau["risk_reward_context_text"]
     assert eur["latest_text"] == "--"
     assert "EURUSD" not in snapshot["live_digest"]
 

@@ -1,6 +1,16 @@
 from __future__ import annotations
 
 
+def _format_price(value: float, point: float = 0.0) -> str:
+    decimals = 2
+    point_value = max(float(point or 0.0), 0.0)
+    if point_value > 0:
+        point_text = f"{point_value:.10f}".rstrip("0").rstrip(".")
+        if "." in point_text:
+            decimals = max(2, min(6, len(point_text.split(".")[1])))
+    return f"{float(value or 0.0):.{decimals}f}"
+
+
 def build_empty_risk_reward_context() -> dict:
     return {
         "risk_reward_ready": False,
@@ -9,6 +19,8 @@ def build_empty_risk_reward_context() -> dict:
         "risk_reward_context_text": "",
         "risk_reward_ratio": 0.0,
         "risk_reward_direction": "unknown",
+        "risk_reward_basis": "unknown",
+        "risk_reward_atr": 0.0,
         "risk_reward_stop_price": 0.0,
         "risk_reward_target_price": 0.0,
         "risk_reward_target_price_2": 0.0,
@@ -49,6 +61,7 @@ def analyze_risk_reward(row: dict) -> dict:
     key_state = str(row.get("key_level_state", "unknown") or "unknown").strip()
     breakout_state = str(row.get("breakout_state", "unknown") or "unknown").strip()
     retest_state = str(row.get("retest_state", "unknown") or "unknown").strip()
+    point = float(row.get("point", 0.0) or 0.0)
     if min(current_price, key_high, key_low) <= 0 or key_high <= key_low:
         return build_empty_risk_reward_context()
 
@@ -60,6 +73,14 @@ def analyze_risk_reward(row: dict) -> dict:
     if range_price <= 0:
         return build_empty_risk_reward_context()
 
+    atr14 = max(float(row.get("atr14", 0.0) or 0.0), 0.0)
+    use_atr = atr14 > 0
+    stop_distance = atr14 * 1.5 if use_atr else 0.0
+    target_distance = atr14 * 3.0 if use_atr else 0.0
+    target_distance_2 = atr14 * 4.5 if use_atr else 0.0
+    entry_band = atr14 * 0.6 if use_atr else 0.0
+    basis = "atr" if use_atr else "range"
+
     stop_price = 0.0
     target_price = 0.0
     target_price_2 = 0.0
@@ -67,52 +88,104 @@ def analyze_risk_reward(row: dict) -> dict:
     entry_zone_high = 0.0
     if direction == "bullish":
         if retest_state == "confirmed_support":
-            stop_price = key_high - range_price * 0.05
-            target_price = current_price + range_price * 0.60
-            target_price_2 = current_price + range_price * 1.00
-            entry_zone_low = key_high - range_price * 0.02
-            entry_zone_high = key_high + range_price * 0.08
+            if use_atr:
+                stop_price = key_high - stop_distance
+                target_price = current_price + target_distance
+                target_price_2 = current_price + target_distance_2
+                entry_zone_low = key_high - entry_band
+                entry_zone_high = key_high + entry_band
+            else:
+                stop_price = key_high - range_price * 0.05
+                target_price = current_price + range_price * 0.60
+                target_price_2 = current_price + range_price * 1.00
+                entry_zone_low = key_high - range_price * 0.02
+                entry_zone_high = key_high + range_price * 0.08
         elif breakout_state == "confirmed_above":
-            stop_price = key_high - range_price * 0.08
-            target_price = current_price + range_price * 0.55
-            target_price_2 = current_price + range_price * 0.90
-            entry_zone_low = key_high
-            entry_zone_high = key_high + range_price * 0.10
+            if use_atr:
+                stop_price = key_high - stop_distance
+                target_price = current_price + target_distance
+                target_price_2 = current_price + target_distance_2
+                entry_zone_low = key_high
+                entry_zone_high = key_high + max(entry_band, atr14 * 0.8)
+            else:
+                stop_price = key_high - range_price * 0.08
+                target_price = current_price + range_price * 0.55
+                target_price_2 = current_price + range_price * 0.90
+                entry_zone_low = key_high
+                entry_zone_high = key_high + range_price * 0.10
         else:
-            stop_price = key_low - range_price * 0.05
-            target_price = key_high
-            target_price_2 = current_price + range_price * 0.45
-            entry_zone_low = max(key_low + range_price * 0.10, current_price - range_price * 0.08)
-            entry_zone_high = min(key_low + range_price * 0.25, current_price)
-            if key_state == "near_high":
-                target_price = current_price + range_price * 0.10
-                target_price_2 = current_price + range_price * 0.30
-                entry_zone_low = current_price - range_price * 0.04
-                entry_zone_high = current_price + range_price * 0.01
+            if use_atr:
+                stop_price = current_price - stop_distance
+                target_price = min(key_high, current_price + target_distance)
+                target_price_2 = current_price + target_distance_2
+                entry_zone_low = max(key_low, current_price - max(entry_band, atr14 * 0.8))
+                entry_zone_high = min(current_price, entry_zone_low + max(entry_band, atr14 * 0.5))
+                if key_state == "near_high":
+                    target_price = min(key_high, current_price + atr14 * 0.8)
+                    target_price_2 = current_price + target_distance
+                    entry_zone_low = current_price - entry_band
+                    entry_zone_high = current_price + atr14 * 0.15
+            else:
+                stop_price = key_low - range_price * 0.05
+                target_price = key_high
+                target_price_2 = current_price + range_price * 0.45
+                entry_zone_low = max(key_low + range_price * 0.10, current_price - range_price * 0.08)
+                entry_zone_high = min(key_low + range_price * 0.25, current_price)
+                if key_state == "near_high":
+                    target_price = current_price + range_price * 0.10
+                    target_price_2 = current_price + range_price * 0.30
+                    entry_zone_low = current_price - range_price * 0.04
+                    entry_zone_high = current_price + range_price * 0.01
     else:
         if retest_state == "confirmed_resistance":
-            stop_price = key_low + range_price * 0.05
-            target_price = current_price - range_price * 0.60
-            target_price_2 = current_price - range_price * 1.00
-            entry_zone_low = key_low - range_price * 0.08
-            entry_zone_high = key_low + range_price * 0.02
+            if use_atr:
+                stop_price = key_low + stop_distance
+                target_price = current_price - target_distance
+                target_price_2 = current_price - target_distance_2
+                entry_zone_low = key_low - entry_band
+                entry_zone_high = key_low + entry_band
+            else:
+                stop_price = key_low + range_price * 0.05
+                target_price = current_price - range_price * 0.60
+                target_price_2 = current_price - range_price * 1.00
+                entry_zone_low = key_low - range_price * 0.08
+                entry_zone_high = key_low + range_price * 0.02
         elif breakout_state == "confirmed_below":
-            stop_price = key_low + range_price * 0.08
-            target_price = current_price - range_price * 0.55
-            target_price_2 = current_price - range_price * 0.90
-            entry_zone_low = key_low - range_price * 0.10
-            entry_zone_high = key_low
+            if use_atr:
+                stop_price = key_low + stop_distance
+                target_price = current_price - target_distance
+                target_price_2 = current_price - target_distance_2
+                entry_zone_low = key_low - max(entry_band, atr14 * 0.8)
+                entry_zone_high = key_low
+            else:
+                stop_price = key_low + range_price * 0.08
+                target_price = current_price - range_price * 0.55
+                target_price_2 = current_price - range_price * 0.90
+                entry_zone_low = key_low - range_price * 0.10
+                entry_zone_high = key_low
         else:
-            stop_price = key_high + range_price * 0.05
-            target_price = key_low
-            target_price_2 = current_price - range_price * 0.45
-            entry_zone_low = max(key_high - range_price * 0.25, current_price)
-            entry_zone_high = min(key_high - range_price * 0.10, current_price + range_price * 0.08)
-            if key_state == "near_low":
-                target_price = current_price - range_price * 0.10
-                target_price_2 = current_price - range_price * 0.30
-                entry_zone_low = current_price - range_price * 0.01
-                entry_zone_high = current_price + range_price * 0.04
+            if use_atr:
+                stop_price = current_price + stop_distance
+                target_price = max(key_low, current_price - target_distance)
+                target_price_2 = current_price - target_distance_2
+                entry_zone_high = min(key_high, current_price + max(entry_band, atr14 * 0.8))
+                entry_zone_low = max(current_price, entry_zone_high - max(entry_band, atr14 * 0.5))
+                if key_state == "near_low":
+                    target_price = max(key_low, current_price - atr14 * 0.8)
+                    target_price_2 = current_price - target_distance
+                    entry_zone_low = current_price - atr14 * 0.15
+                    entry_zone_high = current_price + entry_band
+            else:
+                stop_price = key_high + range_price * 0.05
+                target_price = key_low
+                target_price_2 = current_price - range_price * 0.45
+                entry_zone_low = max(key_high - range_price * 0.25, current_price)
+                entry_zone_high = min(key_high - range_price * 0.10, current_price + range_price * 0.08)
+                if key_state == "near_low":
+                    target_price = current_price - range_price * 0.10
+                    target_price_2 = current_price - range_price * 0.30
+                    entry_zone_low = current_price - range_price * 0.01
+                    entry_zone_high = current_price + range_price * 0.04
 
     risk = abs(current_price - stop_price)
     reward = abs(target_price - current_price)
@@ -138,17 +211,22 @@ def analyze_risk_reward(row: dict) -> dict:
         position_text = "盈亏比偏低，尽量别主动追，除非后续结构继续改善。"
 
     direction_text = "多头" if direction == "bullish" else "空头"
+    basis_text = (
+        f"按 ATR(14)≈{_format_price(atr14, point)} 动态估算"
+        if use_atr
+        else "按近12小时关键区间估算"
+    )
     context_text = (
-        f"{direction_text}预估止损 {stop_price:.2f}，目标1 {target_price:.2f}"
-        f" / 目标2 {target_price_2:.2f}，当前盈亏比约 {ratio:.2f}:1"
+        f"{direction_text}预估止损 {_format_price(stop_price, point)}，目标1 {_format_price(target_price, point)}"
+        f" / 目标2 {_format_price(target_price_2, point)}，当前盈亏比约 {ratio:.2f}:1（{basis_text}）"
     )
     invalidation_text = (
-        f"若价格重新跌回 {stop_price:.2f} 下方，当前{direction_text}结构可视为失效。"
+        f"若价格重新跌回 {_format_price(stop_price, point)} 下方，当前{direction_text}结构可视为失效。"
         if direction == "bullish"
-        else f"若价格重新站回 {stop_price:.2f} 上方，当前{direction_text}结构可视为失效。"
+        else f"若价格重新站回 {_format_price(stop_price, point)} 上方，当前{direction_text}结构可视为失效。"
     )
     entry_zone_text = (
-        f"观察进场区间 {entry_zone_low:.2f} - {entry_zone_high:.2f}，"
+        f"观察进场区间 {_format_price(entry_zone_low, point)} - {_format_price(entry_zone_high, point)}，"
         "若价格直接远离该区间，就不建议追。"
     )
     return {
@@ -158,6 +236,8 @@ def analyze_risk_reward(row: dict) -> dict:
         "risk_reward_context_text": context_text,
         "risk_reward_ratio": ratio,
         "risk_reward_direction": direction,
+        "risk_reward_basis": basis,
+        "risk_reward_atr": atr14,
         "risk_reward_stop_price": stop_price,
         "risk_reward_target_price": target_price,
         "risk_reward_target_price_2": target_price_2,

@@ -339,6 +339,8 @@ def build_snapshot_from_rows(
                 "signal_side_text": signal_side_text,
                 "tech_summary": str(row.get("tech_summary", "") or "").strip(),
                 "tech_summary_h4": str(row.get("tech_summary_h4", "") or "").strip(),
+                "atr14": float(row.get("atr14", 0.0) or 0.0),
+                "atr14_h4": float(row.get("atr14_h4", 0.0) or 0.0),
                 "rsi14": row.get("rsi14"),
                 "ma20": row.get("ma20"),
                 "ma50": row.get("ma50"),

@@ -82,6 +82,8 @@ def _infer_signal_side(item: dict) -> str:
 
 def _build_feature_payload(snapshot: dict, item: dict) -> dict:
     return {
+        "atr14": float(item.get("atr14", 0.0) or 0.0),
+        "atr14_h4": float(item.get("atr14_h4", 0.0) or 0.0),
         "trade_grade_detail": _normalize_text(item.get("trade_grade_detail", "")),
         "trade_next_review": _normalize_text(item.get("trade_next_review", "")),
         "status_text": _normalize_text(item.get("status_text", "")),

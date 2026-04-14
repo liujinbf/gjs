@@ -42,6 +42,31 @@ def _extract_closes(rates) -> list[float]:
     return closes
 
 
+def _extract_hlc(rates) -> list[tuple[float, float, float]]:
+    """从 MT5 rates（结构化数组或 list[dict]）提取 high / low / close 序列。"""
+    result = []
+    if rates is None:
+        return result
+    try:
+        for bar in rates:
+            try:
+                high = float(bar["high"])
+                low = float(bar["low"])
+                close = float(bar["close"])
+            except (TypeError, KeyError):
+                try:
+                    high = float(getattr(bar, "high", 0.0) or 0.0)
+                    low = float(getattr(bar, "low", 0.0) or 0.0)
+                    close = float(getattr(bar, "close", 0.0) or 0.0)
+                except Exception:
+                    continue
+            if min(high, low, close) > 0 and high >= low:
+                result.append((high, low, close))
+    except Exception:
+        pass
+    return result
+
+
 def calc_rsi(closes: list[float], period: int = 14) -> float | None:
     """Wilder 平滑 RSI，返回 0-100 之间的浮点数，不足 period+1 根柱时返回 None。"""
     if len(closes) < period + 1:
@@ -149,6 +174,32 @@ def calc_change_pct(closes: list[float], lookback: int = 288) -> float | None:
     return round((closes[-1] - ref) / ref * 100, 2)
 
 
+def calc_atr(rates, period: int = 14) -> float | None:
+    """ATR(真实波动幅度均值)，使用 Wilder 平滑，不足 period+1 根 K 线时返回 None。"""
+    hlc = _extract_hlc(rates)
+    if len(hlc) < period + 1:
+        return None
+
+    trs: list[float] = []
+    previous_close = hlc[0][2]
+    for high, low, close in hlc[1:]:
+        true_range = max(
+            high - low,
+            abs(high - previous_close),
+            abs(low - previous_close),
+        )
+        trs.append(max(true_range, 0.0))
+        previous_close = close
+
+    if len(trs) < period:
+        return None
+
+    atr = mean(trs[:period])
+    for value in trs[period:]:
+        atr = ((atr * (period - 1)) + value) / period
+    return round(atr, 6)
+
+
 def build_technical_indicators(rates_by_timeframe: dict) -> dict:
     """
     输入：{
@@ -174,6 +225,7 @@ def build_technical_indicators(rates_by_timeframe: dict) -> dict:
         "macd_signal": None,
         "macd_histogram": None,
         "change_pct_24h": None,
+        "atr14": None,
         "tech_summary": "",
         # H4 趋势指标（新增）
         "rsi14_h4": None,
@@ -182,6 +234,7 @@ def build_technical_indicators(rates_by_timeframe: dict) -> dict:
         "bollinger_upper_h4": None,
         "bollinger_mid_h4": None,
         "bollinger_lower_h4": None,
+        "atr14_h4": None,
         "tech_summary_h4": "",
     }
 
@@ -204,6 +257,7 @@ def build_technical_indicators(rates_by_timeframe: dict) -> dict:
             result["macd"]           = macd_res["macd"]
             result["macd_signal"]    = macd_res["signal_line"]
             result["macd_histogram"] = macd_res["histogram"]
+        result["atr14"] = calc_atr(rates_by_timeframe.get("h1"), period=14)
 
     # ------------------------------------------------------------------ #
     # M5：24h 涨跌幅（M5 × 288 ≈ 24h）                                  #
@@ -226,6 +280,7 @@ def build_technical_indicators(rates_by_timeframe: dict) -> dict:
             result["bollinger_upper_h4"] = boll4["upper"]
             result["bollinger_mid_h4"]   = boll4["mid"]
             result["bollinger_lower_h4"] = boll4["lower"]
+        result["atr14_h4"] = calc_atr(rates_by_timeframe.get("h4"), period=14)
 
     # ------------------------------------------------------------------ #
     # H1 节奏摘要（供 AI prompt 展示）                                   #
@@ -258,6 +313,8 @@ def build_technical_indicators(rates_by_timeframe: dict) -> dict:
             f"MACD={result['macd']:.4f} Signal={result['macd_signal']:.4f} "
             f"Hist={result['macd_histogram']:.4f}（{macd_state}）"
         )
+    if result["atr14"] is not None:
+        h1_parts.append(f"ATR(14)={result['atr14']:.4f}")
     if result["change_pct_24h"] is not None:
         sign = "+" if result["change_pct_24h"] >= 0 else ""
         h1_parts.append(f"24h涨跌幅: {sign}{result['change_pct_24h']}%")
@@ -288,6 +345,8 @@ def build_technical_indicators(rates_by_timeframe: dict) -> dict:
                 f"上轨={result['bollinger_upper_h4']:.2f} "
                 f"下轨={result['bollinger_lower_h4']:.2f}（{boll4_pos}）"
             )
+    if result["atr14_h4"] is not None:
+        h4_parts.append(f"H4 ATR(14)={result['atr14_h4']:.4f}")
 
     result["tech_summary_h4"] = " | ".join(h4_parts) if h4_parts else ""
     return result
