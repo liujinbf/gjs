@@ -573,6 +573,9 @@ def test_build_markdown_includes_risk_reward_action_levels():
             "price_point": 0.01,
             "trade_grade": "可轻仓试仓",
             "trade_grade_detail": "可作为候选机会观察。",
+            "trade_grade_source": "structure",
+            "regime_text": "趋势扩张",
+            "regime_reason": "H1 与 H4 同向偏多，ATR 走阔，当前更像趋势延续而不是低波震荡。",
             "external_bias_note": "宏观数据：美国10年期实际利率 当前值 1.85，较前值 -0.06，背景偏多",
             "risk_reward_ratio": 2.4,
             "model_ready": True,
@@ -587,6 +590,10 @@ def test_build_markdown_includes_risk_reward_action_levels():
         }
     )
     assert "当前价格：4,759.82" in markdown
+    assert "**决策速览**" in markdown
+    assert "环境：趋势扩张" in markdown
+    assert "模型：参考胜率 74%（中等信心），与当前结构基本一致" in markdown
+    assert "外部：宏观数据：美国10年期实际利率 当前值 1.85，较前值 -0.06，背景偏多" in markdown
     assert "**执行参数**" in markdown
     assert "盈亏比：1:2.40" in markdown
     assert "模型参考：74%（中等信心）" in markdown

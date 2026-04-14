@@ -37,6 +37,47 @@ def _append_block(lines: list[str], title: str, items: list[str]) -> None:
     lines.extend(payload)
 
 
+def _build_structure_decision_lines(entry: dict) -> list[str]:
+    lines: list[str] = []
+    regime_text = _normalize_text(entry.get("regime_text", ""))
+    regime_reason = _normalize_text(entry.get("regime_reason", ""))
+    trade_grade_source = _normalize_text(entry.get("trade_grade_source", ""))
+    model_ready = bool(entry.get("model_ready", False))
+    model_win_probability = entry.get("model_win_probability")
+    model_confidence_text = _normalize_text(entry.get("model_confidence_text", ""))
+    external_bias_note = _normalize_text(entry.get("external_bias_note", ""))
+    event_note = _normalize_text(entry.get("event_note", ""))
+
+    if regime_text:
+        regime_line = f"- 环境：{regime_text}"
+        if regime_reason:
+            regime_line += f"；{_clip_text(regime_reason, 42)}"
+        lines.append(regime_line)
+
+    if model_ready and model_win_probability is not None:
+        try:
+            probability = float(model_win_probability) * 100.0
+            model_line = f"- 模型：参考胜率 {probability:.0f}%"
+            if model_confidence_text:
+                model_line += f"（{model_confidence_text}）"
+            if trade_grade_source == "model":
+                model_line += "，当前已按模型结果降级"
+            elif probability >= 68:
+                model_line += "，与当前结构基本一致"
+            elif probability < 50:
+                model_line += "，延续率偏低，先别急着追"
+            lines.append(model_line)
+        except (TypeError, ValueError):
+            pass
+
+    if external_bias_note:
+        lines.append(f"- 外部：{_clip_text(external_bias_note, 50)}")
+    elif event_note:
+        lines.append(f"- 事件：{_clip_text(event_note, 50)}")
+
+    return lines[:3]
+
+
 def _build_markdown(entry: dict) -> str:
     title         = _normalize_text(entry.get("title", "贵金属监控提醒"))
     markdown_body = str(entry.get("markdown_body", "") or "").strip()
@@ -108,6 +149,9 @@ def _build_markdown(entry: dict) -> str:
     if trade_next_review:
         quick_lines.append(f"- 复核：{_clip_text(trade_next_review, 60)}")
     _append_block(lines, "先看这个", quick_lines)
+
+    if category_key == "structure":
+        _append_block(lines, "决策速览", _build_structure_decision_lines(entry))
 
     action_lines = []
     if category_key == "structure":
