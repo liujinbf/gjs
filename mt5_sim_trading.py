@@ -24,6 +24,40 @@ class SimTradingEngine:
         self.max_risk_pct = 0.02       # 单笔最大风险暴露：本金的 2%
         self.init_database()
 
+    def _get_baseline_atr_ratio(self, symbol: str) -> float:
+        sym = str(symbol or "").upper()
+        if "XAU" in sym:
+            return 0.0040
+        if "XAG" in sym:
+            return 0.0120
+        if sym.endswith("JPY"):
+            return 0.0030
+        return 0.0020
+
+    def _resolve_dynamic_risk_pct(self, meta: dict, symbol: str, entry_price: float) -> tuple[float, str]:
+        atr_candidates = (
+            float(meta.get("atr14", 0.0) or 0.0),
+            float(meta.get("risk_reward_atr", 0.0) or 0.0),
+            float(meta.get("atr14_h4", 0.0) or 0.0),
+        )
+        atr = max(atr_candidates)
+        if entry_price <= 0 or atr <= 0:
+            return self.max_risk_pct, "未提供 ATR，沿用固定 2% 风险。"
+
+        atr_ratio = atr / entry_price
+        if atr_ratio <= 0:
+            return self.max_risk_pct, "ATR 无效，沿用固定 2% 风险。"
+
+        baseline_ratio = self._get_baseline_atr_ratio(symbol)
+        multiplier = baseline_ratio / atr_ratio
+        multiplier = max(0.60, min(multiplier, 1.35))
+        risk_pct = self.max_risk_pct * multiplier
+        risk_pct = max(0.012, min(risk_pct, 0.027))
+        return (
+            risk_pct,
+            f"ATR 风险系数已启用（ATR/价格={atr_ratio:.4%}，风险预算={risk_pct:.2%}）。",
+        )
+
     def init_database(self):
         Path(self.db_file).parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
@@ -175,7 +209,14 @@ class SimTradingEngine:
 
         return required_margin_usd, pnl_usd
 
-    def calculate_optimal_lots(self, equity: float, entry_price: float, stop_loss: float, symbol: str) -> float:
+    def calculate_optimal_lots(
+        self,
+        equity: float,
+        entry_price: float,
+        stop_loss: float,
+        symbol: str,
+        risk_pct: float | None = None,
+    ) -> float:
         """
         根据2%固定风险法，计算能够开仓的最优手数。
         BUG-010 修复：loss_per_lot 须折算为 USD，与 risk_amount（USD）量纲一致。
@@ -183,7 +224,9 @@ class SimTradingEngine:
         if stop_loss <= 0 or entry_price <= 0 or abs(entry_price - stop_loss) < 0.0001:
             return 0.1  # 遇到异常值，给个低保 0.1 手
 
-        risk_amount = equity * self.max_risk_pct
+        effective_risk_pct = float(risk_pct if risk_pct is not None else self.max_risk_pct)
+        effective_risk_pct = max(0.002, min(effective_risk_pct, 0.05))
+        risk_amount = equity * effective_risk_pct
         sym = symbol.upper()
         contract_size = self._get_contract_size(sym)
 
@@ -225,7 +268,8 @@ class SimTradingEngine:
 
         # 根据 2% 资金管理法则计算最优手数
         equity = float(account["equity"])
-        lots = self.calculate_optimal_lots(equity, entry_price, sl, symbol)
+        risk_pct_used, risk_note = self._resolve_dynamic_risk_pct(meta, symbol, entry_price)
+        lots = self.calculate_optimal_lots(equity, entry_price, sl, symbol, risk_pct=risk_pct_used)
         
         # BUG-010 修复：用汇率感知函数计算正确的 USD 保证金
         # current_price = entry_price（开仓瞬间，浮动为零）
@@ -268,8 +312,11 @@ class SimTradingEngine:
                 conn.rollback()
                 return False, f"{symbol} 已有活跃持仓，跳过"
 
-        logging.info(f"🟢 模拟盘已开仓: {action.upper()} {symbol} (手数: {lots:.2f}, 风险率2%算力, 止损: {sl}, 止盈: {tp})")
-        return True, f"成功开仓 {lots} 手 {symbol}"
+        logging.info(
+            f"🟢 模拟盘已开仓: {action.upper()} {symbol} "
+            f"(手数: {lots:.2f}, 风险预算: {risk_pct_used:.2%}, 止损: {sl}, 止盈: {tp})"
+        )
+        return True, f"成功开仓 {lots:.2f} 手 {symbol}（{risk_note}）"
 
     def get_open_positions(self, user_id: str = "system") -> List[dict]:
         with self._connect() as conn:

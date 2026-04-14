@@ -262,3 +262,39 @@ def test_get_account_uses_insert_or_ignore_for_first_time_creation(monkeypatch):
 
     assert account["balance"] == 100000.0
     assert any("INSERT OR IGNORE INTO sim_accounts" in sql for sql in executed_sql)
+
+
+def test_dynamic_risk_pct_shrinks_when_atr_is_high():
+    test_dir = _prepare_dir()
+    eng = _make_engine(test_dir, "dynamic_risk_high")
+
+    risk_pct, note = eng._resolve_dynamic_risk_pct(
+        {"atr14": 30.0},
+        symbol="XAUUSD",
+        entry_price=3300.0,
+    )
+
+    assert risk_pct < eng.max_risk_pct
+    assert "ATR 风险系数已启用" in note
+
+    del eng
+    gc.collect()
+    shutil.rmtree(TEST_DIR, ignore_errors=True)
+
+
+def test_dynamic_risk_pct_expands_moderately_when_atr_is_low():
+    test_dir = _prepare_dir()
+    eng = _make_engine(test_dir, "dynamic_risk_low")
+
+    risk_pct, _note = eng._resolve_dynamic_risk_pct(
+        {"atr14": 8.0},
+        symbol="XAUUSD",
+        entry_price=3300.0,
+    )
+
+    assert risk_pct > eng.max_risk_pct
+    assert risk_pct <= 0.027
+
+    del eng
+    gc.collect()
+    shutil.rmtree(TEST_DIR, ignore_errors=True)

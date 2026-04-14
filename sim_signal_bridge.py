@@ -75,4 +75,7 @@ def build_rule_sim_signal(snapshot: dict) -> dict | None:
     valid, _reason = validate_signal_meta(payload)
     if not valid:
         return None
+    payload["atr14"] = float(best.get("atr14", 0.0) or 0.0)
+    payload["atr14_h4"] = float(best.get("atr14_h4", 0.0) or 0.0)
+    payload["risk_reward_atr"] = float(best.get("risk_reward_atr", 0.0) or 0.0)
     return payload

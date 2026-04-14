@@ -162,6 +162,55 @@ def test_request_ai_brief_parses_response(monkeypatch):
     assert result["rulebook_summary_text"] == "当前优先遵守 1 条已验证规则。"
 
 
+def test_request_ai_brief_retries_invalid_json_once(monkeypatch):
+    captured = {"payloads": []}
+
+    def fake_post(url, payload, api_key, timeout=30):
+        captured["payloads"].append(payload)
+        if len(captured["payloads"]) == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "当前结论：先观察一下，暂时别急。"
+                        }
+                    }
+                ]
+            }
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"summary_text":"当前结论：只适合观察。",'
+                            '"signal_meta":{"symbol":"XAUUSD","action":"neutral","price":0,"sl":0,"tp":0}}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr("ai_briefing._post_json", fake_post)
+    monkeypatch.setattr(
+        "ai_briefing.build_rulebook",
+        lambda: {
+            "summary_text": "规则库还在学习中。",
+            "active_rules_text": "暂无已验证规则。",
+            "candidate_rules_text": "暂无候选规则。",
+            "rejected_rules_text": "暂无明确淘汰规则。",
+        },
+    )
+
+    result = request_ai_brief({"summary_text": "测试快照", "items": []}, _build_config())
+
+    assert result["signal_meta"]["action"] == "neutral"
+    assert len(captured["payloads"]) == 2
+    retry_messages = captured["payloads"][1]["messages"]
+    assert retry_messages[-1]["role"] == "user"
+    assert "只返回一个 JSON 对象" in retry_messages[-1]["content"]
+    assert "当前结论：只适合观察" in result["content"]
+
+
 def test_request_ai_brief_supports_anthropic_messages_api(monkeypatch):
     captured = {}
 
@@ -202,6 +251,54 @@ def test_request_ai_brief_supports_anthropic_messages_api(monkeypatch):
     assert "当前有效规则集" in captured["payload"]["messages"][0]["content"]
     assert result["signal_meta"]["symbol"] == "XAUUSD"
     assert result["signal_meta_valid"] is True
+
+
+def test_request_ai_brief_retries_invalid_json_for_anthropic(monkeypatch):
+    captured = {"payloads": []}
+
+    def fake_post(url, payload, headers, timeout=30):
+        captured["payloads"].append(payload)
+        if len(captured["payloads"]) == 1:
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "先别急，等确认之后再说。",
+                    }
+                ]
+            }
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        '{"summary_text":"当前结论：只适合观察。",'
+                        '"signal_meta":{"symbol":"XAUUSD","action":"neutral","price":0,"sl":0,"tp":0}}'
+                    ),
+                }
+            ]
+        }
+
+    monkeypatch.setattr("ai_briefing._post_json_with_headers", fake_post)
+    monkeypatch.setattr(
+        "ai_briefing.build_rulebook",
+        lambda: {
+            "summary_text": "规则库还在学习中。",
+            "active_rules_text": "暂无已验证规则。",
+            "candidate_rules_text": "暂无候选规则。",
+            "rejected_rules_text": "暂无明确淘汰规则。",
+        },
+    )
+
+    config = _build_config()
+    config.ai_api_base = "https://api.anthropic.com/v1"
+    config.ai_model = "claude-3-5-sonnet-20241022"
+    result = request_ai_brief({"summary_text": "测试快照", "items": []}, config)
+
+    assert result["signal_meta"]["action"] == "neutral"
+    assert len(captured["payloads"]) == 2
+    assert captured["payloads"][1]["messages"][-1]["role"] == "user"
+    assert "只返回一个 JSON 对象" in captured["payloads"][1]["messages"][-1]["content"]
 
 
 def test_request_ai_brief_plain_text_response_gracefully_degrades(monkeypatch):

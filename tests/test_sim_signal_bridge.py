@@ -26,6 +26,8 @@ def test_build_rule_sim_signal_picks_actionable_structure_candidate():
                     "risk_reward_target_price": 4788.0,
                     "risk_reward_entry_zone_low": 4750.0,
                     "risk_reward_entry_zone_high": 4765.0,
+                    "atr14": 18.0,
+                    "risk_reward_atr": 18.0,
                 }
             ]
         }
@@ -37,6 +39,8 @@ def test_build_rule_sim_signal_picks_actionable_structure_candidate():
     assert signal["price"] == 4759.91
     assert signal["sl"] == 4748.0
     assert signal["tp"] == 4788.0
+    assert signal["atr14"] == 18.0
+    assert signal["risk_reward_atr"] == 18.0
 
 
 def test_build_rule_sim_signal_skips_candidate_outside_entry_zone():
@@ -58,6 +62,7 @@ def test_build_rule_sim_signal_skips_candidate_outside_entry_zone():
                     "risk_reward_target_price": 4810.0,
                     "risk_reward_entry_zone_low": 4750.0,
                     "risk_reward_entry_zone_high": 4765.0,
+                    "atr14": 18.0,
                 }
             ]
         }

@@ -165,6 +165,7 @@ def _normalize_brief_result(content_text: str) -> dict:
             "signal_schema_version": SIGNAL_SCHEMA_VERSION,
             "signal_meta_valid": signal_valid,
             "signal_meta_reason": signal_reason,
+            "used_structured_payload": True,
         }
 
     legacy_meta = extract_signal_meta(raw_text)
@@ -176,20 +177,83 @@ def _normalize_brief_result(content_text: str) -> dict:
         "signal_schema_version": SIGNAL_SCHEMA_VERSION,
         "signal_meta_valid": signal_valid,
         "signal_meta_reason": signal_reason,
+        "used_structured_payload": False,
     }
 
 
-def _request_openai_brief_content(api_base: str, payload: dict, api_key: str) -> str:
+def _build_json_retry_message(raw_content: str) -> str:
+    excerpt = str(raw_content or "").strip().replace("\r", " ").replace("\n", " ")
+    excerpt = excerpt[:280]
+    return (
+        "你上一条回复不是可直接解析的合法 JSON。"
+        "请不要输出解释、Markdown、代码块或多余前后缀，"
+        "只返回一个 JSON 对象，结构必须严格为 "
+        '{"summary_text":"...","signal_meta":{"symbol":"...","action":"long/short/neutral","price":0,"sl":0,"tp":0}}。'
+        f"上一条错误输出摘录：{excerpt}"
+    )
+
+
+def _normalize_or_raise_structured(content_text: str) -> dict:
+    normalized = _normalize_brief_result(content_text)
+    if not bool(normalized.get("used_structured_payload", False)):
+        raise RuntimeError("模型未返回合法 JSON 对象")
+    return normalized
+
+
+def _request_openai_brief_result(api_base: str, payload: dict, api_key: str) -> dict:
     url = _build_chat_completions_url(api_base)
     structured_payload = dict(payload)
     structured_payload["response_format"] = {"type": "json_object"}
     try:
         response = _post_json(url, structured_payload, api_key=api_key)
-        return _extract_openai_content(response)
+        content = _extract_openai_content(response)
+        try:
+            return _normalize_or_raise_structured(content)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("OpenAI-compatible JSON 结构校验失败，尝试一次自愈重试：%s", exc)
+            retry_payload = dict(structured_payload)
+            retry_messages = list(structured_payload.get("messages", []) or [])
+            retry_messages.extend(
+                [
+                    {"role": "assistant", "content": content},
+                    {"role": "user", "content": _build_json_retry_message(content)},
+                ]
+            )
+            retry_payload["messages"] = retry_messages
+            retry_response = _post_json(url, retry_payload, api_key=api_key)
+            retry_content = _extract_openai_content(retry_response)
+            return _normalize_or_raise_structured(retry_content)
     except Exception as exc:  # noqa: BLE001
         logger.warning("OpenAI-compatible JSON mode 失败，回退普通文本模式：%s", exc)
         response = _post_json(url, payload, api_key=api_key)
-        return _extract_openai_content(response)
+        return _normalize_brief_result(_extract_openai_content(response))
+
+
+def _request_anthropic_brief_result(api_base: str, payload: dict, api_key: str) -> dict:
+    url = f"{api_base}/messages"
+    headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+    }
+    response = _post_json_with_headers(url, payload, headers=headers)
+    content = _extract_anthropic_content(response)
+    try:
+        return _normalize_or_raise_structured(content)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Anthropic JSON 结构校验失败，尝试一次自愈重试：%s", exc)
+        retry_payload = dict(payload)
+        retry_messages = list(payload.get("messages", []) or [])
+        retry_messages.extend(
+            [
+                {"role": "assistant", "content": content},
+                {"role": "user", "content": _build_json_retry_message(content)},
+            ]
+        )
+        retry_payload["messages"] = retry_messages
+        retry_response = _post_json_with_headers(url, retry_payload, headers=headers)
+        retry_content = _extract_anthropic_content(retry_response)
+        return _normalize_or_raise_structured(retry_content)
 
 
 def request_ai_brief(
@@ -229,16 +293,7 @@ def request_ai_brief(
                 "system": AI_BRIEF_SYSTEM_PROMPT,
                 "messages": [{"role": "user", "content": prompt}],
             }
-            response = _post_json_with_headers(
-                f"{api_base}/messages",
-                payload,
-                headers={
-                    "Content-Type": "application/json; charset=utf-8",
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                },
-            )
-            normalized = _normalize_brief_result(_extract_anthropic_content(response))
+            normalized = _request_anthropic_brief_result(api_base, payload, api_key=api_key)
         else:
             payload = {
                 "model": model,
@@ -248,7 +303,7 @@ def request_ai_brief(
                     {"role": "user", "content": prompt},
                 ],
             }
-            normalized = _normalize_brief_result(_request_openai_brief_content(api_base, payload, api_key=api_key))
+            normalized = _request_openai_brief_result(api_base, payload, api_key=api_key)
 
         return {
             "content": normalized["content"],

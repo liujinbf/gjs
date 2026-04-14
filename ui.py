@@ -198,6 +198,25 @@ def _build_snapshot_live_quotes(snapshot: dict) -> dict:
     return result
 
 
+def _enrich_signal_with_snapshot_context(meta: dict, snapshot: dict) -> dict:
+    payload = dict(meta or {})
+    symbol = str(payload.get("symbol", "") or "").strip().upper()
+    if not symbol:
+        return payload
+    for item in list((snapshot or {}).get("items", []) or []):
+        item_symbol = str(item.get("symbol", "") or "").strip().upper()
+        if item_symbol != symbol:
+            continue
+        if float(payload.get("atr14", 0.0) or 0.0) <= 0:
+            payload["atr14"] = float(item.get("atr14", 0.0) or 0.0)
+        if float(payload.get("atr14_h4", 0.0) or 0.0) <= 0:
+            payload["atr14_h4"] = float(item.get("atr14_h4", 0.0) or 0.0)
+        if float(payload.get("risk_reward_atr", 0.0) or 0.0) <= 0:
+            payload["risk_reward_atr"] = float(item.get("risk_reward_atr", 0.0) or 0.0)
+        return payload
+    return payload
+
+
 def _detect_opportunity(snapshot: dict, rr_threshold: float = 2.0) -> bool:
     """检测当前快照中是否存在高质量出手机会。
 
@@ -878,6 +897,7 @@ class MetalMonitorWindow(QMainWindow):
         # 实时拦截并执行模拟挂单
         meta = dict(result.get("signal_meta", {}) or {}) or extract_signal_meta(content)
         if meta and meta.get("action") in ("long", "short"):
+            meta = _enrich_signal_with_snapshot_context(meta, self._last_snapshot)
             sim_success, sim_msg = SIM_ENGINE.execute_signal(meta)
             if sim_success:
                 self._append_log(f"[模拟盘跟单成功] {sim_msg}")
