@@ -385,6 +385,36 @@ def init_knowledge_base(db_path: Path | str | None = None) -> Path:
             CREATE INDEX IF NOT EXISTS idx_ai_signal_events_time ON ai_signal_events(occurred_at, symbol);
             CREATE INDEX IF NOT EXISTS idx_ai_signal_events_action ON ai_signal_events(action, signal_meta_valid);
 
+            CREATE TABLE IF NOT EXISTS ml_model_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                model_name TEXT NOT NULL,
+                horizon_min INTEGER NOT NULL DEFAULT 30,
+                sample_count INTEGER NOT NULL DEFAULT 0,
+                base_win_probability REAL NOT NULL DEFAULT 0,
+                feature_count INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'insufficient',
+                notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS ml_feature_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                model_name TEXT NOT NULL,
+                horizon_min INTEGER NOT NULL DEFAULT 30,
+                feature_name TEXT NOT NULL,
+                feature_value TEXT NOT NULL,
+                sample_count INTEGER NOT NULL DEFAULT 0,
+                success_weight REAL NOT NULL DEFAULT 0,
+                mixed_count INTEGER NOT NULL DEFAULT 0,
+                fail_count INTEGER NOT NULL DEFAULT 0,
+                win_probability REAL NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                UNIQUE(model_name, horizon_min, feature_name, feature_value)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_ml_model_runs_time ON ml_model_runs(model_name, horizon_min, created_at);
+            CREATE INDEX IF NOT EXISTS idx_ml_feature_stats_lookup ON ml_feature_stats(model_name, horizon_min, feature_name, feature_value);
+
             -- 3.2 修复：系统状态 KV 表，代替直接读写 JSON 文件，避免写入中断导致文件损坏
             CREATE TABLE IF NOT EXISTS system_state_kv (
                 key   TEXT PRIMARY KEY,

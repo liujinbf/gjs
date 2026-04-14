@@ -261,10 +261,13 @@ def _build_item_lines(snapshot: dict) -> str:
         macro_focus = str(item.get("macro_focus", "--") or "--").strip()
         execution_note = str(item.get("execution_note", "--") or "--").strip()
         tech_summary = str(item.get("tech_summary", "") or "").strip()
+        model_text = "暂无"
+        if bool(item.get("model_ready", False)):
+            model_text = f"{float(item.get('model_win_probability', 0.0) or 0.0) * 100:.0f}%"
         line = (
             f"- {symbol} | 最新价 {latest_text} | 报价结构 {quote_text} | "
             f"报价状态 {status_text} | 市场环境 {str(item.get('regime_text', '--') or '--').strip()} | "
-            f"宏观提醒 {macro_focus} | 执行提醒 {execution_note}"
+            f"模型胜率 {model_text} | 宏观提醒 {macro_focus} | 执行提醒 {execution_note}"
         )
         if tech_summary:
             line += f"\n  技术指标(H1节奏): {tech_summary}"
