@@ -10,7 +10,12 @@ from urllib import error, request
 from app_config import MetalMonitorConfig
 from knowledge_rulebook import build_rulebook
 from prompt_templates import AI_BRIEF_SYSTEM_PROMPT, build_metal_brief_prompt
-from backtest_engine import get_historical_win_rate
+from backtest_engine import extract_signal_meta, get_historical_win_rate
+
+try:
+    from json_repair import loads as _json_repair_loads
+except ImportError:
+    _json_repair_loads = None
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +126,89 @@ def _extract_anthropic_content(response: dict) -> str:
     return content
 
 
+def _load_json_dict(text: str) -> dict | None:
+    raw_text = str(text or "").strip()
+    if not raw_text:
+        return None
+    try:
+        data = json.loads(raw_text)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    if _json_repair_loads is not None:
+        try:
+            data = _json_repair_loads(raw_text)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return None
+
+
+def _normalize_signal_meta(meta: dict | None) -> dict:
+    payload = dict(meta or {})
+    symbol = str(payload.get("symbol", "--") or "--").strip().upper() or "--"
+    action = str(payload.get("action", "neutral") or "neutral").strip().lower()
+    if action not in {"long", "short", "neutral"}:
+        action = "neutral"
+    price = float(payload.get("price", 0.0) or 0.0)
+    sl = float(payload.get("sl", 0.0) or 0.0)
+    tp = float(payload.get("tp", 0.0) or 0.0)
+    if action == "neutral":
+        price = 0.0
+        sl = 0.0
+        tp = 0.0
+    return {
+        "symbol": symbol,
+        "action": action,
+        "price": price,
+        "sl": sl,
+        "tp": tp,
+    }
+
+
+def _normalize_brief_result(content_text: str) -> dict:
+    raw_text = str(content_text or "").strip()
+    payload = _load_json_dict(raw_text)
+    if isinstance(payload, dict):
+        summary_text = str(
+            payload.get("summary_text", "")
+            or payload.get("content", "")
+            or payload.get("analysis_text", "")
+            or ""
+        ).strip()
+        signal_meta = payload.get("signal_meta")
+        if not isinstance(signal_meta, dict):
+            signal_meta = payload.get("tracker_meta")
+        if not summary_text:
+            # 兼容模型只返回纯 signal_meta 的异常情况
+            summary_text = "当前结论：模型已返回结构化结果，但未提供正文摘要。"
+        return {
+            "content": summary_text,
+            "signal_meta": _normalize_signal_meta(signal_meta),
+        }
+
+    legacy_meta = extract_signal_meta(raw_text)
+    return {
+        "content": raw_text,
+        "signal_meta": _normalize_signal_meta(legacy_meta),
+    }
+
+
+def _request_openai_brief_content(api_base: str, payload: dict, api_key: str) -> str:
+    url = _build_chat_completions_url(api_base)
+    structured_payload = dict(payload)
+    structured_payload["response_format"] = {"type": "json_object"}
+    try:
+        response = _post_json(url, structured_payload, api_key=api_key)
+        return _extract_openai_content(response)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OpenAI-compatible JSON mode 失败，回退普通文本模式：%s", exc)
+        response = _post_json(url, payload, api_key=api_key)
+        return _extract_openai_content(response)
+
+
 def request_ai_brief(
     snapshot: dict,
     config: MetalMonitorConfig,
@@ -167,7 +255,7 @@ def request_ai_brief(
                     "anthropic-version": "2023-06-01",
                 },
             )
-            content = _extract_anthropic_content(response)
+            normalized = _normalize_brief_result(_extract_anthropic_content(response))
         else:
             payload = {
                 "model": model,
@@ -177,11 +265,11 @@ def request_ai_brief(
                     {"role": "user", "content": prompt},
                 ],
             }
-            response = _post_json(_build_chat_completions_url(api_base), payload, api_key=api_key)
-            content = _extract_openai_content(response)
+            normalized = _normalize_brief_result(_request_openai_brief_content(api_base, payload, api_key=api_key))
 
         return {
-            "content": content,
+            "content": normalized["content"],
+            "signal_meta": normalized["signal_meta"],
             "model": model,
             "api_base": api_base,
             "rulebook_summary_text": str(rulebook.get("summary_text", "") or "").strip(),
@@ -208,9 +296,8 @@ def _rule_engine_fallback(snapshot: dict) -> dict:
             "content": (
                 "[🔴 系统降级失败] AI 研判和规则引擎均不可用。\n"
                 "请检查：① AI API Key 是否配置正确；② 网络连接是否正常。\n"
-                "<!-- TRACKER_META: {\"symbol\": \"--\", \"action\": \"neutral\","
-                " \"price\": 0, \"sl\": 0, \"tp\": 0} -->"
             ),
+            "signal_meta": {"symbol": "--", "action": "neutral", "price": 0.0, "sl": 0.0, "tp": 0.0},
             "model": "emergency-fallback",
             "api_base": "local",
             "rulebook_summary_text": "",

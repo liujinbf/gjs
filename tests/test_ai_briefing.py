@@ -115,15 +115,20 @@ def test_request_ai_brief_requires_api_key():
 
 
 def test_request_ai_brief_parses_response(monkeypatch):
-    captured = {}
+    captured = {"payloads": []}
 
     def fake_post(url, payload, api_key, timeout=30):
         captured["url"] = url
+        captured["payloads"].append(payload)
         return {
             "choices": [
                 {
                     "message": {
-                        "content": "方向判断：黄金偏强。\n风险点：非农前点差可能放大。\n行动建议：先等回踩确认。"
+                        "content": (
+                            '{"summary_text":"当前结论：只适合观察。\\n方向判断：黄金偏强。\\n'
+                            '风险点：非农前点差可能放大。\\n行动建议：先等回踩确认。",'
+                            '"signal_meta":{"symbol":"XAUUSD","action":"neutral","price":0,"sl":0,"tp":0}}'
+                        )
                     }
                 }
             ]
@@ -149,6 +154,8 @@ def test_request_ai_brief_parses_response(monkeypatch):
     assert "方向判断" in result["content"]
     assert result["model"] == "deepseek-ai/DeepSeek-R1"
     assert captured["url"] == "https://api.siliconflow.cn/v1/chat/completions"
+    assert captured["payloads"][0]["response_format"] == {"type": "json_object"}
+    assert result["signal_meta"]["action"] == "neutral"
     assert result["rulebook_summary_text"] == "当前优先遵守 1 条已验证规则。"
 
 
@@ -163,7 +170,10 @@ def test_request_ai_brief_supports_anthropic_messages_api(monkeypatch):
             "content": [
                 {
                     "type": "text",
-                    "text": "当前结论：只适合观察。\n方向判断：先等事件窗口过去。",
+                    "text": (
+                        '{"summary_text":"当前结论：只适合观察。\\n方向判断：先等事件窗口过去。",'
+                        '"signal_meta":{"symbol":"XAUUSD","action":"neutral","price":0,"sl":0,"tp":0}}'
+                    ),
                 }
             ]
         }
@@ -187,3 +197,31 @@ def test_request_ai_brief_supports_anthropic_messages_api(monkeypatch):
     assert captured["headers"]["anthropic-version"] == "2023-06-01"
     assert captured["payload"]["model"] == "claude-3-5-sonnet-20241022"
     assert "当前有效规则集" in captured["payload"]["messages"][0]["content"]
+    assert result["signal_meta"]["symbol"] == "XAUUSD"
+
+
+def test_request_ai_brief_plain_text_response_gracefully_degrades(monkeypatch):
+    def fake_post(url, payload, api_key, timeout=30):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": "当前结论：只适合观察。\n方向判断：等待事件落地后再看。"
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr("ai_briefing._post_json", fake_post)
+    monkeypatch.setattr(
+        "ai_briefing.build_rulebook",
+        lambda: {
+            "summary_text": "规则库还在学习中。",
+            "active_rules_text": "暂无已验证规则。",
+            "candidate_rules_text": "暂无候选规则。",
+            "rejected_rules_text": "暂无明确淘汰规则。",
+        },
+    )
+    result = request_ai_brief({"summary_text": "测试快照", "items": []}, _build_config())
+    assert "当前结论" in result["content"]
+    assert result["signal_meta"]["action"] == "neutral"

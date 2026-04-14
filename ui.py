@@ -816,7 +816,7 @@ class MetalMonitorWindow(QMainWindow):
         history_count = append_ai_history_entry(build_ai_history_entry(result, self._last_snapshot, push_result=push_result))
         
         # 实时拦截并执行模拟挂单
-        meta = extract_signal_meta(content)
+        meta = dict(result.get("signal_meta", {}) or {}) or extract_signal_meta(content)
         if meta and meta.get("action") in ("long", "short"):
             sim_success, sim_msg = SIM_ENGINE.execute_signal(meta)
             if sim_success:
@@ -824,8 +824,8 @@ class MetalMonitorWindow(QMainWindow):
             else:
                 self._append_log(f"[模拟盘跟单被拒] {sim_msg}")
         elif meta is None:
-            # N-008 修复：AI 未输出 TRACKER_META 机器可读信号，明确提示用户
-            self._append_log("[跟单系统] AI 未输出 TRACKER_META 标记，本轮仅供参考，无自动跟单操作。")
+            # N-008 延伸：AI 未输出机器可读信号，明确提示用户
+            self._append_log("[跟单系统] AI 未输出机器信号，本轮仅供参考，无自动跟单操作。")
         else:
             action_hint = str(meta.get("action", "中性") or "中性")
             self._append_log(f"[跟单系统] AI 研判方向为「{action_hint}」，未满足开仓条件，本轮跟单考察。")

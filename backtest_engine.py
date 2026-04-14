@@ -1,7 +1,7 @@
 """
 MT5 Backtest Engine.
-Evaluates AI trade signals stored in ai_history by comparing their hidden TRACKER_META
-with real historical M5 bars from MetaTrader5.
+Evaluates AI trade signals stored in ai_history by comparing their machine-readable
+signal_meta with real historical M5 bars from MetaTrader5.
 """
 from __future__ import annotations
 
@@ -34,36 +34,73 @@ MAX_BACKTEST_RESULTS = 2000  # N-010: 保留最近 N 条评估结果，超出后
 TRACKER_META_PATTERN = re.compile(r"<!--\s*TRACKER_META\s*:\s*(\{.*?\})\s*-->", re.IGNORECASE | re.DOTALL)
 # 3.1 修复：宽松版正则，用于严格正则匹配失败时（如 AI 少写了闭合 }），提取 { 到 --> 之前的内容交给 json_repair
 TRACKER_META_PATTERN_LOOSE = re.compile(r"<!--\s*TRACKER_META\s*:\s*(\{[^>]*?)\s*-->", re.IGNORECASE | re.DOTALL)
+JSON_BLOCK_PATTERN = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.IGNORECASE | re.DOTALL)
 
 # P-004 修复：_parse_time 委托给公共 runtime_utils.parse_time，消除三处重复定义
 def _parse_time(value: str) -> datetime | None:
     return _parse_time_impl(value)
 
-def extract_signal_meta(content: str) -> dict | None:
-    match = TRACKER_META_PATTERN.search(str(content or ""))
-    if not match:
-        # 3.1 修复：严格正则失败时，尝试宽松正则（AI 少写了 } 的情况）
-        match = TRACKER_META_PATTERN_LOOSE.search(str(content or ""))
-        if not match:
-            return None
-    raw_json = match.group(1)
-    # 第一步：原生解析
+def _load_json_dict(text: str) -> dict | None:
+    raw_text = str(text or "").strip()
+    if not raw_text:
+        return None
     try:
-        data = json.loads(raw_json)
+        data = json.loads(raw_text)
         if isinstance(data, dict):
             return data
     except Exception:
         pass
-    # 第二步：json_repair 自愈容错（3.1 修复：防止 AI 轻微格式偏差使跟单系统瘫痪）
     if _json_repair_loads is not None:
         try:
-            data = _json_repair_loads(raw_json)
+            data = _json_repair_loads(raw_text)
             if isinstance(data, dict):
                 logging.debug("[extract_signal_meta] 原生 JSON 解析失败，json_repair 自愈成功。")
                 return data
         except Exception:
             pass
     return None
+
+
+def _normalize_signal_meta(data: dict | None) -> dict | None:
+    if not isinstance(data, dict):
+        return None
+    if isinstance(data.get("signal_meta"), dict):
+        data = dict(data.get("signal_meta", {}) or {})
+    elif isinstance(data.get("tracker_meta"), dict):
+        data = dict(data.get("tracker_meta", {}) or {})
+    if not any(key in data for key in ("action", "price", "sl", "tp", "symbol")):
+        return None
+    action = str(data.get("action", "neutral") or "neutral").strip().lower()
+    if action not in {"long", "short", "neutral"}:
+        action = "neutral"
+    return {
+        "symbol": str(data.get("symbol", "") or "").strip().upper(),
+        "action": action,
+        "price": float(data.get("price", 0.0) or 0.0),
+        "sl": float(data.get("sl", 0.0) or 0.0),
+        "tp": float(data.get("tp", 0.0) or 0.0),
+    }
+
+
+def extract_signal_meta(content: str) -> dict | None:
+    raw_content = str(content or "").strip()
+    direct_payload = _normalize_signal_meta(_load_json_dict(raw_content))
+    if direct_payload is not None:
+        return direct_payload
+
+    for match in JSON_BLOCK_PATTERN.finditer(raw_content):
+        payload = _normalize_signal_meta(_load_json_dict(match.group(1)))
+        if payload is not None:
+            return payload
+
+    match = TRACKER_META_PATTERN.search(raw_content)
+    if not match:
+        # 3.1 修复：严格正则失败时，尝试宽松正则（AI 少写了 } 的情况）
+        match = TRACKER_META_PATTERN_LOOSE.search(raw_content)
+        if not match:
+            return None
+    raw_json = match.group(1)
+    return _normalize_signal_meta(_load_json_dict(raw_json))
 
 def load_backtest_results() -> dict:
     if not BACKTEST_RESULTS_FILE.exists():
@@ -181,7 +218,7 @@ def run_backtest_evaluations() -> None:
             continue
 
         content = str(entry.get("content", ""))
-        meta = extract_signal_meta(content)
+        meta = _normalize_signal_meta(dict(entry.get("signal_meta", {}) or {})) or extract_signal_meta(content)
 
         if not meta:
             results[signature] = {"status": "neutral", "evaluated_at": now.strftime("%Y-%m-%d %H:%M:%S")}

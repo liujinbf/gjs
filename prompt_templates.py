@@ -7,8 +7,8 @@
 3. 保持"硬核数据 + 大白话"双轨风格，既专业又易读
 """
 
-PROMPT_VERSION = "metal-monitor-v2.0"
-ADVISOR_PROMPT_VERSION = "metal-monitor-advisor-v2.0"
+PROMPT_VERSION = "metal-monitor-v2.1"
+ADVISOR_PROMPT_VERSION = "metal-monitor-advisor-v2.1"
 
 AI_BRIEF_SYSTEM_PROMPT = (
     "你是一位拥有 15 年经验的「贵金属与外汇资深量化交易教练」。\n"
@@ -75,9 +75,20 @@ AI_BRIEF_TASK_TEMPLATE = """\
 3. 宏观事件必须注明"高敏感⚡"或"低波动💤"，有数值型指标时必须标注预期值与前值。
 4. 盈亏比精确计算：(目标价 - 当前价) ÷ (当前价 - 止损价)，低于 1.0 则直接建议观望。
 5. 遵守"当前有效规则集"与已淘汰规则，不得违背。
-6. 正文最后一行必须输出以下机器解析注释（用户不可见，系统用于回测）：
-<!-- TRACKER_META: {{"symbol": "资产代码(如XAUUSD)", "action": "long/short/neutral", "price": 参考入场价数字, "sl": 止损价数字, "tp": 目标价数字}} -->
-（action=neutral 时 sl 和 tp 填 0；此行绝对不可省略！）
+6. 最终输出必须是一个纯 JSON 对象，且只能输出 JSON 本身，禁止再输出 Markdown 围栏、HTML 注释、补充说明。
+7. JSON 对象结构固定如下：
+{{
+  "summary_text": "这里放完整 Markdown 正文，正文内容严格遵守上面的排版结构",
+  "signal_meta": {{
+    "symbol": "资产代码(如XAUUSD)",
+    "action": "long/short/neutral",
+    "price": 参考入场价数字,
+    "sl": 止损价数字,
+    "tp": 目标价数字
+  }}
+}}
+8. 若当前结论是观望，action 必须填 neutral，price/sl/tp 一律填 0。
+9. summary_text 内禁止再嵌入 TRACKER_META、HTML 注释或额外 JSON。
 
 运行概览：
 {summary_text}
@@ -193,7 +204,18 @@ METAL_ADVISOR_TEMPLATE = """\
 [有前值/预期值时：预期值 [实际数] / 前值 [实际数]，偏差超过[基于数据判断的合理阈值]%时对当前区间有[具体影响判断]]
 [风控：高敏事件⚡ → 挂好止损不新开仓；低波动事件💤 → 正常参考即可]
 
-<!-- TRACKER_META: {{"symbol": "品种代码", "action": "long或short或neutral", "price": 参考入场价, "sl": 止损价或0, "tp": 目标价或0}} -->
+最后必须返回一个纯 JSON 对象，且只能输出 JSON 本身，结构固定如下：
+{{
+  "summary_text": "这里放完整 Markdown 正文",
+  "signal_meta": {{
+    "symbol": "品种代码",
+    "action": "long/short/neutral",
+    "price": 参考入场价或0,
+    "sl": 止损价或0,
+    "tp": 目标价或0
+  }}
+}}
+若当前只适合观察，action 必须为 neutral，price/sl/tp 全部填 0。
 """
 
 METAL_BATCH_TEMPLATE = """\

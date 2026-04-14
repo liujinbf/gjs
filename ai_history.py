@@ -36,6 +36,7 @@ def _pick_summary_line(content: str) -> str:
 def build_ai_history_entry(result: dict, snapshot: dict, push_result: dict | None = None) -> dict:
     content = str((result or {}).get("content", "") or "").strip()
     model = str((result or {}).get("model", "") or "").strip() or "unknown"
+    signal_meta = dict((result or {}).get("signal_meta", {}) or {})
     symbols = [
         str(item.get("symbol", "") or "").strip().upper()
         for item in list((snapshot or {}).get("items", []) or [])
@@ -50,6 +51,7 @@ def build_ai_history_entry(result: dict, snapshot: dict, push_result: dict | Non
         "symbols": symbols,
         "summary_line": _pick_summary_line(content),
         "content": content,
+        "signal_meta": signal_meta,
         "rulebook_summary_text": _normalize_text((result or {}).get("rulebook_summary_text", "")),
         "snapshot_time": str((snapshot or {}).get("last_refresh_text", "") or "").strip(),
         "status_hint": _normalize_text((snapshot or {}).get("status_hint", "")),

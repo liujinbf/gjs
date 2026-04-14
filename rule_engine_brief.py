@@ -5,12 +5,12 @@
 基于本地技术指标、知识库规则和快照数据自动生成结构化研判报告。
 
 输出格式与 request_ai_brief() 完全一致，确保下游的
-TRACKER_META 解析、推送通知、AI留痕 等逻辑无需改动。
+机器信号解析、推送通知、AI留痕 等逻辑无需改动。
 
 降级简报特征：
   - model 字段返回 "rule-engine-fallback"（用于 UI 区分）
   - is_fallback=True 供 UI 显示特殊警告标记
-  - TRACKER_META action 始终为 neutral（防止降级模式误触发模拟跟单）
+  - signal_meta.action 始终为 neutral（防止降级模式误触发模拟跟单）
 """
 from __future__ import annotations
 
@@ -208,7 +208,7 @@ def generate_rule_engine_brief(snapshot: dict) -> dict:
        "rulebook_summary_text": str, "is_fallback": True,
        "fallback_reason": str}
 
-    安全约束：TRACKER_META 的 action 始终为 neutral，
+    安全约束：signal_meta.action 始终为 neutral，
     避免降级模式下误触发模拟盘自动跟单。
     """
     item = _first_item(snapshot)
@@ -294,13 +294,11 @@ def generate_rule_engine_brief(snapshot: dict) -> dict:
         f"\n"
         f"⚠️ 下一个关键窗口：\n"
         f"{event_text}\n"
-        f"\n"
-        f"<!-- TRACKER_META: {{\"symbol\": \"{symbol}\", \"action\": \"neutral\","
-        f" \"price\": 0, \"sl\": 0, \"tp\": 0}} -->"
     )
 
     return {
         "content": content,
+        "signal_meta": {"symbol": symbol, "action": "neutral", "price": 0.0, "sl": 0.0, "tp": 0.0},
         "model": "rule-engine-fallback",
         "api_base": "local",
         "rulebook_summary_text": rule_text,

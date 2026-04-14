@@ -209,7 +209,7 @@ class SimTradingEngine:
         return max(0.01, min(lots, 50.0))
 
     def execute_signal(self, meta: dict, user_id: str = "system") -> Tuple[bool, str]:
-        """将 AI 给出的 TRACKER_META 信号转化为真实虚拟挂单"""
+        """将 AI 给出的机器信号转化为真实虚拟挂单"""
         symbol = meta.get("symbol", "").upper()
         action = meta.get("action", "").lower()
         entry_price = float(meta.get("price", 0.0))
