@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from knowledge_base import KNOWLEDGE_DB_FILE, open_knowledge_connection
+from knowledge_base import KNOWLEDGE_DB_FILE, kv_get, kv_set, open_knowledge_connection
 
 SUPPORTED_RUNTIME_CATEGORIES = {"entry", "trend", "directional"}
 SKIP_RULE_MARKERS = {
@@ -53,6 +53,7 @@ DOMAIN_KEYWORDS = [
     "事件前",
     "高影响",
 ]
+MATCH_STATE_KV_KEY = "rule_match_state"
 
 
 def _connect(db_path: Path | str | None = None) -> sqlite3.Connection:
@@ -183,66 +184,175 @@ def _rule_matches_snapshot(rule: sqlite3.Row, snapshot: sqlite3.Row) -> tuple[bo
     return False, ""
 
 
+def _normalize_id_list(values: list[int] | tuple[int, ...] | None) -> list[int]:
+    result = []
+    seen = set()
+    for item in list(values or []):
+        try:
+            value = int(item or 0)
+        except (TypeError, ValueError):
+            continue
+        if value <= 0 or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def _fetch_rules(conn: sqlite3.Connection, rule_ids: list[int] | None = None) -> list[sqlite3.Row]:
+    if rule_ids is not None and not rule_ids:
+        return []
+    if rule_ids:
+        placeholders = ",".join("?" for _ in rule_ids)
+        return conn.execute(
+            f"""
+            SELECT id, category, asset_scope, rule_text
+            FROM knowledge_rules
+            WHERE id IN ({placeholders})
+            ORDER BY id ASC
+            """,
+            tuple(rule_ids),
+        ).fetchall()
+    return conn.execute(
+        """
+        SELECT id, category, asset_scope, rule_text
+        FROM knowledge_rules
+        ORDER BY id ASC
+        """
+    ).fetchall()
+
+
+def _fetch_snapshots(conn: sqlite3.Connection, snapshot_ids: list[int] | None = None) -> list[sqlite3.Row]:
+    if snapshot_ids is not None and not snapshot_ids:
+        return []
+    if snapshot_ids:
+        placeholders = ",".join("?" for _ in snapshot_ids)
+        return conn.execute(
+            f"""
+            SELECT id, symbol, trade_grade, trade_grade_source, alert_state_text, event_risk_mode_text,
+                   event_active_name, event_importance_text, event_note, signal_side, feature_json
+            FROM market_snapshots
+            WHERE id IN ({placeholders})
+            ORDER BY id ASC
+            """,
+            tuple(snapshot_ids),
+        ).fetchall()
+    return conn.execute(
+        """
+        SELECT id, symbol, trade_grade, trade_grade_source, alert_state_text, event_risk_mode_text,
+               event_active_name, event_importance_text, event_note, signal_side, feature_json
+        FROM market_snapshots
+        ORDER BY id ASC
+        """
+    ).fetchall()
+
+
+def _insert_rule_snapshot_matches(
+    conn: sqlite3.Connection,
+    rules: list[sqlite3.Row],
+    snapshots: list[sqlite3.Row],
+) -> int:
+    matched_count = 0
+    if not rules or not snapshots:
+        return matched_count
+    now_text = _now_text()
+    for snapshot in snapshots:
+        for rule in rules:
+            is_match, matched_by = _rule_matches_snapshot(rule, snapshot)
+            if not is_match:
+                continue
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO rule_snapshot_matches (rule_id, snapshot_id, symbol, matched_by, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    int(rule["id"]),
+                    int(snapshot["id"]),
+                    _normalize_text(snapshot["symbol"]).upper(),
+                    matched_by,
+                    now_text,
+                ),
+            )
+            if cursor.rowcount > 0:
+                matched_count += 1
+    return matched_count
+
+
 def match_rules_to_snapshots(
     db_path: Path | str | None = None,
     snapshot_ids: list[int] | tuple[int, ...] | None = None,
 ) -> dict:
     matched_count = 0
+    new_snapshot_match_count = 0
+    new_rule_backfill_count = 0
+    explicit_snapshot_ids = _normalize_id_list(snapshot_ids)
+    match_state = dict(kv_get(MATCH_STATE_KV_KEY, default={}, db_path=db_path) or {})
+    last_rule_id = int(match_state.get("last_rule_id", 0) or 0)
+    last_snapshot_id = int(match_state.get("last_snapshot_id", 0) or 0)
     with _connect(db_path) as conn:
-        rules = conn.execute(
-            """
-            SELECT id, category, asset_scope, rule_text
-            FROM knowledge_rules
-            ORDER BY id ASC
-            """
-        ).fetchall()
+        max_rule_row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM knowledge_rules").fetchone()
+        max_snapshot_row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM market_snapshots").fetchone()
+        current_max_rule_id = int(max_rule_row[0] or 0)
+        current_max_snapshot_id = int(max_snapshot_row[0] or 0)
 
-        if snapshot_ids:
-            placeholders = ",".join("?" for _ in snapshot_ids)
-            snapshots = conn.execute(
-                f"""
-                SELECT id, symbol, trade_grade, trade_grade_source, alert_state_text, event_risk_mode_text,
-                       event_active_name, event_importance_text, event_note, signal_side, feature_json
-                FROM market_snapshots
-                WHERE id IN ({placeholders})
-                ORDER BY id ASC
-                """,
-                tuple(int(item) for item in snapshot_ids),
+        incremental_snapshot_ids = [
+            int(row[0])
+            for row in conn.execute(
+                "SELECT id FROM market_snapshots WHERE id > ? ORDER BY id ASC",
+                (last_snapshot_id,),
             ).fetchall()
-        else:
-            snapshots = conn.execute(
-                """
-                SELECT id, symbol, trade_grade, trade_grade_source, alert_state_text, event_risk_mode_text,
-                       event_active_name, event_importance_text, event_note, signal_side, feature_json
-                FROM market_snapshots
-                ORDER BY id ASC
-                """
+        ]
+        new_rule_ids = [
+            int(row[0])
+            for row in conn.execute(
+                "SELECT id FROM knowledge_rules WHERE id > ? ORDER BY id ASC",
+                (last_rule_id,),
             ).fetchall()
+        ]
 
-        now_text = _now_text()
-        for snapshot in snapshots:
-            for rule in rules:
-                is_match, matched_by = _rule_matches_snapshot(rule, snapshot)
-                if not is_match:
-                    continue
-                cursor = conn.execute(
-                    """
-                    INSERT OR IGNORE INTO rule_snapshot_matches (rule_id, snapshot_id, symbol, matched_by, created_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        int(rule["id"]),
-                        int(snapshot["id"]),
-                        _normalize_text(snapshot["symbol"]).upper(),
-                        matched_by,
-                        now_text,
+        # 阶段1：所有已有规则匹配新快照（含显式传入的快照）
+        snapshot_phase_ids = sorted(set(explicit_snapshot_ids) | set(incremental_snapshot_ids))
+        if snapshot_phase_ids:
+            snapshot_phase_rule_ids = [
+                int(row[0])
+                for row in conn.execute(
+                    "SELECT id FROM knowledge_rules WHERE id NOT IN ({}) ORDER BY id ASC".format(
+                        ",".join("?" for _ in new_rule_ids)
                     ),
-                )
-                if cursor.rowcount > 0:
-                    matched_count += 1
+                    tuple(new_rule_ids),
+                ).fetchall()
+            ] if new_rule_ids else None
+            new_snapshot_match_count = _insert_rule_snapshot_matches(
+                conn,
+                _fetch_rules(conn, snapshot_phase_rule_ids),
+                _fetch_snapshots(conn, snapshot_phase_ids),
+            )
+            matched_count += new_snapshot_match_count
+
+        # 阶段2：新规则回吃全部历史快照，补齐旧样本
+        if new_rule_ids:
+            new_rule_backfill_count = _insert_rule_snapshot_matches(
+                conn,
+                _fetch_rules(conn, new_rule_ids),
+                _fetch_snapshots(conn, None),
+            )
+            matched_count += new_rule_backfill_count
+
+    if current_max_rule_id != last_rule_id or current_max_snapshot_id != last_snapshot_id:
+        kv_set(
+            MATCH_STATE_KV_KEY,
+            {
+                "last_rule_id": current_max_rule_id,
+                "last_snapshot_id": current_max_snapshot_id,
+            },
+            db_path=db_path,
+        )
 
     return {
         "matched_count": matched_count,
+        "new_snapshot_match_count": new_snapshot_match_count,
+        "new_rule_backfill_count": new_rule_backfill_count,
     }
 
 

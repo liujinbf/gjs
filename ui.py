@@ -244,10 +244,9 @@ def run_knowledge_maintenance(config, snapshot_ids: list[int] | None = None) -> 
         "notify_status_changed": False,
     }
     snapshot_ids = [int(item) for item in list(snapshot_ids or []) if int(item or 0) > 0]
-    if snapshot_ids:
-        match_result = match_rules_to_snapshots(snapshot_ids=snapshot_ids)
-        if int(match_result.get("matched_count", 0) or 0) > 0:
-            result["log_lines"].append(f"[知识库] 已新增 {match_result.get('matched_count', 0)} 条规则-样本映射。")
+    match_result = match_rules_to_snapshots(snapshot_ids=snapshot_ids or None)
+    if int(match_result.get("matched_count", 0) or 0) > 0:
+        result["log_lines"].append(f"[知识库] 已新增 {match_result.get('matched_count', 0)} 条规则-样本映射。")
     outcome_result = backfill_snapshot_outcomes()
     if int(outcome_result.get("labeled_count", 0) or 0) <= 0 and not result["log_lines"]:
         return result

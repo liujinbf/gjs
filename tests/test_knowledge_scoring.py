@@ -1,4 +1,5 @@
 import sys
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -116,3 +117,77 @@ def test_rule_scoring_keeps_negative_rule_as_rejected_or_insufficient(tmp_path):
     summary = summarize_rule_scores(db_path=db_path, horizon_min=30)
 
     assert summary["rejected_count"] >= 1 or summary["insufficient_count"] >= 1
+
+
+def test_new_rule_can_backfill_historical_matches_after_state_advanced(tmp_path):
+    db_path = tmp_path / "knowledge.db"
+
+    base_rules = tmp_path / "base_rules.md"
+    base_rules.write_text(
+        """
+# 入场逻辑
+- 回调至关键支撑位企稳后介入
+""",
+        encoding="utf-8",
+    )
+    import_markdown_source(base_rules, db_path=db_path)
+
+    snapshots = []
+    for idx, price in enumerate([100.00, 100.18, 100.35, 100.42, 100.55, 100.70, 100.85], start=0):
+        result = record_snapshot(
+            _build_snapshot(
+                f"2026-04-13 {10 + (idx // 6):02d}:{(idx % 6) * 10:02d}:00",
+                price,
+                "回调至关键支撑位后企稳，等待回踩确认后介入",
+            ),
+            db_path=db_path,
+        )
+        snapshots.extend(result["inserted_snapshot_ids"])
+
+    backfill_snapshot_outcomes(db_path=db_path, now=datetime(2026, 4, 13, 12, 0, 0), horizons_min=(30,))
+    match_rules_to_snapshots(db_path=db_path)
+    refresh_rule_scores(db_path=db_path, horizon_min=30)
+
+    new_rules = tmp_path / "new_rules.md"
+    new_rules.write_text(
+        """
+# 入场逻辑
+- 不追第一次突破，优先等回踩确认
+""",
+        encoding="utf-8",
+    )
+    import_markdown_source(new_rules, db_path=db_path)
+
+    latest_result = record_snapshot(
+        _build_snapshot("2026-04-13 11:10:00", 101.00, "回踩确认后再考虑介入"),
+        db_path=db_path,
+    )
+    latest_snapshot_ids = latest_result["inserted_snapshot_ids"]
+
+    match_result = match_rules_to_snapshots(db_path=db_path, snapshot_ids=latest_snapshot_ids)
+    refresh_rule_scores(db_path=db_path, horizon_min=30)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rule_row = conn.execute(
+            "SELECT id FROM knowledge_rules WHERE rule_text = ?",
+            ("不追第一次突破，优先等回踩确认",),
+        ).fetchone()
+        assert rule_row is not None
+        rule_id = int(rule_row["id"])
+        match_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM rule_snapshot_matches WHERE rule_id = ?",
+                (rule_id,),
+            ).fetchone()[0]
+        )
+        score_row = conn.execute(
+            "SELECT sample_count, last_processed_outcome_id FROM rule_scores WHERE rule_id = ? AND horizon_min = 30",
+            (rule_id,),
+        ).fetchone()
+
+    assert match_result["new_rule_backfill_count"] >= 1
+    assert match_count >= 2, "新规则应补吃历史快照，而不只匹配最新一条"
+    assert score_row is not None
+    assert int(score_row["sample_count"] or 0) >= 1
+    assert int(score_row["last_processed_outcome_id"] or 0) > 0
