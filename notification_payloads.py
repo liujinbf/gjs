@@ -29,6 +29,14 @@ def _clip_text(value: str, limit: int = 68) -> str:
     return text[: max(12, int(limit)) - 1].rstrip() + "…"
 
 
+def _append_block(lines: list[str], title: str, items: list[str]) -> None:
+    payload = [str(item or "").strip() for item in items if str(item or "").strip()]
+    if not payload:
+        return
+    lines.extend(["", f"**{title}**"])
+    lines.extend(payload)
+
+
 def _build_markdown(entry: dict) -> str:
     title         = _normalize_text(entry.get("title", "贵金属监控提醒"))
     markdown_body = str(entry.get("markdown_body", "") or "").strip()
@@ -70,78 +78,74 @@ def _build_markdown(entry: dict) -> str:
     }
     emoji = CATEGORY_EMOJI.get(category, "📊")
 
-    lines = [f"## {emoji}【{title}】", "", f"- 时间：{occurred_at}"]
+    lines = [f"## {emoji}【{title}】", ""]
+    headline_lines = [f"- 时间：{occurred_at}"]
+    if trade_grade:
+        headline_lines.append(f"- 结论：**{trade_grade}**")
     if symbol:
-        lines.append(f"- 品种：{symbol}")
-
+        headline_lines.append(f"- 品种：{symbol}")
     if latest_price:
         try:
             price_line = f"- 当前价格：{_format_price(float(latest_price), price_point)}"
             if change_pct is not None:
                 sign = "+" if float(change_pct) >= 0 else ""
                 price_line += f"（24h涨跌 {sign}{change_pct}%）"
-            lines.append(price_line)
+            headline_lines.append(price_line)
         except (TypeError, ValueError):
             pass
+    lines.extend(headline_lines)
 
-    if trade_grade:
-        lines.append(f"- 结论：**{trade_grade}**")
-
+    category_key = category.lower()
     quick_lines = []
     if detail:
-        quick_lines.append(f"- 内容：{_clip_text(detail, 90)}")
+        quick_lines.append(f"- 内容：{_clip_text(detail, 84 if category_key == 'structure' else 90)}")
     if trade_grade_detail:
-        quick_lines.append(f"- 原因：{_clip_text(trade_grade_detail, 88)}")
+        quick_lines.append(f"- 原因：{_clip_text(trade_grade_detail, 78)}")
     if trade_next_review:
-        quick_lines.append(f"- 复核：{_clip_text(trade_next_review, 72)}")
-    if quick_lines:
-        lines.extend(["", "**先看这个**"])
-        lines.extend(quick_lines)
+        quick_lines.append(f"- 复核：{_clip_text(trade_next_review, 60)}")
+    _append_block(lines, "先看这个", quick_lines)
 
     action_lines = []
-    if risk_reward_ratio:
-        try:
-            action_lines.append(f"- 盈亏比：1:{float(risk_reward_ratio):.2f}")
-        except (TypeError, ValueError):
-            pass
-    if entry_zone_text:
-        action_lines.append(f"- 观察区间：{_clip_text(entry_zone_text, 80)}")
-    if stop_loss_price:
-        try:
-            action_lines.append(f"- 止损：{_format_price(float(stop_loss_price), price_point)}")
-        except (TypeError, ValueError):
-            pass
-    if take_profit_1:
-        try:
-            action_lines.append(f"- 目标1：{_format_price(float(take_profit_1), price_point)}")
-        except (TypeError, ValueError):
-            pass
-    if take_profit_2:
-        try:
-            action_lines.append(f"- 目标2：{_format_price(float(take_profit_2), price_point)}")
-        except (TypeError, ValueError):
-            pass
-    if position_plan_text:
-        action_lines.append(f"- 仓位：{_clip_text(position_plan_text, 72)}")
-    if entry_invalidation_text:
-        action_lines.append(f"- 失效：{_clip_text(entry_invalidation_text, 78)}")
-    if action_lines:
-        lines.extend(["", "**执行参数**"])
-        lines.extend(action_lines)
+    if category_key == "structure":
+        if risk_reward_ratio:
+            try:
+                action_lines.append(f"- 盈亏比：1:{float(risk_reward_ratio):.2f}")
+            except (TypeError, ValueError):
+                pass
+        if entry_zone_text:
+            action_lines.append(f"- 观察区间：{_clip_text(entry_zone_text, 64)}")
+        if stop_loss_price:
+            try:
+                action_lines.append(f"- 止损：{_format_price(float(stop_loss_price), price_point)}")
+            except (TypeError, ValueError):
+                pass
+        if take_profit_1:
+            try:
+                action_lines.append(f"- 目标1：{_format_price(float(take_profit_1), price_point)}")
+            except (TypeError, ValueError):
+                pass
+        if take_profit_2:
+            try:
+                action_lines.append(f"- 目标2：{_format_price(float(take_profit_2), price_point)}")
+            except (TypeError, ValueError):
+                pass
+        if position_plan_text:
+            action_lines.append(f"- 仓位：{_clip_text(position_plan_text, 58)}")
+        if entry_invalidation_text:
+            action_lines.append(f"- 失效：{_clip_text(entry_invalidation_text, 66)}")
+    _append_block(lines, "执行参数", action_lines)
 
     background_lines = []
     if event_name:
         event_parts = [p for p in (event_name, event_time_text, event_importance_text, event_scope_text) if p]
         background_lines.append(f"- 事件：{' | '.join(event_parts)}")
-    elif event_mode_text:
+    elif event_mode_text and category_key in {"macro", "spread", "structure"}:
         background_lines.append(f"- 纪律：{event_mode_text}")
     if event_note:
-        background_lines.append(f"- 提醒：{_clip_text(event_note, 86)}")
+        background_lines.append(f"- 提醒：{_clip_text(event_note, 74)}")
     if external_bias_note:
-        background_lines.append(f"- 外部背景：{_clip_text(external_bias_note, 88)}")
-    if background_lines:
-        lines.extend(["", "**背景**"])
-        lines.extend(background_lines)
+        background_lines.append(f"- 外部背景：{_clip_text(external_bias_note, 74)}")
+    _append_block(lines, "背景", background_lines)
 
     # ── 合并提醒说明 ──
     if aggregate_count > 1:
