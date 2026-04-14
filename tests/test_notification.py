@@ -596,7 +596,7 @@ def test_send_ai_brief_notification_cooldown_blocks_second_push(monkeypatch):
     # 第二次：刚发过，应该被冷却拦截
     r2 = notification.send_ai_brief_notification(brief_payload, snap, config, state_file=state_file)
     assert r2["sent_count"] == 0, "冷却期内应被拦截"
-    assert "ai_brief_cooldown" in r2.get("skipped_reason", ""), f"期望冷却被拒，实际：{r2}"
+    assert "_cooldown" in r2.get("skipped_reason", ""), f"期望冷却被拒，实际：{r2}"
 
     assert len(called) == 1, "只应该实际发送1次"
 

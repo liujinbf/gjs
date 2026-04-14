@@ -141,7 +141,7 @@ def analyze_multi_timeframe_context(frame_contexts: dict[str, dict] | None) -> d
             "multi_timeframe_detail": "",
         }
 
-    ordered_keys = [key for key in ("m5", "m15", "h1") if key in contexts]
+    ordered_keys = [key for key in ("m5", "m15", "h1", "h4") if key in contexts]
     if not ordered_keys:
         ordered_keys = list(contexts.keys())
     bias_map = {

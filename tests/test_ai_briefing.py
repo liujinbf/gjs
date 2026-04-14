@@ -107,7 +107,7 @@ def test_full_prompt_assets_are_independent():
 
 def test_request_ai_brief_requires_api_key():
     try:
-        request_ai_brief({}, _build_config(api_key=""))
+        request_ai_brief({}, _build_config(api_key=""), allow_fallback=False)
     except RuntimeError as exc:
         assert "AI_API_KEY" in str(exc)
     else:

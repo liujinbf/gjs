@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
+import csv
+import time
 from datetime import datetime
 from pathlib import Path
 from urllib import error, parse, request
@@ -150,6 +153,34 @@ def _format_number(value: float | None) -> str:
     if abs(value) >= 10:
         return f"{value:.2f}"
     return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
+def _vix_annotation(vix: float) -> str:
+    """将 VIX 数值转换为分级结构化标注，供 AI 直接理解市场恐慌程度。
+
+    分级标准（参考 CBOE 历史统计）：
+      < 15  : 极度乐观，市场无避险需求，对黄金利空
+      15-25 : 正常波动，避险情绪平稳，对黄金中性
+      25-35 : 市场紧张，避险情绪升温，对黄金偏多
+      > 35  : 恐慌模式，强烈风险规避，对黄金强多
+    """
+    if vix < 15:
+        level = "极度乐观区"
+        sentiment = "市场无避险需求"
+        gold_bias = "对黄金利空"
+    elif vix < 25:
+        level = "正常波动区"
+        sentiment = "避险情绪平稳"
+        gold_bias = "对黄金中性"
+    elif vix < 35:
+        level = "市场紧张区"
+        sentiment = "避险情绪升温"
+        gold_bias = "对黄金偏多"
+    else:
+        level = "恐慌模式"
+        sentiment = "强烈风险规避"
+        gold_bias = "对黄金强多⚡"
+    return f"{vix:.2f}（{level}，{sentiment}，{gold_bias}）"
 
 
 def _normalize_symbols(value: object) -> list[str]:
@@ -336,22 +367,182 @@ def _load_generic_json_item(spec: dict, env: dict | None = None) -> dict:
     if not url:
         raise RuntimeError("generic_json 数据源缺少 url")
     payload = _fetch_json(url)
-    data_rows = list(payload.get(str(spec.get("data_key", "data")), []) or [])
-    if not data_rows:
-        raise RuntimeError("generic_json 未返回数据")
+
+    # 增强：支持点号路径提取数据列表
+    data_key = str(spec.get("data_key", "data")).strip()
+    data_rows = payload
+    if data_key and data_key != ".":
+        for part in data_key.split("."):
+            if isinstance(data_rows, dict) and part in data_rows:
+                data_rows = data_rows[part]
+            elif isinstance(data_rows, list) and part.isdigit():
+                idx = int(part)
+                if 0 <= idx < len(data_rows):
+                    data_rows = data_rows[idx]
+                else:
+                    data_rows = []
+                    break
+            else:
+                data_rows = []
+                break
+
+    if not isinstance(data_rows, list) or not data_rows:
+        raise RuntimeError(f"generic_json 在路径 '{data_key}' 未返回有效列表")
+
     latest = data_rows[0]
     previous = data_rows[1] if len(data_rows) > 1 else {}
     value_field = _normalize_text(spec.get("value_field", "value")) or "value"
     time_field = _normalize_text(spec.get("time_field", "date")) or "date"
+
     return _build_item(
         spec,
-        source=_normalize_text(spec.get("source_label", "")) or "外部宏观数据源",
+        source=_normalize_text(spec.get("source_label", "")) or "外部 JSON 数据源",
         published_at=_normalize_text(latest.get(time_field, "")),
         latest_value=_safe_float(latest.get(value_field)),
         previous_value=_safe_float(previous.get(value_field)),
         value_text=_normalize_text(latest.get(value_field, "")),
     )
 
+
+def _load_alphavantage_item(spec: dict, env: dict | None = None) -> dict:
+    env_map = dict(env or {})
+    api_key = _normalize_text(spec.get("api_key", "")) or _normalize_text(
+        env_map.get(str(spec.get("api_key_env", "ALPHAVANTAGE_API_KEY")), "")
+    )
+    if not api_key:
+        raise RuntimeError("Alpha Vantage 数据源缺少 API Key")
+
+    func = _normalize_text(spec.get("function", ""))
+    if not func:
+        raise RuntimeError("Alpha Vantage 数据源缺少 function 参数")
+
+    params = {
+        "function": func,
+        "apikey": api_key,
+    }
+    # 可选：interval
+    interval = _normalize_text(spec.get("interval", ""))
+    if interval:
+        params["interval"] = interval
+
+    url = f"https://www.alphavantage.co/query?{parse.urlencode(params)}"
+    payload = _fetch_json(url)
+
+    # Alpha Vantage 宏观指标通常返回 { "name": "...", "data": [...] }
+    data_rows = list(payload.get("data", []) or [])
+    if not data_rows:
+        # 有些接口可能返回 Note 或 Error Message
+        if "Note" in payload:
+            raise RuntimeError(f"Alpha Vantage 额度限制: {payload['Note']}")
+        if "Error Message" in payload:
+            raise RuntimeError(f"Alpha Vantage 错误: {payload['Error Message']}")
+        raise RuntimeError("Alpha Vantage 未返回有效数据列表")
+
+    latest = data_rows[0]
+    previous = data_rows[1] if len(data_rows) > 1 else {}
+
+    return _build_item(
+        spec,
+        source="Alpha Vantage",
+        published_at=_normalize_text(latest.get("date", "")),
+        latest_value=_safe_float(latest.get("value")),
+        previous_value=_safe_float(previous.get("value")),
+    )
+
+
+def _load_yfinance_item(spec: dict, env: dict | None = None) -> dict:
+    """轻量级 Yahoo Finance 拉取，使用 query1 API 获取 chart 数据。"""
+    _ = env
+    symbol = _normalize_text(spec.get("symbol", ""))
+    if not symbol:
+        raise RuntimeError("Yahoo Finance 数据源缺少 symbol")
+
+    # 获取最近 5 天的数据以确保有前值
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{parse.quote(symbol)}?interval=1d&range=5d"
+    payload = _fetch_json(url)
+
+    result_set = payload.get("chart", {}).get("result", [])
+    if not result_set:
+        raise RuntimeError(f"Yahoo Finance 未返回 {symbol} 的数据")
+
+    res = result_set[0]
+    timestamps = list(res.get("timestamp", []) or [])
+    indicators = res.get("indicators", {}).get("quote", [{}])[0]
+    closes = list(indicators.get("close", []) or [])
+
+    # 过滤掉 None 值
+    valid_data = []
+    for i in range(len(timestamps)):
+        if i < len(closes) and closes[i] is not None:
+            valid_data.append((timestamps[i], closes[i]))
+
+    if not valid_data:
+        raise RuntimeError(f"Yahoo Finance 未返回 {symbol} 的有效收盘价")
+
+    # 时间降序排列
+    valid_data.sort(key=lambda x: x[0], reverse=True)
+    latest_ts, latest_val = valid_data[0]
+    prev_val = valid_data[1][1] if len(valid_data) > 1 else None
+
+    published_at = datetime.fromtimestamp(latest_ts).strftime("%Y-%m-%d")
+
+    return _build_item(
+        spec,
+        source="Yahoo Finance",
+        published_at=published_at,
+        latest_value=latest_val,
+        previous_value=prev_val,
+        value_text=_vix_annotation(latest_val) if symbol == "^VIX" else "",
+    )
+
+
+def _load_generic_csv_item(spec: dict, env: dict | None = None) -> dict:
+    _ = env
+    url = _normalize_text(spec.get("url", ""))
+    if not url:
+        raise RuntimeError("generic_csv 数据源缺少 url")
+
+    # 下载 CSV 并解析
+    req = request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with request.urlopen(req, timeout=10) as response:
+            content = response.read().decode("utf-8", errors="ignore")
+    except Exception as exc:
+        raise RuntimeError(f"CSV 下载失败: {exc}")
+
+    lines = content.strip().splitlines()
+    if not lines:
+        raise RuntimeError("CSV 内容为空")
+
+    reader = csv.DictReader(lines)
+    data_rows = list(reader)
+    if not data_rows:
+        raise RuntimeError("CSV 解析后无数据行")
+
+    # CSV 通常是时间升序，我们需要最新的
+    # 如果没指定排序列，假设最后一行最新（常见于价格序列）；如果指定了日期列，则排序。
+    date_col = _normalize_text(spec.get("time_field", ""))
+    if date_col and date_col in data_rows[0]:
+        data_rows.sort(key=lambda x: str(x[date_col]), reverse=True)
+    else:
+        # 默认假设最后一行是最新数据，反转列表
+        data_rows.reverse()
+
+    latest = data_rows[0]
+    previous = data_rows[1] if len(data_rows) > 1 else {}
+    value_col = _normalize_text(spec.get("value_field", ""))
+    if not value_col or value_col not in latest:
+        # 如果没指定列名，尝试取第二列（通常第一列是日期/代码）
+        keys = list(latest.keys())
+        value_col = keys[1] if len(keys) > 1 else keys[0]
+
+    return _build_item(
+        spec,
+        source=_normalize_text(spec.get("source_label", "")) or "外部 CSV 数据源",
+        published_at=_normalize_text(latest.get(date_col, "")) if date_col else "",
+        latest_value=_safe_float(latest.get(value_col)),
+        previous_value=_safe_float(previous.get(value_col)),
+    )
 
 
 def _load_worldbank_item(spec: dict, env: dict | None = None) -> dict:
@@ -380,12 +571,16 @@ def _load_worldbank_item(spec: dict, env: dict | None = None) -> dict:
         previous_value=_safe_float(previous.get("value")),
     )
 
+
 PROVIDER_LOADERS = {
     "fred": _load_fred_item,
     "bls": _load_bls_item,
     "treasury": _load_treasury_item,
     "worldbank": _load_worldbank_item,
     "generic_json": _load_generic_json_item,
+    "generic_csv": _load_generic_csv_item,
+    "alphavantage": _load_alphavantage_item,
+    "yfinance": _load_yfinance_item,
 }
 
 
@@ -431,6 +626,7 @@ def load_macro_data_feed(
     now: datetime | None = None,
     cache_file: Path | None = None,
     env: dict | None = None,
+    cache_only: bool = False,
 ) -> dict:
     current = now or datetime.now()
     cache_path = Path(cache_file) if cache_file else MACRO_DATA_CACHE_FILE
@@ -458,6 +654,28 @@ def load_macro_data_feed(
         }
 
     cached = _read_cache(cache_path)
+    if bool(cache_only):
+        if _normalize_text(cached.get("spec_text", "")) == clean_spec_source and _parse_cache_time(cached.get("fetched_at")) is not None:
+            fetched_at = _parse_cache_time(cached.get("fetched_at"))
+            items = list(cached.get("items", []) or [])
+            return {
+                "enabled": True,
+                "status": "cache_only",
+                "status_text": f"结构化宏观数据本地缓存载入：{len(items)} 条，{_format_age_text(current, fetched_at)}同步。",
+                "item_count": len(items),
+                "summary_text": _normalize_text(cached.get("summary_text", "")),
+                "items": items,
+                "fetched_at_text": _normalize_text(cached.get("fetched_at_text", "")),
+            }
+        return {
+            "enabled": True,
+            "status": "cache_missing",
+            "status_text": "结构化宏观数据等待后台同步，本地尚无可用缓存。",
+            "item_count": 0,
+            "summary_text": "",
+            "items": [],
+            "fetched_at_text": "",
+        }
     if _cache_is_fresh(cached, clean_spec_source, safe_refresh_min, current):
         fetched_at = _parse_cache_time(cached.get("fetched_at"))
         items = list(cached.get("items", []) or [])

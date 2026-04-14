@@ -80,5 +80,55 @@
     "symbols": ["XAUUSD", "XAGUSD"],
     "importance": "medium",
     "bias_mode": "higher_bearish"
+  },
+
+  {
+    "provider": "yfinance",
+    "name": "美元指数 (DXY)",
+    "symbol": "DX-Y.NYB",
+    "symbols": ["XAUUSD", "XAGUSD", "EURUSD"],
+    "importance": "high",
+    "bias_mode": "higher_bearish",
+    "notes": "美元走强通常压制贵金属和非美货币。"
+  },
+  {
+    "provider": "yfinance",
+    "name": "10年期美债收益率 (US10Y)",
+    "symbol": "^TNX",
+    "symbols": ["XAUUSD", "XAGUSD"],
+    "importance": "high",
+    "bias_mode": "higher_bearish",
+    "notes": "实际利率上升（收益率上行）对黄金构成利空。"
+  },
+  {
+    "provider": "yfinance",
+    "name": "VIX 恐慌指数",
+    "symbol": "^VIX",
+    "symbols": ["XAUUSD"],
+    "importance": "medium",
+    "bias_mode": "higher_bullish",
+    "notes": "市场恐慌情绪升温通常提振避险资产黄金。"
+  },
+
+  {
+    "provider": "alphavantage",
+    "name": "美国核心 CPI（月频）",
+    "function": "CPI",
+    "interval": "monthly",
+    "api_key_env": "ALPHAVANTAGE_API_KEY",
+    "symbols": ["XAUUSD", "XAGUSD", "EURUSD"],
+    "importance": "high",
+    "bias_mode": "higher_bearish",
+    "notes": "CPI 超预期上行通常利空黄金（加息预期升温）。"
+  },
+  {
+    "provider": "alphavantage",
+    "name": "美国非农就业人数 (NFP)",
+    "function": "NONFARM_PAYROLL",
+    "api_key_env": "ALPHAVANTAGE_API_KEY",
+    "symbols": ["XAUUSD", "XAGUSD", "USDJPY"],
+    "importance": "high",
+    "bias_mode": "higher_bearish",
+    "notes": "非农超预期走强压制黄金，日元可能升值。"
   }
 ]

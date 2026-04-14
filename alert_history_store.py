@@ -30,25 +30,46 @@ def _build_time_bucket() -> str:
     return datetime.now().strftime("%Y%m%d%H")
 
 
-def _build_entry(category: str, title: str, detail: str, tone: str, occurred_at: str, extra: dict | None = None) -> dict:
+def _build_entry(
+    category: str,
+    title: str,
+    detail: str,
+    tone: str,
+    occurred_at: str,
+    extra: dict | None = None,
+    sig_extra: "list[str] | None" = None,
+) -> dict:
+    """
+    构建标准提醒条目。
+
+    sig_extra: 可选的额外签名分量列表。
+      - 若提供，将替代默认的"时间桶"作为签名末尾的区分字段。
+      - 适合宏观提醒等"内容驱动"的条目：只有当事件/状态真正改变时才触发新推送。
+      - 若不提供，退回到原来的小时时间桶行为（保持对点差、结构等条目的兼容）。
+    """
     clean_title = _normalize_text(title)
     clean_detail = _normalize_text(detail)
     clean_tone = str(tone or "neutral").strip() or "neutral"
     extra_dict = extra or {}
 
-    # ── 动态签名：加入时间桶 + 价格桶，确保行情变化或新时段能重新推送 ──
-    # 时间桶：同一小时内同类提醒不重复，但每小时允许刷新一次
-    time_bucket = _build_time_bucket()
     # 价格桶：价格变动超过 10 个点位即视为新状态（金/银/汇率通用，按绝对值取整即可）
+    time_bucket = _build_time_bucket()
     price = float(extra_dict.get("baseline_latest_price", 0.0) or 0.0)
     spread = float(extra_dict.get("baseline_spread_points", 0.0) or 0.0)
     price_bucket = _build_price_bucket(price) if price > 0 else ""
     spread_bucket = str(int(spread)) if spread > 0 else ""
-    sig_parts = [clean_title, clean_tone, time_bucket]
-    if price_bucket:
-        sig_parts.append(price_bucket)
-    if spread_bucket:
-        sig_parts.append(f"spd{spread_bucket}")
+
+    if sig_extra is not None:
+        # 内容驱动签名：调用方显式指定区分字段，不再使用时间桶
+        sig_parts = [clean_title, clean_tone]
+        sig_parts.extend(str(item) for item in sig_extra if str(item or "").strip())
+    else:
+        # 时间驱动签名：默认行为，同一小时内不重推
+        sig_parts = [clean_title, clean_tone, time_bucket]
+        if price_bucket:
+            sig_parts.append(price_bucket)
+        if spread_bucket:
+            sig_parts.append(f"spd{spread_bucket}")
     signature = "|".join(sig_parts)
 
     payload = {
@@ -386,6 +407,15 @@ def build_snapshot_history_entries(snapshot: dict, history_file: Path | None = N
 
     alert_text = _normalize_text(snapshot.get("alert_text", ""))
     if alert_text:
+        # 宏观提醒签名策略：以「下一个关注事件名称 + 出手分级」作为区分键。
+        # 只有当下一个关注事件或市场出手分级真正发生改变时，才触发新推送。
+        # 修复：避免每小时重复推送内容几乎相同的通用宏观建议。
+        macro_next_event = _normalize_text(
+            snapshot_event_meta.get("event_name", "")
+            or snapshot.get("event_next_name", "")
+            or "no_event"
+        )
+        macro_grade = _normalize_text(trade_meta.get("trade_grade", "") or "observe")
         entries.append(
             _build_entry(
                 "macro",
@@ -394,6 +424,7 @@ def build_snapshot_history_entries(snapshot: dict, history_file: Path | None = N
                 "warning",
                 occurred_at,
                 extra={**trade_meta, **snapshot_event_meta},
+                sig_extra=[macro_next_event, macro_grade],
             )
         )
     entries.extend(_build_external_source_entries(snapshot, trade_meta, snapshot_event_meta))

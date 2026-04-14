@@ -7,7 +7,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import urlopen
+from urllib.request import urlopen, Request
 
 from app_config import PROJECT_DIR
 
@@ -152,8 +152,13 @@ def _cache_is_fresh(cache_payload: dict, source_text: str, refresh_min: int, cur
 def _load_source_text(source: str) -> str:
     source_text = str(source or "").strip()
     if source_text.lower().startswith(("http://", "https://")):
+        # 使用浏览器 UA 避免部分资讯站点（Seeking Alpha、ZeroHedge 等）返回 403
+        req = Request(
+            source_text,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"},
+        )
         try:
-            with urlopen(source_text, timeout=6) as response:
+            with urlopen(req, timeout=8) as response:
                 payload = response.read()
         except HTTPError as exc:
             raise RuntimeError(f"HTTP {exc.code}") from exc
@@ -413,6 +418,7 @@ def load_macro_news_feed(
     symbols: list[str] | None = None,
     now: datetime | None = None,
     cache_file: Path | None = None,
+    cache_only: bool = False,
 ) -> dict:
     current = now or datetime.now()
     cache_path = Path(cache_file) if cache_file else MACRO_NEWS_CACHE_FILE
@@ -440,6 +446,28 @@ def load_macro_news_feed(
         }
 
     cached = _read_cache(cache_path)
+    if bool(cache_only):
+        if _normalize_text(cached.get("source_text", "")) == clean_source_text and _parse_cache_time(cached.get("fetched_at")) is not None:
+            fetched_at = _parse_cache_time(cached.get("fetched_at"))
+            items = list(cached.get("items", []) or [])
+            return {
+                "enabled": True,
+                "status": "cache_only",
+                "status_text": f"外部资讯流本地缓存载入：{len(items)} 条，{_format_age_text(current, fetched_at)}同步。",
+                "item_count": len(items),
+                "summary_text": _normalize_text(cached.get("summary_text", "")),
+                "items": items,
+                "fetched_at_text": _normalize_text(cached.get("fetched_at_text", "")),
+            }
+        return {
+            "enabled": True,
+            "status": "cache_missing",
+            "status_text": "外部资讯流等待后台同步，本地尚无可用缓存。",
+            "item_count": 0,
+            "summary_text": "",
+            "items": [],
+            "fetched_at_text": "",
+        }
     if _cache_is_fresh(cached, clean_source_text, safe_refresh_min, current):
         fetched_at = _parse_cache_time(cached.get("fetched_at"))
         items = list(cached.get("items", []) or [])

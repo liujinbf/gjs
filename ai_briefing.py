@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from urllib import error, request
 
 from app_config import MetalMonitorConfig
 from knowledge_rulebook import build_rulebook
 from prompt_templates import AI_BRIEF_SYSTEM_PROMPT, build_metal_brief_prompt
 from backtest_engine import get_historical_win_rate
+
+logger = logging.getLogger(__name__)
 
 
 def build_snapshot_prompt(snapshot: dict, rulebook: dict | None = None) -> str:
@@ -118,9 +121,27 @@ def _extract_anthropic_content(response: dict) -> str:
     return content
 
 
-def request_ai_brief(snapshot: dict, config: MetalMonitorConfig) -> dict:
+def request_ai_brief(
+    snapshot: dict,
+    config: MetalMonitorConfig,
+    allow_fallback: bool = True,
+) -> dict:
+    """
+    向 AI 接口请求研判简报。
+
+    allow_fallback=True（默认）时，以下情况自动切换为规则引擎降级简报：
+      - AI API Key 未配置
+      - 网络超时、HTTP 错误、响应解析失败
+
+    allow_fallback=False 时，上述情况直接抛出异常（适合手动触发时给用户明确报错）。
+    """
     api_key = str(config.ai_api_key or "").strip()
     if not api_key:
+        if allow_fallback:
+            logger.warning("AI API Key 未配置，启用规则引擎降级模式")
+            result = _rule_engine_fallback(snapshot)
+            result["fallback_reason"] = "AI API Key 未配置"
+            return result
         raise RuntimeError("当前未配置 AI_API_KEY，无法执行 AI 研判。")
 
     api_base = str(config.ai_api_base or "https://api.siliconflow.cn/v1").strip().rstrip("/")
@@ -128,39 +149,71 @@ def request_ai_brief(snapshot: dict, config: MetalMonitorConfig) -> dict:
     rulebook = build_rulebook()
     prompt = build_snapshot_prompt(snapshot, rulebook=rulebook)
 
-    if _is_anthropic_api(api_base):
-        payload = {
-            "model": model,
-            "max_tokens": 800,
-            "temperature": 0.2,
-            "system": AI_BRIEF_SYSTEM_PROMPT,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        response = _post_json_with_headers(
-            f"{api_base}/messages",
-            payload,
-            headers={
-                "Content-Type": "application/json; charset=utf-8",
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-            },
-        )
-        content = _extract_anthropic_content(response)
-    else:
-        payload = {
-            "model": model,
-            "temperature": 0.2,
-            "messages": [
-                {"role": "system", "content": AI_BRIEF_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-        }
-        response = _post_json(_build_chat_completions_url(api_base), payload, api_key=api_key)
-        content = _extract_openai_content(response)
+    try:
+        if _is_anthropic_api(api_base):
+            payload = {
+                "model": model,
+                "max_tokens": 800,
+                "temperature": 0.2,
+                "system": AI_BRIEF_SYSTEM_PROMPT,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+            response = _post_json_with_headers(
+                f"{api_base}/messages",
+                payload,
+                headers={
+                    "Content-Type": "application/json; charset=utf-8",
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+            )
+            content = _extract_anthropic_content(response)
+        else:
+            payload = {
+                "model": model,
+                "temperature": 0.2,
+                "messages": [
+                    {"role": "system", "content": AI_BRIEF_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+            }
+            response = _post_json(_build_chat_completions_url(api_base), payload, api_key=api_key)
+            content = _extract_openai_content(response)
 
-    return {
-        "content": content,
-        "model": model,
-        "api_base": api_base,
-        "rulebook_summary_text": str(rulebook.get("summary_text", "") or "").strip(),
-    }
+        return {
+            "content": content,
+            "model": model,
+            "api_base": api_base,
+            "rulebook_summary_text": str(rulebook.get("summary_text", "") or "").strip(),
+        }
+
+    except Exception as exc:  # noqa: BLE001
+        if allow_fallback:
+            reason = str(exc)
+            logger.warning(f"AI 研判失败，启用规则引擎降级模式：{reason}")
+            result = _rule_engine_fallback(snapshot)
+            result["fallback_reason"] = reason
+            return result
+        raise
+
+
+def _rule_engine_fallback(snapshot: dict) -> dict:
+    """内部辅助：调用规则引擎生成降级简报，捕获所有异常保证永不崩溃。"""
+    try:
+        from rule_engine_brief import generate_rule_engine_brief
+        return generate_rule_engine_brief(snapshot)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(f"规则引擎降级也失败：{exc}")
+        return {
+            "content": (
+                "[🔴 系统降级失败] AI 研判和规则引擎均不可用。\n"
+                "请检查：① AI API Key 是否配置正确；② 网络连接是否正常。\n"
+                "<!-- TRACKER_META: {\"symbol\": \"--\", \"action\": \"neutral\","
+                " \"price\": 0, \"sl\": 0, \"tp\": 0} -->"
+            ),
+            "model": "emergency-fallback",
+            "api_base": "local",
+            "rulebook_summary_text": "",
+            "is_fallback": True,
+            "fallback_reason": str(exc),
+        }

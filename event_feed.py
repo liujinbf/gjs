@@ -25,6 +25,7 @@ def load_event_feed(
     refresh_min: int,
     now: datetime | None = None,
     cache_file: Path | None = None,
+    cache_only: bool = False,
 ) -> dict:
     current = now or datetime.now()
     cache_path = Path(cache_file) if cache_file else EVENT_FEED_CACHE_FILE
@@ -56,6 +57,32 @@ def load_event_feed(
         }
 
     cached = _read_cache(cache_path)
+    if bool(cache_only):
+        if _cache_matches_source(cached, source_text) and _parse_cache_time(cached.get("fetched_at")) is not None:
+            fetched_at = _parse_cache_time(cached.get("fetched_at"))
+            age_text = _format_age_text(current, fetched_at)
+            item_count = int(cached.get("item_count", 0) or 0)
+            return {
+                "enabled": True,
+                "status": "cache_only",
+                "status_text": f"外部事件源本地缓存载入：{item_count} 条，{age_text}同步。",
+                "schedule_text": str(cached.get("schedule_text", "") or "").strip(),
+                "item_count": item_count,
+                "fetched_at_text": cached.get("fetched_at_text", ""),
+                "items": list(cached.get("items", []) or []),
+                "result_item_count": int(cached.get("result_item_count", 0) or 0),
+                "result_summary_text": str(cached.get("result_summary_text", "") or "").strip(),
+            }
+        return {
+            "enabled": True,
+            "status": "cache_missing",
+            "status_text": "外部事件源等待后台同步，本地尚无可用缓存。",
+            "schedule_text": "",
+            "item_count": 0,
+            "items": [],
+            "result_item_count": 0,
+            "result_summary_text": "",
+        }
     if _cache_is_fresh(cached, source_text, safe_refresh_min, current):
         fetched_at = _parse_cache_time(cached.get("fetched_at"))
         age_text = _format_age_text(current, fetched_at)

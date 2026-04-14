@@ -29,11 +29,18 @@ _disconnect_count: int = 0            # 连续断线次数
 _last_disconnect_logged: float = 0.0  # 上次记录断线日志的时间戳
 DISCONNECT_ALERT_THRESHOLD = 3        # 连续 N 次断线后升级为 CRITICAL
 DISCONNECT_LOG_INTERVAL_SEC = 60      # 相同条件的日志最小间隔（避免刷屏）
+
+# 自动重连节流：两次主动重连尝试之间的最短间隔（秒），防止高频轮询时过于频繁地重连
+_last_reconnect_attempt: float = 0.0
+AUTO_RECONNECT_MIN_INTERVAL_SEC = 15  # 至少 15 秒才允许再次主动重连
+
 INTRADAY_CONTEXT_SPECS = [
     ("m5",  "TIMEFRAME_M5",  288, "近24小时"),   # 288 M5 bars = 24h
     ("m15", "TIMEFRAME_M15", 12,  "近3小时"),
     ("h1",  "TIMEFRAME_H1",  60,  "近12小时"),   # 60 H1 bars for MA50+RSI
+    ("h4",  "TIMEFRAME_H4",  120, "近20天"),   # 120 H4 bars ≈ 20d，用于趋势判断
 ]
+
 
 
 def _iter_mt5_terminal_candidates():
@@ -85,7 +92,14 @@ def _is_live_tick(tick, now_ts: float | None = None, max_age_sec: int = LIVE_TIC
     if tick_time <= 0 or max(bid, ask, last) <= 0:
         return False
     current_ts = float(now_ts if now_ts is not None else time.time())
-    return current_ts - float(tick_time) <= max(5, int(max_age_sec))
+    delta = abs(current_ts - float(tick_time))
+    # 炸弹二修复：MT5 tick.time 是经纪商服务器时间戳（EET/GMT+2~3），
+    # 与 Python 的 time.time()（UTC）直接相减会产生数小时时差，导致永远返回 False。
+    # 当 delta > 3600（1小时阈值），视为时区不同源，降级为"价格有效即活跃"。
+    if delta > 3600:
+        return True
+    return delta <= max(5, int(max_age_sec))
+
 
 
 def _is_connection_alive() -> bool:
@@ -95,6 +109,73 @@ def _is_connection_alive() -> bool:
         return mt5.terminal_info() is not None
     except Exception:  # noqa: BLE001
         return False
+
+
+def _force_reconnect_if_needed() -> bool:
+    """fetch_quotes 每次调用前的心跳探测 + 自动重连。
+
+    解决问题：_mt5_initialized=True 但 MT5 进程已挂的「僵死连接」场景。
+    initialize_connection() 只在程序启动和明显断线时触发，无法感知进程重启或网络超时。
+    本函数在每次拉取报价前直接调用 terminal_info()，发现失败则强制 shutdown→reinitialize。
+
+    节流规则：两次主动重连之间至少间隔 AUTO_RECONNECT_MIN_INTERVAL_SEC 秒，
+    防止高频轮询在短时间内反复 shutdown/initialize 占用线程。
+
+    返回 True 表示连接健康（或重连成功），False 表示仍然无法连接。
+    """
+    global _mt5_initialized, _disconnect_count, _last_disconnect_logged, _last_reconnect_attempt
+
+    if not HAS_MT5:
+        return False
+
+    # 快速路径：连接正常，直接返回
+    if _mt5_initialized and _is_connection_alive():
+        return True
+
+    # 节流：距上次主动重连不足最短间隔，暂不重试
+    now_ts = time.time()
+    if now_ts - _last_reconnect_attempt < AUTO_RECONNECT_MIN_INTERVAL_SEC:
+        return False
+    _last_reconnect_attempt = now_ts
+
+    # 清理旧连接（防止 mt5.initialize 在旧会话上叠加）
+    if _mt5_initialized:
+        try:
+            mt5.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
+        _mt5_initialized = False
+        _disconnect_count += 1
+        if now_ts - _last_disconnect_logged >= DISCONNECT_LOG_INTERVAL_SEC:
+            _last_disconnect_logged = now_ts
+            if _disconnect_count >= DISCONNECT_ALERT_THRESHOLD:
+                logging.critical(
+                    f"🚨 MT5 连接僵死，正在执行自动强制重连"
+                    f"（已连续断线 {_disconnect_count} 次）"
+                )
+            else:
+                logging.warning(
+                    f"⚠️ MT5 心跳失败，尝试自动重连（第 {_disconnect_count} 次）…"
+                )
+
+    # 重新初始化
+    try:
+        kwargs = _build_initialize_kwargs()
+        if mt5.initialize(**kwargs):
+            _mt5_initialized = True
+            if _disconnect_count > 0:
+                logging.warning(
+                    f"✅ MT5 自动重连成功（曾连续断线 {_disconnect_count} 次）"
+                )
+            _disconnect_count = 0
+            return True
+        err = mt5.last_error()
+        logging.warning(f"⚠️ MT5 自动重连失败，错误码：{err}")
+        return False
+    except Exception as exc:  # noqa: BLE001
+        logging.exception(f"MT5 自动重连异常：{exc}")
+        return False
+
 
 
 def _build_initialize_kwargs() -> dict:
@@ -184,9 +265,19 @@ def shutdown_connection() -> None:
 
 
 def fetch_quotes(symbols: list[str], include_inactive: bool = True) -> list[dict]:
+    # initialize_connection() 处理"从未连接"和"明显断线"的场景；
+    # _force_reconnect_if_needed() 额外处理"看起来已连但实际僵死（MT5进程已挂）"的场景。
     ok, _message = initialize_connection()
     if not ok:
-        return []
+        # 连接明显失败时，再尝试一次强制重连（节流保护内）
+        ok = _force_reconnect_if_needed()
+        if not ok:
+            return []
+    else:
+        # 即使 initialize_connection 认为"已连"，仍做一次心跳探测
+        # 若发现僵死则强制重连；若重连失败则返回空（不阻塞轮询，等下轮再试）
+        _force_reconnect_if_needed()
+
 
     rows = []
     for symbol in symbols or []:
@@ -223,6 +314,7 @@ def fetch_quotes(symbols: list[str], include_inactive: bool = True) -> list[dict
             "multi_timeframe_detail": "",
             "m15_context_text": "",
             "h1_context_text": "",
+            "h4_context_text": "",
         }
         key_level_context = build_empty_key_level_context()
         breakout_context = build_empty_breakout_context()
@@ -242,12 +334,21 @@ def fetch_quotes(symbols: list[str], include_inactive: bool = True) -> list[dict
             intraday_context = dict(timeframe_contexts.get("m5", build_empty_intraday_context()))
             multi_timeframe_context = analyze_multi_timeframe_context(timeframe_contexts)
             multi_timeframe_context["m15_context_text"] = str(timeframe_contexts.get("m15", {}).get("intraday_context_text", "") or "").strip()
-            multi_timeframe_context["h1_context_text"] = str(timeframe_contexts.get("h1", {}).get("intraday_context_text", "") or "").strip()
-            key_level_context = analyze_key_levels(symbol_key, latest, timeframe_rates.get("h1", []))
-            breakout_context = analyze_breakout_signal(key_level_context, timeframe_rates.get("m5", []))
+            multi_timeframe_context["h1_context_text"]  = str(timeframe_contexts.get("h1",  {}).get("intraday_context_text", "") or "").strip()
+            multi_timeframe_context["h4_context_text"]  = str(timeframe_contexts.get("h4",  {}).get("intraday_context_text", "") or "").strip()
+            try:
+                key_level_context = analyze_key_levels(symbol_key, latest, timeframe_rates.get("h1", []))
+            except Exception:  # noqa: BLE001  numpy ValueError 等
+                key_level_context = build_empty_key_level_context()
+            try:
+                breakout_context = analyze_breakout_signal(key_level_context, timeframe_rates.get("m5", []))
+            except Exception:  # noqa: BLE001
+                breakout_context = build_empty_breakout_context()
+
             tech_indicators = build_technical_indicators({
                 "m5": timeframe_rates.get("m5"),
                 "h1": timeframe_rates.get("h1"),
+                "h4": timeframe_rates.get("h4"),
             })
         else:
             tech_indicators = {}

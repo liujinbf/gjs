@@ -5,29 +5,52 @@ from datetime import datetime
 from pathlib import Path
 
 from app_config import PROJECT_DIR
+from knowledge_base import kv_get, kv_set  # 3.2 修复：状态持久化走 SQLite KV
 
 RUNTIME_DIR = PROJECT_DIR / ".runtime"
-ALERT_STATUS_STATE_FILE = RUNTIME_DIR / "alert_status_state.json"
+ALERT_STATUS_STATE_FILE = RUNTIME_DIR / "alert_status_state.json"  # 保留用于存量迁移
 STATE_KEY = "_states"
 TIMELINE_KEY = "_timeline"
 MAX_TIMELINE_ITEMS = 200
+_KV_KEY = "alert_status_state"  # system_state_kv 中的键名
 
 
 def _read_state(state_file: Path | None = None) -> dict:
-    target = Path(state_file) if state_file else ALERT_STATUS_STATE_FILE
-    if not target.exists():
+    # 当显式传入 state_file 时（测试隔离路径）直接读 JSON，不走 SQLite
+    if state_file is not None:
+        target = Path(state_file)
+        if target.exists():
+            try:
+                payload = json.loads(target.read_text(encoding="utf-8"))
+                return _normalize_payload(payload)
+            except (OSError, json.JSONDecodeError):
+                pass
         return {STATE_KEY: {}, TIMELINE_KEY: []}
-    try:
-        payload = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {STATE_KEY: {}, TIMELINE_KEY: []}
-    return _normalize_payload(payload)
+    # 生产路径：优先读 SQLite KV，不存在时从旧 JSON 文件迁移
+    payload = kv_get(_KV_KEY)
+    if payload is not None:
+        return _normalize_payload(payload)
+    if ALERT_STATUS_STATE_FILE.exists():
+        try:
+            payload = json.loads(ALERT_STATUS_STATE_FILE.read_text(encoding="utf-8"))
+            normalized = _normalize_payload(payload)
+            kv_set(_KV_KEY, normalized)  # 一次性迁移至 SQLite
+            return normalized
+        except (OSError, json.JSONDecodeError):
+            pass
+    return {STATE_KEY: {}, TIMELINE_KEY: []}
 
 
 def _write_state(state: dict, state_file: Path | None = None) -> None:
-    target = Path(state_file) if state_file else ALERT_STATUS_STATE_FILE
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(_normalize_payload(state), ensure_ascii=False, indent=2), encoding="utf-8")
+    normalized = _normalize_payload(state)
+    if state_file is not None:
+        # 显式传入 state_file 时写 JSON（测试隔离路径）
+        Path(state_file).parent.mkdir(parents=True, exist_ok=True)
+        Path(state_file).write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
+        return
+    # 生产路径：只写 SQLite KV
+    kv_set(_KV_KEY, normalized)
+
 
 
 def _normalize_payload(payload: dict | None) -> dict:

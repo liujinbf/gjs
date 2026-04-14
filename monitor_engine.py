@@ -338,6 +338,7 @@ def build_snapshot_from_rows(
                 "signal_side": signal_side,
                 "signal_side_text": signal_side_text,
                 "tech_summary": str(row.get("tech_summary", "") or "").strip(),
+                "tech_summary_h4": str(row.get("tech_summary_h4", "") or "").strip(),
                 "rsi14": row.get("rsi14"),
                 "ma20": row.get("ma20"),
                 "ma50": row.get("ma50"),
@@ -345,6 +346,16 @@ def build_snapshot_from_rows(
                 "bollinger_upper": row.get("bollinger_upper"),
                 "bollinger_mid": row.get("bollinger_mid"),
                 "bollinger_lower": row.get("bollinger_lower"),
+                "rsi14_h4": row.get("rsi14_h4"),
+                "ma20_h4": row.get("ma20_h4"),
+                "ma50_h4": row.get("ma50_h4"),
+                "bollinger_upper_h4": row.get("bollinger_upper_h4"),
+                "bollinger_mid_h4": row.get("bollinger_mid_h4"),
+                "bollinger_lower_h4": row.get("bollinger_lower_h4"),
+                "macd": row.get("macd"),
+                "macd_signal": row.get("macd_signal"),
+                "macd_histogram": row.get("macd_histogram"),
+                "h4_context_text": str(row.get("h4_context_text", "") or "").strip(),
             }
         )
 

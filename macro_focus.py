@@ -65,13 +65,12 @@ def build_global_market_focus(symbols: list[str], event_context: dict | None = N
     market_parts = []
     hint_parts = []
     alert_parts = []
-    base_ref_text = f"[当前时间 {now_text}]"
     if has_metal:
         metal_base = "贵金属：非农/CPI/联储窗口前后优先防点差放大，不追瞬时突破"
         metal_hint = "黄金/白銀先看非农、CPI、联储和美元方向，点差放大时只做提醒不追单"
         market_parts.append(metal_base)
         hint_parts.append(metal_hint)
-        metal_alert = f"贵金属提醒 {base_ref_text}：非农/CPI/联储前后先盯点差和美元方向，别追瞬时突破。"
+        metal_alert = "贵金属提醒：非农/CPI/联储前后先盯点差和美元方向，别追瞬时突破。"
         if live_event_lines:
             metal_alert += " " + " ".join(live_event_lines)
         alert_parts.append(metal_alert)
@@ -80,7 +79,7 @@ def build_global_market_focus(symbols: list[str], event_context: dict | None = N
         fx_hint = "EURUSD、USDJPY 这类宏观品种更容易假突破，先等事件后波动收敛"
         market_parts.append(fx_base)
         hint_parts.append(fx_hint)
-        fx_alert = f"外汇提醒 {base_ref_text}：央行窗口前后先等波动收敛，再确认方向。"
+        fx_alert = "外汇提醒：央行窗口前后先等波动收敛，再确认方向。"
         if live_event_lines:
             fx_alert += " " + " ".join(live_event_lines)
         alert_parts.append(fx_alert)

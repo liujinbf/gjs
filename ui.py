@@ -1,4 +1,5 @@
 import copy
+import os
 import queue
 
 from PySide6.QtCore import QThread, QTimer, Signal, Qt
@@ -7,7 +8,6 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMainWindow, QMessage
 
 import style
 from alert_history import append_history_entries, build_snapshot_history_entries
-from alert_status_state import ALERT_STATUS_STATE_FILE
 from ai_briefing import request_ai_brief
 from ai_history import append_ai_history_entry, build_ai_history_entry
 from app_config import get_runtime_config
@@ -29,6 +29,33 @@ from settings_dialog import MetalSettingsDialog
 from ui_panels import DashboardMetricsPanel, InsightPanel, LeftTabPanel, WatchListTable
 
 SNAPSHOT_TASK_QUEUE: queue.Queue = queue.Queue()
+MACRO_SYNC_INTERVAL_MS = 15 * 60 * 1000
+
+
+def _load_external_feeds(runtime_config, symbols: list[str], cache_only: bool) -> dict:
+    return {
+        "event_feed": load_event_feed(
+            enabled=bool(getattr(runtime_config, "event_feed_enabled", False)) if runtime_config else False,
+            source=str(getattr(runtime_config, "event_feed_url", "") or "") if runtime_config else "",
+            refresh_min=int(getattr(runtime_config, "event_feed_refresh_min", 60) or 60) if runtime_config else 60,
+            cache_only=cache_only,
+        ),
+        "macro_news": load_macro_news_feed(
+            enabled=bool(getattr(runtime_config, "macro_news_feed_enabled", False)) if runtime_config else False,
+            source_text=str(getattr(runtime_config, "macro_news_feed_urls", "") or "") if runtime_config else "",
+            refresh_min=int(getattr(runtime_config, "macro_news_feed_refresh_min", 30) or 30) if runtime_config else 30,
+            symbols=symbols,
+            cache_only=cache_only,
+        ),
+        "macro_data": load_macro_data_feed(
+            enabled=bool(getattr(runtime_config, "macro_data_feed_enabled", False)) if runtime_config else False,
+            spec_source=str(getattr(runtime_config, "macro_data_feed_specs", "") or "") if runtime_config else "",
+            refresh_min=int(getattr(runtime_config, "macro_data_feed_refresh_min", 60) or 60) if runtime_config else 60,
+            symbols=symbols,
+            cache_only=cache_only,
+            env=dict(os.environ),  # 透传环境变量：ALPHAVANTAGE_API_KEY / FRED_API_KEY / BLS_API_KEY
+        ),
+    }
 
 
 class MonitorWorker(QThread):
@@ -42,11 +69,8 @@ class MonitorWorker(QThread):
     def run(self):
         try:
             runtime_config = getattr(self.parent(), "_config", None)
-            feed_result = load_event_feed(
-                enabled=bool(getattr(runtime_config, "event_feed_enabled", False)) if runtime_config else False,
-                source=str(getattr(runtime_config, "event_feed_url", "") or "") if runtime_config else "",
-                refresh_min=int(getattr(runtime_config, "event_feed_refresh_min", 60) or 60) if runtime_config else 60,
-            )
+            feed_bundle = _load_external_feeds(runtime_config, self.symbols, cache_only=True)
+            feed_result = dict(feed_bundle.get("event_feed", {}) or {})
             schedule_text = merge_event_schedule_texts(
                 str(getattr(runtime_config, "event_schedule_text", "") or "") if runtime_config else "",
                 str(feed_result.get("schedule_text", "") or "").strip(),
@@ -64,22 +88,11 @@ class MonitorWorker(QThread):
                 self.symbols,
                 event_risk_mode=event_context["mode"],
                 event_context=event_context,
-                status_state_file=ALERT_STATUS_STATE_FILE,
             )
             snapshot = apply_event_feed_to_snapshot(snapshot, feed_result)
-            macro_news_result = load_macro_news_feed(
-                enabled=bool(getattr(runtime_config, "macro_news_feed_enabled", False)) if runtime_config else False,
-                source_text=str(getattr(runtime_config, "macro_news_feed_urls", "") or "") if runtime_config else "",
-                refresh_min=int(getattr(runtime_config, "macro_news_feed_refresh_min", 30) or 30) if runtime_config else 30,
-                symbols=self.symbols,
-            )
+            macro_news_result = dict(feed_bundle.get("macro_news", {}) or {})
             snapshot = apply_macro_news_to_snapshot(snapshot, macro_news_result)
-            macro_data_result = load_macro_data_feed(
-                enabled=bool(getattr(runtime_config, "macro_data_feed_enabled", False)) if runtime_config else False,
-                spec_source=str(getattr(runtime_config, "macro_data_feed_specs", "") or "") if runtime_config else "",
-                refresh_min=int(getattr(runtime_config, "macro_data_feed_refresh_min", 60) or 60) if runtime_config else 60,
-                symbols=self.symbols,
-            )
+            macro_data_result = dict(feed_bundle.get("macro_data", {}) or {})
             snapshot = apply_macro_data_to_snapshot(snapshot, macro_data_result)
             snapshot = apply_external_signal_context(snapshot, event_context=event_context)
             # 宏观数据注入完成后，构建状态卡片写回快照
@@ -89,6 +102,22 @@ class MonitorWorker(QThread):
                 macro_data_items=list(snapshot.get("macro_data_items", []) or []),
             )
             self.result_ready.emit(snapshot)
+        except Exception as exc:  # noqa: BLE001
+            self.error_signal.emit(str(exc))
+
+
+class MacroSyncWorker(QThread):
+    result_ready = Signal(dict)
+    error_signal = Signal(str)
+
+    def __init__(self, symbols: list[str], parent=None):
+        super().__init__(parent)
+        self.symbols = list(symbols or [])
+
+    def run(self):
+        try:
+            runtime_config = getattr(self.parent(), "_config", None)
+            self.result_ready.emit(_load_external_feeds(runtime_config, self.symbols, cache_only=False))
         except Exception as exc:  # noqa: BLE001
             self.error_signal.emit(str(exc))
 
@@ -131,6 +160,20 @@ def _build_snapshot_live_quotes(snapshot: dict) -> dict:
     return result
 
 
+def _detect_opportunity(snapshot: dict, rr_threshold: float = 2.0) -> bool:
+    """检测当前快照中是否存在高质量出手机会。
+
+    判定条件：任意观察品种的 risk_reward_ratio ≥ rr_threshold（2.0）
+    且 risk_reward_ready == True。
+    """
+    for item in list((snapshot or {}).get("items", []) or []):
+        if bool(item.get("risk_reward_ready", False)):
+            rr = float(item.get("risk_reward_ratio", 0.0) or 0.0)
+            if rr >= rr_threshold:
+                return True
+    return False
+
+
 def process_snapshot_side_effects(
     snapshot: dict,
     config,
@@ -143,6 +186,7 @@ def process_snapshot_side_effects(
         "sim_data_changed": False,
         "snapshot_ids": [],
         "snapshot_inserted_count": 0,
+        "snapshot_bindings": {},
     }
 
     try:
@@ -154,6 +198,11 @@ def process_snapshot_side_effects(
             for item in list(knowledge_result.get("inserted_snapshot_ids", []) or [])
             if int(item or 0) > 0
         ]
+        result["snapshot_bindings"] = {
+            str(symbol or "").strip().upper(): int(snapshot_id)
+            for symbol, snapshot_id in dict(knowledge_result.get("snapshot_bindings", {}) or {}).items()
+            if str(symbol or "").strip() and int(snapshot_id or 0) > 0
+        }
         if inserted_count > 0:
             result["log_lines"].append(f"[知识库] 已写入 {inserted_count} 条市场快照样本。")
     except Exception as exc:  # noqa: BLE001
@@ -278,6 +327,7 @@ class MetalMonitorWindow(QMainWindow):
         self._ai_worker = None
         self._knowledge_worker = None
         self._snapshot_task_worker = None
+        self._macro_worker = None  # MacroSyncWorker 实例
         self._knowledge_sync_pending = False
         self._pending_knowledge_snapshot_ids = set()
         self._polling_enabled = True
@@ -287,10 +337,17 @@ class MetalMonitorWindow(QMainWindow):
         self._last_external_source_warning_digest = ""
         self._build_ui()
         self._start_background_task_worker()
+        # 炸弹三修复：保留 _timer 对象（供 closeEvent/toggle_polling 使用），
+        # 但不用固定间隔轮询，改为链式 singleShot，由快照回调自己续约。
         self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.refresh_snapshot)
-        self._timer.start(self._config.refresh_interval_sec * 1000)
-        QTimer.singleShot(120, self.refresh_snapshot)
+        QTimer.singleShot(120, self.refresh_snapshot)  # 首次延迟 120ms 触发
+        # ── MacroSyncWorker 定时器（3.4 修复：宏观数据独立刷新，不堵塞 MT5 报价）──
+        self._macro_timer = QTimer(self)
+        self._macro_timer.timeout.connect(self._trigger_macro_sync)
+        self._macro_timer.start(MACRO_SYNC_INTERVAL_MS)
+        QTimer.singleShot(5000, self._trigger_macro_sync)  # 启动后 5 秒首次拉取
 
     def _build_ui(self):
         root = QWidget()
@@ -507,6 +564,23 @@ class MetalMonitorWindow(QMainWindow):
         self._snapshot_task_worker.error_signal.connect(self._on_background_task_error)
         self._snapshot_task_worker.start()
 
+    def _trigger_macro_sync(self):
+        """3.4 修复：触发宏观数据后台刷新，不影响 MT5 报价线程。"""
+        if self._macro_worker and self._macro_worker.isRunning():
+            return  # 上一次还没跑完，跳过
+        self._macro_worker = MacroSyncWorker(self._config.symbols, self)
+        self._macro_worker.result_ready.connect(self._on_macro_sync_ready)
+        self._macro_worker.error_signal.connect(self._on_macro_sync_error)
+        self._macro_worker.start()
+
+    def _on_macro_sync_ready(self, _result: dict):
+        self._macro_worker = None
+
+    def _on_macro_sync_error(self, message: str):
+        self._macro_worker = None
+        self._append_log(f"[宏观同步] 后台刷新失败（非致命）：{str(message or '').strip()}")
+
+
     def _enqueue_snapshot_side_effects(self, snapshot: dict):
         from datetime import datetime as _dt
 
@@ -566,6 +640,16 @@ class MetalMonitorWindow(QMainWindow):
         payload = dict(result or {})
         for line in list(payload.get("log_lines", []) or []):
             self._append_log(str(line or "").strip())
+        snapshot_bindings = {
+            str(symbol or "").strip().upper(): int(snapshot_id)
+            for symbol, snapshot_id in dict(payload.get("snapshot_bindings", {}) or {}).items()
+            if str(symbol or "").strip() and int(snapshot_id or 0) > 0
+        }
+        if snapshot_bindings:
+            self.right_table.bind_feedback_snapshot_ids(
+                str(self._last_snapshot.get("last_refresh_text", "") or "").strip(),
+                snapshot_bindings,
+            )
         snapshot_ids = [
             int(item)
             for item in list(payload.get("snapshot_ids", []) or [])
@@ -588,12 +672,11 @@ class MetalMonitorWindow(QMainWindow):
     def toggle_polling(self):
         self._polling_enabled = not self._polling_enabled
         if self._polling_enabled:
-            self._timer.start(self._config.refresh_interval_sec * 1000)
             self.btn_poll.setText("暂停轮询")
             self._append_log("已恢复自动轮询。")
-            self.refresh_snapshot()
+            self.refresh_snapshot()  # 炸弹三修复：立即触发一次，后续由链式续约
         else:
-            self._timer.stop()
+            self._timer.stop()  # 停止已排队的 singleShot
             self.btn_poll.setText("恢复轮询")
             self._append_log("已暂停自动轮询。")
 
@@ -619,7 +702,8 @@ class MetalMonitorWindow(QMainWindow):
         dialog = MetalSettingsDialog(self._config, self)
         if dialog.exec():
             self._config = dialog.runtime_config
-            self._timer.start(self._config.refresh_interval_sec * 1000)
+            # 炸弹三适配：_timer 已是 singleShot，stop() 后 refresh_snapshot() 回调末尾会按新间隔续约
+            self._timer.stop()
             self._append_log("监控设置已保存，正在按新配置刷新。")
             # 自动研判间隔变化时重置上次触发时间，立即应用新设置
             self._last_ai_auto_time = None
@@ -670,6 +754,10 @@ class MetalMonitorWindow(QMainWindow):
         # 快照完成后检查是否要自动触发 AI 研判
         self._check_ai_auto_brief()
 
+        # 炸弹三修复：本轮彻底结束后，精准等待 interval 秒再续约下一轮
+        if self._polling_enabled:
+            self._timer.start(self._config.refresh_interval_sec * 1000)
+
     def _on_snapshot_error(self, message: str):
         self._worker = None
         self.btn_refresh.setEnabled(True)
@@ -677,7 +765,9 @@ class MetalMonitorWindow(QMainWindow):
         self.lbl_status_hint.setText(str(message or "读取监控快照失败。"))
         self._append_log(f"[错误] {message}")
         # M-004 修复：移除锁屏模态框，改为只写日志，避免卡住轮询
-        # QMessageBox.warning 会阻塞 UI 线程，导致用户不取消则轮询无法继续
+        # 炸弹三修复：失败后同样续约，确保轮询持续
+        if self._polling_enabled:
+            self._timer.start(self._config.refresh_interval_sec * 1000)
 
     def _on_ai_brief_ready(self, result: dict):
         self._ai_worker = None
@@ -687,7 +777,8 @@ class MetalMonitorWindow(QMainWindow):
 
         content = str(result.get("content", "") or "").strip()
         model = str(result.get("model", "") or "").strip()
-        push_result = send_ai_brief_notification(result, self._last_snapshot, self._config)
+        is_opp = _detect_opportunity(self._last_snapshot)
+        push_result = send_ai_brief_notification(result, self._last_snapshot, self._config, is_opportunity=is_opp)
         history_count = append_ai_history_entry(build_ai_history_entry(result, self._last_snapshot, push_result=push_result))
         
         # 实时拦截并执行模拟挂单
@@ -709,7 +800,16 @@ class MetalMonitorWindow(QMainWindow):
         self.left_panel.set_ai_brief(content or "模型已返回，但内容为空。")
         self.insight_panel.set_ai_brief(content or "模型已返回，但内容为空。")
 
-        if push_result.get("messages"):
+        is_fallback = bool(result.get("is_fallback", False))
+        fallback_reason = str(result.get("fallback_reason", "") or "").strip()
+
+        if is_fallback:
+            self.lbl_ai_status.setText(
+                f"⚠️【规则引擎降级】AI 不可用（{fallback_reason[:40] or '原因未知'}），"
+                f"已生成本地规则简报，模拟跟单已禁用。"
+            )
+            self._append_log(f"[AI降级] 使用规则引擎生成简报，原因：{fallback_reason}")
+        elif push_result.get("messages"):
             self.lbl_ai_status.setText(f"AI 研判完成：{model} 已生成最新简报，并已同步推送。")
         elif bool(self._config.ai_push_enabled):
             self.lbl_ai_status.setText(f"AI 研判完成：{model} 已生成最新简报，但推送未成功。")
@@ -770,7 +870,10 @@ class MetalMonitorWindow(QMainWindow):
         now = datetime.now()
         if self._last_ai_auto_time is not None:
             elapsed_min = (now - self._last_ai_auto_time).total_seconds() / 60.0
-            if elapsed_min < interval_min:
+            # 高机会信号：允许 5 分钟后即可再次触发，绕过常规间隔限制
+            is_opp = _detect_opportunity(self._last_snapshot)
+            min_elapsed = 5 if is_opp else interval_min
+            if elapsed_min < min_elapsed:
                 return  # 还没到时间
 
         self._last_ai_auto_time = now
@@ -793,13 +896,15 @@ class MetalMonitorWindow(QMainWindow):
         try:
             content = str(result.get("content", "") or "").strip()
             model = str(result.get("model", "") or "").strip()
-            push_result = send_ai_brief_notification(result, self._last_snapshot, self._config)
+            is_opp = _detect_opportunity(self._last_snapshot)
+            push_result = send_ai_brief_notification(result, self._last_snapshot, self._config, is_opportunity=is_opp)
             history_count = append_ai_history_entry(build_ai_history_entry(result, self._last_snapshot, push_result=push_result))
             self.left_panel.set_ai_brief(content or "自动研判已完成，模型内容为空。")
 
             interval_min = int(getattr(self._config, "ai_auto_interval_min", 0) or 0)
+            opp_tag = "【机会提醒⚡】" if is_opp else ""
             if push_result.get("messages"):
-                self.lbl_ai_status.setText(f"AI 自动研判完成（每 {interval_min} 分钟）：{model} 已推送最新简报。")
+                self.lbl_ai_status.setText(f"{opp_tag}AI 自动研判完成（每 {interval_min} 分钟）：{model} 已推送最新简报。")
             else:
                 self.lbl_ai_status.setText(f"AI 自动研判完成（每 {interval_min} 分钟）：{model} 已生成简报。")
 
@@ -847,14 +952,19 @@ class MetalMonitorWindow(QMainWindow):
     def closeEvent(self, event):
         if hasattr(self, "_timer"):
             self._timer.stop()
+        if hasattr(self, "_macro_timer"):
+            self._macro_timer.stop()
         if self._worker and self._worker.isRunning():
             self._worker.wait(1000)
         if self._ai_worker and self._ai_worker.isRunning():
             self._ai_worker.wait(1000)
         if self._knowledge_worker and self._knowledge_worker.isRunning():
             self._knowledge_worker.wait(1000)
+        if self._macro_worker and self._macro_worker.isRunning():
+            self._macro_worker.wait(2000)
         if self._snapshot_task_worker and self._snapshot_task_worker.isRunning():
             SNAPSHOT_TASK_QUEUE.put({"kind": "stop"})
             self._snapshot_task_worker.wait(1500)
         shutdown_connection()
         super().closeEvent(event)
+

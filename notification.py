@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import time  # 炸弹四修复：推送限流需要 time.sleep
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib import error, request
@@ -219,6 +220,7 @@ def send_notifications(entries: list[dict], config: MetalMonitorConfig, state_fi
                 ok, detail = send_dingtalk(send_entry, channel_value)
             else:
                 ok, detail = send_pushplus(send_entry, channel_value)
+            time.sleep(0.35)  # 炸弹四修复：错峰推送，避免并发 Burst 触发 API 429
 
             if ok:
                 if signature:
@@ -280,16 +282,38 @@ def send_test_notification(config: MetalMonitorConfig, state_file: Path | None =
     return {"messages": messages, "errors": errors}
 
 
-def send_ai_brief_notification(result: dict, snapshot: dict, config: MetalMonitorConfig, state_file: Path | None = None) -> dict:
+def send_ai_brief_notification(
+    result: dict,
+    snapshot: dict,
+    config: MetalMonitorConfig,
+    state_file: Path | None = None,
+    is_opportunity: bool = False,
+) -> dict:
+    """推送 AI 研判。
+
+    is_opportunity=True 时走「机会快速通道」：
+    - 使用独立的冷却 key（ai_brief::opportunity_push_time）
+    - 冷却阈值固定为 5 分钟，不受普通研判冷却影响
+    - 适用于 R/R≥2.0 的高质量出手信号
+    """
     if not bool(config.ai_push_enabled):
         return {"sent_count": 0, "messages": [], "errors": [], "skipped_reason": "ai_push_disabled"}
 
-    # ── S-004 修复：AI 研判推送冷却保护 ──
-    # 最小间隔 = max(自动研判间隔/2, 20分钟)，防止频繁触发刷屏
+    # ── 机会快速通道 vs 普通冷却 ──────────────────────────────────────
     auto_interval_min = int(getattr(config, "ai_auto_interval_min", 60) or 60)
-    ai_brief_cooldown_min = max(20, auto_interval_min // 2)
+    if is_opportunity:
+        # 高机会信号：5 分钟短冷却，独立 key，不影响普通研判节奏
+        cooldown_key = "ai_brief::opportunity_push_time"
+        ai_brief_cooldown_min = 5
+        cooldown_label = "机会快速通道"
+    else:
+        # 普通定时研判：max(20, interval/2) 长冷却，防刷屏
+        cooldown_key = "ai_brief::last_push_time"
+        ai_brief_cooldown_min = max(20, auto_interval_min // 2)
+        cooldown_label = "常规研判"
+
     state = _read_state(state_file=state_file)
-    last_ai_brief_time = _parse_time(state.get("ai_brief::last_push_time", ""))
+    last_ai_brief_time = _parse_time(state.get(cooldown_key, ""))
     now = datetime.now()
     if last_ai_brief_time is not None and now - last_ai_brief_time < timedelta(minutes=ai_brief_cooldown_min):
         remaining = ai_brief_cooldown_min - int((now - last_ai_brief_time).total_seconds() / 60)
@@ -297,7 +321,7 @@ def send_ai_brief_notification(result: dict, snapshot: dict, config: MetalMonito
             "sent_count": 0,
             "messages": [],
             "errors": [],
-            "skipped_reason": f"ai_brief_cooldown（冷却中，还需 {remaining} 分钟）",
+            "skipped_reason": f"{cooldown_label}_cooldown（冷却中，还需 {remaining} 分钟）",
         }
 
     entry = _build_ai_brief_entry(result, snapshot, config)
@@ -316,13 +340,16 @@ def send_ai_brief_notification(result: dict, snapshot: dict, config: MetalMonito
         else:
             errors.append(f"AI 研判推送到 PushPlus 失败：{detail}")
     if messages:
-        # 推送成功后记录时间，供下次冷却判断
-        state["ai_brief::last_push_time"] = now.strftime("%Y-%m-%d %H:%M:%S")
+        # 推送成功后记录时间，供下次冷却判断（两个 key 同时更新，互不干扰）
+        state[cooldown_key] = now.strftime("%Y-%m-%d %H:%M:%S")
+        # 机会通道推送成功也刷新普通通道时间，避免5分钟内又推一次普通研判
+        if is_opportunity:
+            state["ai_brief::last_push_time"] = now.strftime("%Y-%m-%d %H:%M:%S")
         _update_last_result(state, "；".join(messages), _normalize_text)
     elif errors:
         _update_last_result(state, "；".join(errors), _normalize_text)
     _write_state(state, state_file=state_file)
-    return {"sent_count": len(messages), "messages": messages, "errors": errors}
+    return {"sent_count": len(messages), "messages": messages, "errors": errors, "is_opportunity": is_opportunity}
 
 
 def _build_learning_digest_hash(report: dict) -> str:

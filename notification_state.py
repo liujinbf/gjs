@@ -6,9 +6,11 @@ from pathlib import Path
 
 from app_config import MetalMonitorConfig, PROJECT_DIR
 from runtime_utils import parse_time as _parse_time_impl
+from knowledge_base import kv_get, kv_set  # 3.2 修复：通知状态持久化走 SQLite KV
 
 RUNTIME_DIR = PROJECT_DIR / ".runtime"
-NOTIFY_STATE_FILE = RUNTIME_DIR / "notify_state.json"
+NOTIFY_STATE_FILE = RUNTIME_DIR / "notify_state.json"  # 保留用于存量迁移
+_KV_KEY = "notify_state"  # system_state_kv 中的键名
 
 
 # P-004 修复：姓 _parse_time 内部使用公共实现，保持对本模块内其它调用者透明
@@ -17,14 +19,29 @@ def _parse_time(value: str) -> datetime | None:
 
 
 def _read_state(state_file: Path | None = None) -> dict:
-    target = Path(state_file) if state_file else NOTIFY_STATE_FILE
-    if not target.exists():
+    # 当显式传入 state_file 时（测试隔离路径）直接读 JSON，不走 SQLite
+    if state_file is not None:
+        target = Path(state_file)
+        if target.exists():
+            try:
+                data = json.loads(target.read_text(encoding="utf-8"))
+                return data if isinstance(data, dict) else {}
+            except (OSError, json.JSONDecodeError):
+                pass
         return {}
-    try:
-        payload = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    # 生产路径：优先读 SQLite KV，不存在时从旧 JSON 文件迁移（兼容升级）
+    payload = kv_get(_KV_KEY)
+    if payload is not None:
+        return payload if isinstance(payload, dict) else {}
+    if NOTIFY_STATE_FILE.exists():
+        try:
+            data = json.loads(NOTIFY_STATE_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                kv_set(_KV_KEY, data)  # 一次性迁移至 SQLite
+                return data
+        except (OSError, json.JSONDecodeError):
+            pass
+    return {}
 
 
 def _purge_expired_notify_records(state: dict, max_age_days: int = 7) -> int:
@@ -48,11 +65,16 @@ def _purge_expired_notify_records(state: dict, max_age_days: int = 7) -> int:
 
 
 def _write_state(state: dict, state_file: Path | None = None) -> None:
-    # M-006 修复：写入前自动清理7天前的过期冷却记录
     _purge_expired_notify_records(state, max_age_days=7)
-    target = Path(state_file) if state_file else NOTIFY_STATE_FILE
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    if state_file is not None:
+        # 显式传入 state_file 时写 JSON（测试隔离路径）
+        Path(state_file).parent.mkdir(parents=True, exist_ok=True)
+        Path(state_file).write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        return
+    # 生产路径：写 SQLite KV，不再碎写 JSON
+    kv_set(_KV_KEY, state)
+
+
 
 
 def _update_last_result(state: dict, text: str, normalize_text) -> None:

@@ -229,6 +229,7 @@ class LeftTabPanel(QFrame):
         self.txt_history = QTextEdit()
         self.txt_history.setReadOnly(True)
         self.txt_history.setStyleSheet(style.STYLE_TEXT_WARNING)
+        self.txt_history.document().setMaximumBlockCount(500)  # 炸弹一修复：限制最多 500 行，防止 OOM
         tab_hist_lay.addWidget(self.txt_history, 1)
         self.tabs.addTab(tab_hist, "提醒留痕历史")
 
@@ -239,6 +240,7 @@ class LeftTabPanel(QFrame):
         self.txt_log = QTextEdit()
         self.txt_log.setReadOnly(True)
         self.txt_log.setStyleSheet(style.STYLE_TEXT_LOG)
+        self.txt_log.document().setMaximumBlockCount(1000)  # 炸弹一修复：限制最多 1000 行，防止 7×24 运行 OOM
         tab_logs_lay.addWidget(self.txt_log, 1)
         self.tabs.addTab(tab_logs, "底层运行日志")
 
@@ -403,17 +405,39 @@ class WatchListTable(QFrame):
             {
                 "symbol": str(item.get("symbol", "") or "").strip().upper(),
                 "snapshot_time": snapshot_time,
+                "snapshot_id": int(item.get("snapshot_id", 0) or 0),
             }
             for item in items
         ]
         self._selected_feedback_target = {}
         self._feedback_bar.hide()
 
+    def bind_feedback_snapshot_ids(self, snapshot_time: str, snapshot_bindings: dict[str, int] | None = None):
+        time_text = str(snapshot_time or "").strip()
+        bindings = {
+            str(symbol or "").strip().upper(): int(snapshot_id)
+            for symbol, snapshot_id in dict(snapshot_bindings or {}).items()
+            if str(symbol or "").strip() and int(snapshot_id or 0) > 0
+        }
+        if not time_text or not bindings:
+            return
+        for target in self._row_feedback_targets:
+            if str(target.get("snapshot_time", "") or "").strip() != time_text:
+                continue
+            symbol = str(target.get("symbol", "") or "").strip().upper()
+            if symbol in bindings:
+                target["snapshot_id"] = int(bindings[symbol])
+
     def _on_row_clicked(self, item: QTableWidgetItem):
         row = item.row()
         target = self._row_feedback_targets[row] if row < len(self._row_feedback_targets) else {}
         symbol = str(target.get("symbol", "") or "").strip().upper()
         if not symbol:
+            return
+        if int(target.get("snapshot_id", 0) or 0) <= 0:
+            self._selected_feedback_target = {}
+            self._lbl_feedback_hint.setText(f"⏳ 【{symbol}】样本仍在入库，请 1 秒后再点一次。")
+            self._feedback_bar.show()
             return
         self._selected_feedback_target = dict(target)
         self._lbl_feedback_hint.setText(f"【{symbol}】 这次提醒对你有帮助吗？")
@@ -428,6 +452,7 @@ class WatchListTable(QFrame):
             from knowledge_feedback import record_user_feedback
             result = record_user_feedback(
                 symbol=symbol,
+                snapshot_id=int(target.get("snapshot_id", 0) or 0),
                 snapshot_time=str(target.get("snapshot_time", "") or "").strip(),
                 feedback_label=label,
                 source="ui_quick",

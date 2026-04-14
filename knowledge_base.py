@@ -287,6 +287,7 @@ def init_knowledge_base(db_path: Path | str | None = None) -> Path:
                 success_rate REAL NOT NULL DEFAULT 0,
                 score REAL NOT NULL DEFAULT 0,
                 validation_status TEXT NOT NULL DEFAULT 'insufficient',
+                last_processed_outcome_id INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (rule_id) REFERENCES knowledge_rules(id),
                 UNIQUE(rule_id, horizon_min)
@@ -353,9 +354,24 @@ def init_knowledge_base(db_path: Path | str | None = None) -> Path:
             CREATE INDEX IF NOT EXISTS idx_user_feedback_snapshot_time ON user_feedback(symbol, snapshot_time, created_at);
             CREATE INDEX IF NOT EXISTS idx_user_feedback_label ON user_feedback(feedback_label, created_at);
             CREATE INDEX IF NOT EXISTS idx_rule_feedback_scores_score ON rule_feedback_scores(score, total_count);
+
+            -- 3.2 修复：系统状态 KV 表，代替直接读写 JSON 文件，避免写入中断导致文件损坏
+            CREATE TABLE IF NOT EXISTS system_state_kv (
+                key   TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL DEFAULT 'null',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
             """
         )
+        # 3.3 修复：为已有数据库热迁移 last_processed_outcome_id 列（SQLite 不支持 IF NOT EXISTS 修饰 ALTER COLUMN）
+        try:
+            conn.execute(
+                "ALTER TABLE rule_scores ADD COLUMN last_processed_outcome_id INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass  # 列已存在，忽略
     return target
+
 
 
 def upsert_source(
@@ -522,3 +538,39 @@ def summarize_knowledge_base(db_path: Path | str | None = None) -> dict:
             f"外部来源 {external_source_count} 个；已入库文档 {document_count} 份，候选规则 {rule_count} 条。"
         ),
     }
+
+
+# ── 3.2 修复：系统状态 KV 表读写接口 ──────────────────────────────────────
+
+def kv_get(key: str, default=None, db_path: Path | str | None = None):
+    """从 system_state_kv 读取一个键的值（已 JSON 解码）。不存在时返回 default。"""
+    init_knowledge_base(db_path=db_path)
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT value_json FROM system_state_kv WHERE key = ?", (str(key),)
+        ).fetchone()
+    if row is None:
+        return default
+    try:
+        return json.loads(row[0])
+    except (json.JSONDecodeError, TypeError):
+        return default
+
+
+def kv_set(key: str, value, db_path: Path | str | None = None) -> None:
+    """向 system_state_kv 写入一个键值对（value 会被 JSON 编码）。"""
+    init_knowledge_base(db_path=db_path)
+    value_json = json.dumps(value, ensure_ascii=False)
+    now_text = _now_text()
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO system_state_kv (key, value_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value_json = excluded.value_json,
+                updated_at = excluded.updated_at
+            """,
+            (str(key), value_json, now_text),
+        )
+

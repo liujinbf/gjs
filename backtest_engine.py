@@ -7,6 +7,12 @@ from __future__ import annotations
 
 import json
 import logging
+
+# 3.1 修复：引入 json_repair 自愈容错。pip install json-repair
+try:
+    from json_repair import loads as _json_repair_loads
+except ImportError:
+    _json_repair_loads = None
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -25,7 +31,9 @@ RUNTIME_DIR = PROJECT_DIR / ".runtime"
 BACKTEST_RESULTS_FILE = RUNTIME_DIR / "backtest_results.json"
 MAX_BACKTEST_RESULTS = 2000  # N-010: 保留最近 N 条评估结果，超出后滚动副除最旧的
 
-TRACKER_META_PATTERN = re.compile(r"<!--\s*TRACKER_META\s*:\s*(\{.*?\})\s*-->", re.IGNORECASE)
+TRACKER_META_PATTERN = re.compile(r"<!--\s*TRACKER_META\s*:\s*(\{.*?\})\s*-->", re.IGNORECASE | re.DOTALL)
+# 3.1 修复：宽松版正则，用于严格正则匹配失败时（如 AI 少写了闭合 }），提取 { 到 --> 之前的内容交给 json_repair
+TRACKER_META_PATTERN_LOOSE = re.compile(r"<!--\s*TRACKER_META\s*:\s*(\{[^>]*?)\s*-->", re.IGNORECASE | re.DOTALL)
 
 # P-004 修复：_parse_time 委托给公共 runtime_utils.parse_time，消除三处重复定义
 def _parse_time(value: str) -> datetime | None:
@@ -34,13 +42,27 @@ def _parse_time(value: str) -> datetime | None:
 def extract_signal_meta(content: str) -> dict | None:
     match = TRACKER_META_PATTERN.search(str(content or ""))
     if not match:
-        return None
+        # 3.1 修复：严格正则失败时，尝试宽松正则（AI 少写了 } 的情况）
+        match = TRACKER_META_PATTERN_LOOSE.search(str(content or ""))
+        if not match:
+            return None
+    raw_json = match.group(1)
+    # 第一步：原生解析
     try:
-        data = json.loads(match.group(1))
+        data = json.loads(raw_json)
         if isinstance(data, dict):
             return data
     except Exception:
         pass
+    # 第二步：json_repair 自愈容错（3.1 修复：防止 AI 轻微格式偏差使跟单系统瘫痪）
+    if _json_repair_loads is not None:
+        try:
+            data = _json_repair_loads(raw_json)
+            if isinstance(data, dict):
+                logging.debug("[extract_signal_meta] 原生 JSON 解析失败，json_repair 自愈成功。")
+                return data
+        except Exception:
+            pass
     return None
 
 def load_backtest_results() -> dict:

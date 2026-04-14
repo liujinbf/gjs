@@ -250,94 +250,138 @@ def refresh_rule_scores(
     db_path: Path | str | None = None,
     horizon_min: int = 30,
 ) -> dict:
+    """3.3 修复：增量评分模式。
+    只处理 id > last_processed_outcome_id 的新 snapshot_outcomes，
+    将新结果累加到现有计数上，永远不回头遍历旧数据，确保 O(新增) 复杂度。
+    """
     updated_count = 0
     with _connect(db_path) as conn:
         rules = conn.execute(
             """
-            SELECT id, category, rule_text
-            FROM knowledge_rules
-            ORDER BY id ASC
-            """
+            SELECT kr.id, kr.category, kr.rule_text,
+                   COALESCE(rs.success_count, 0)  AS cur_success,
+                   COALESCE(rs.mixed_count, 0)    AS cur_mixed,
+                   COALESCE(rs.fail_count, 0)     AS cur_fail,
+                   COALESCE(rs.observe_count, 0)  AS cur_observe,
+                   COALESCE(rs.last_processed_outcome_id, 0) AS last_id
+            FROM knowledge_rules kr
+            LEFT JOIN rule_scores rs ON rs.rule_id = kr.id AND rs.horizon_min = ?
+            ORDER BY kr.id ASC
+            """,
+            (int(horizon_min),),
         ).fetchall()
 
         now_text = _now_text()
         for rule in rules:
+            rule_id = int(rule["id"])
             category = _normalize_text(rule["category"]).lower()
+            last_outcome_id = int(rule["last_id"] or 0)
+
             if _should_skip_rule(str(rule["rule_text"] or ""), category):
-                validation_status = "manual_review"
-                sample_count = success_count = mixed_count = fail_count = observe_count = 0
+                # 跳过规则：只更新 validation_status，不动计数
+                conn.execute(
+                    """
+                    INSERT INTO rule_scores (
+                        rule_id, horizon_min, sample_count, success_count, mixed_count, fail_count,
+                        observe_count, success_rate, score, validation_status,
+                        last_processed_outcome_id, updated_at
+                    ) VALUES (?, ?, 0, 0, 0, 0, 0, 0, 0, 'manual_review', ?, ?)
+                    ON CONFLICT(rule_id, horizon_min) DO UPDATE SET
+                        validation_status = 'manual_review',
+                        updated_at = excluded.updated_at
+                    """,
+                    (rule_id, int(horizon_min), last_outcome_id, now_text),
+                )
+                updated_count += 1
+                continue
+
+            # 只查询比上次处理更新的结果（增量）
+            new_rows = conn.execute(
+                """
+                SELECT so.id, so.outcome_label
+                FROM rule_snapshot_matches rm
+                JOIN snapshot_outcomes so ON so.snapshot_id = rm.snapshot_id
+                WHERE rm.rule_id = ? AND so.horizon_min = ? AND so.id > ?
+                ORDER BY so.id ASC
+                """,
+                (rule_id, int(horizon_min), last_outcome_id),
+            ).fetchall()
+
+            if not new_rows:
+                # 没有新结果：不更新任何内容，保留现有计数
+                continue
+
+            # 累加新增量
+            max_new_id = last_outcome_id
+            add_success = add_mixed = add_fail = add_observe = 0
+            for row in new_rows:
+                label = _normalize_text(row["outcome_label"]).lower()
+                if label == "success":
+                    add_success += 1
+                elif label == "mixed":
+                    add_mixed += 1
+                elif label == "fail":
+                    add_fail += 1
+                elif label == "observe":
+                    add_observe += 1
+                if int(row["id"]) > max_new_id:
+                    max_new_id = int(row["id"])
+
+            new_success = int(rule["cur_success"]) + add_success
+            new_mixed   = int(rule["cur_mixed"])   + add_mixed
+            new_fail    = int(rule["cur_fail"])     + add_fail
+            new_observe = int(rule["cur_observe"])  + add_observe
+            sample_count = new_success + new_mixed + new_fail
+
+            if sample_count <= 0:
                 success_rate = 0.0
                 score = 0.0
+                validation_status = "insufficient"
             else:
-                rows = conn.execute(
-                    """
-                    SELECT so.outcome_label
-                    FROM rule_snapshot_matches rm
-                    JOIN snapshot_outcomes so ON so.snapshot_id = rm.snapshot_id
-                    WHERE rm.rule_id = ? AND so.horizon_min = ?
-                    """,
-                    (int(rule["id"]), int(horizon_min)),
-                ).fetchall()
-                labels = [_normalize_text(row["outcome_label"]).lower() for row in rows]
-                success_count = labels.count("success")
-                mixed_count = labels.count("mixed")
-                fail_count = labels.count("fail")
-                observe_count = labels.count("observe")
-                sample_count = success_count + mixed_count + fail_count
-                if sample_count <= 0:
-                    success_rate = 0.0
-                    score = 0.0
+                success_rate = (new_success + new_mixed * 0.5) / sample_count
+                score = ((new_success + new_mixed * 0.35) - new_fail) / sample_count * 100.0
+                if sample_count < 5:
                     validation_status = "insufficient"
+                elif score >= 25.0 and success_rate >= 0.58:
+                    validation_status = "validated"
+                elif score >= 0.0:
+                    validation_status = "candidate"
                 else:
-                    success_rate = (success_count + mixed_count * 0.5) / sample_count
-                    score = ((success_count + mixed_count * 0.35) - fail_count) / sample_count * 100.0
-                    if sample_count < 5:
-                        validation_status = "insufficient"
-                    elif score >= 25.0 and success_rate >= 0.58:
-                        validation_status = "validated"
-                    elif score >= 0.0:
-                        validation_status = "candidate"
-                    else:
-                        validation_status = "rejected"
+                    validation_status = "rejected"
 
-            cursor = conn.execute(
+            conn.execute(
                 """
                 INSERT INTO rule_scores (
                     rule_id, horizon_min, sample_count, success_count, mixed_count, fail_count,
-                    observe_count, success_rate, score, validation_status, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    observe_count, success_rate, score, validation_status,
+                    last_processed_outcome_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(rule_id, horizon_min) DO UPDATE SET
-                    sample_count=excluded.sample_count,
-                    success_count=excluded.success_count,
-                    mixed_count=excluded.mixed_count,
-                    fail_count=excluded.fail_count,
-                    observe_count=excluded.observe_count,
-                    success_rate=excluded.success_rate,
-                    score=excluded.score,
-                    validation_status=excluded.validation_status,
-                    updated_at=excluded.updated_at
+                    sample_count   = excluded.sample_count,
+                    success_count  = excluded.success_count,
+                    mixed_count    = excluded.mixed_count,
+                    fail_count     = excluded.fail_count,
+                    observe_count  = excluded.observe_count,
+                    success_rate   = excluded.success_rate,
+                    score          = excluded.score,
+                    validation_status = excluded.validation_status,
+                    last_processed_outcome_id = excluded.last_processed_outcome_id,
+                    updated_at     = excluded.updated_at
                 """,
                 (
-                    int(rule["id"]),
-                    int(horizon_min),
-                    sample_count,
-                    success_count,
-                    mixed_count,
-                    fail_count,
-                    observe_count,
-                    float(success_rate),
-                    float(score),
-                    validation_status,
-                    now_text,
+                    rule_id, int(horizon_min),
+                    sample_count, new_success, new_mixed, new_fail, new_observe,
+                    float(success_rate), float(score), validation_status,
+                    max_new_id, now_text,
                 ),
             )
-            if cursor.rowcount >= 0:
-                updated_count += 1
+            updated_count += 1
 
     return {
         "updated_count": updated_count,
         "horizon_min": int(horizon_min),
     }
+
 
 
 def summarize_rule_scores(

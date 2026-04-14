@@ -143,6 +143,7 @@ def record_snapshot(snapshot: dict, db_path: Path | str | None = None) -> dict:
     items = list((snapshot or {}).get("items", []) or [])
     inserted_count = 0
     inserted_snapshot_ids = []
+    snapshot_bindings = {}
     with _connect(db_path) as conn:
         # M-007 修复：每次写入前检查并清理超出保留期的旧快照
         _cleanup_old_snapshots(conn, retain_days=30)
@@ -182,12 +183,26 @@ def record_snapshot(snapshot: dict, db_path: Path | str | None = None) -> dict:
             if cursor.rowcount > 0:
                 inserted_count += 1
                 inserted_snapshot_ids.append(int(cursor.lastrowid))
+                snapshot_bindings[symbol] = int(cursor.lastrowid)
+                continue
+            existing = conn.execute(
+                """
+                SELECT id
+                FROM market_snapshots
+                WHERE snapshot_time = ? AND symbol = ?
+                LIMIT 1
+                """,
+                (snapshot_time, symbol),
+            ).fetchone()
+            if existing is not None:
+                snapshot_bindings[symbol] = int(existing["id"])
 
     return {
         "snapshot_time": snapshot_time,
         "inserted_count": inserted_count,
         "item_count": len(items),
         "inserted_snapshot_ids": inserted_snapshot_ids,
+        "snapshot_bindings": snapshot_bindings,
     }
 
 

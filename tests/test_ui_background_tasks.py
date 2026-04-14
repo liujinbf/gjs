@@ -26,6 +26,7 @@ def test_process_snapshot_side_effects_runs_io_chain(monkeypatch):
         return {
             "inserted_count": 1,
             "inserted_snapshot_ids": [101],
+            "snapshot_bindings": {"XAUUSD": 101},
         }
 
     def fake_build_snapshot_history_entries(snapshot):
@@ -71,6 +72,7 @@ def test_process_snapshot_side_effects_runs_io_chain(monkeypatch):
 
     assert result["snapshot_inserted_count"] == 1
     assert result["snapshot_ids"] == [101]
+    assert result["snapshot_bindings"] == {"XAUUSD": 101}
     assert result["refresh_histories"] is True
     assert result["notify_status_changed"] is True
     assert result["sim_data_changed"] is True

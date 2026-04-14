@@ -110,25 +110,101 @@ class SimTradingEngine:
         # 默认标准外汇为 100000
         return 100000.0
 
+    def _calculate_margin_and_pnl(
+        self,
+        symbol: str,
+        lots: float,
+        entry_price: float,
+        current_price: float,
+        is_long: bool,
+        usdjpy_rate: float = 150.0,
+    ) -> Tuple[float, float]:
+        """
+        BUG-010 修复：根据货币对属性，智能计算所需的美元保证金和美元盈亏。
+
+        支持四类品种：
+          ① XXX/USD（如 XAUUSD / EURUSD / GBPUSD / XAGUSD）
+              保证金 = lots × contract_size × entry_price ÷ leverage（天然 USD）
+              PnL    = price_diff × lots × contract_size（天然 USD）
+          ② USD/JPY（基础货币为 USD，计价为 JPY）
+              保证金 = lots × contract_size ÷ leverage（contract 本就是 USD 面值）
+              PnL    = price_diff × lots × contract_size ÷ current_price（JPY→USD）
+          ③ 交叉 JPY 盘（如 EURJPY / GBPJPY）
+              保证金 ≈ lots × contract_size × entry_price ÷ leverage ÷ usdjpy_rate
+              PnL    = price_diff × lots × contract_size ÷ current_price（JPY→USD）
+          ④ 其余交叉盘（兜底，近似以 entry_price 折 USD）
+              保证金 = lots × contract_size × entry_price ÷ leverage
+              PnL    = price_diff × lots × contract_size
+
+        :param usdjpy_rate: 交叉 JPY 盘折算用的近似 USDJPY 汇率，默认 150。
+        :return: (required_margin_usd, pnl_usd)
+        """
+        sym = symbol.upper()
+        contract_size = self._get_contract_size(sym)
+
+        # 计价货币维度的原始价差盈亏
+        price_diff = (current_price - entry_price) if is_long else (entry_price - current_price)
+        pnl_quote = price_diff * lots * contract_size
+
+        required_margin_usd = 0.0
+        pnl_usd = 0.0
+
+        if sym.endswith("USD"):
+            # ① XXX/USD：计价货币即为 USD
+            required_margin_usd = (lots * contract_size * entry_price) / self.default_leverage
+            pnl_usd = pnl_quote
+
+        elif sym.startswith("USD") and sym.endswith("JPY"):
+            # ② USD/JPY：基础货币就是 USD，1 手等于 10 万 USD
+            required_margin_usd = (lots * contract_size) / self.default_leverage
+            # PnL 为日元，除以当前 USDJPY 汇率折为美元
+            safe_rate = current_price if current_price > 0 else (entry_price if entry_price > 0 else 150.0)
+            pnl_usd = pnl_quote / safe_rate
+
+        elif sym.endswith("JPY"):
+            # ③ 交叉 JPY 盘（EURJPY / GBPJPY 等）
+            safe_ujpy = usdjpy_rate if usdjpy_rate > 0 else 150.0
+            required_margin_usd = (lots * contract_size * entry_price) / self.default_leverage / safe_ujpy
+            safe_rate = current_price if current_price > 0 else (entry_price if entry_price > 0 else safe_ujpy)
+            pnl_usd = pnl_quote / safe_rate
+
+        else:
+            # ④ 兜底：其余交叉盘，近似处理
+            required_margin_usd = (lots * contract_size * entry_price) / self.default_leverage
+            pnl_usd = pnl_quote
+
+        return required_margin_usd, pnl_usd
+
     def calculate_optimal_lots(self, equity: float, entry_price: float, stop_loss: float, symbol: str) -> float:
         """
         根据2%固定风险法，计算能够开仓的最优手数。
+        BUG-010 修复：loss_per_lot 须折算为 USD，与 risk_amount（USD）量纲一致。
         """
         if stop_loss <= 0 or entry_price <= 0 or abs(entry_price - stop_loss) < 0.0001:
             return 0.1  # 遇到异常值，给个低保 0.1 手
 
         risk_amount = equity * self.max_risk_pct
-        contract_size = self._get_contract_size(symbol)
-        
-        # 每手亏损金额 = 点位差 * 每手合约单位
-        loss_per_lot = abs(entry_price - stop_loss) * contract_size
-        if loss_per_lot <= 0:
+        sym = symbol.upper()
+        contract_size = self._get_contract_size(sym)
+
+        # 计价货币维度的每手亏损
+        raw_loss_per_lot = abs(entry_price - stop_loss) * contract_size
+        if raw_loss_per_lot <= 0:
             return 0.1
 
-        exact_lots = risk_amount / loss_per_lot
+        # 折算为 USD 维度
+        if sym.endswith("USD"):
+            loss_per_lot_usd = raw_loss_per_lot
+        elif sym.endswith("JPY"):
+            # 不管是 USDJPY 还是 EURJPY，PnL 都是 JPY，需除以入场价近似折美元
+            loss_per_lot_usd = raw_loss_per_lot / entry_price if entry_price > 0 else raw_loss_per_lot
+        else:
+            loss_per_lot_usd = raw_loss_per_lot
+
+        exact_lots = risk_amount / loss_per_lot_usd
         # 向下取整到 0.01 手
         lots = math.floor(exact_lots * 100) / 100.0
-        
+
         # 限制在合理区间
         return max(0.01, min(lots, 50.0))
 
@@ -151,11 +227,12 @@ class SimTradingEngine:
         equity = float(account["equity"])
         lots = self.calculate_optimal_lots(equity, entry_price, sl, symbol)
         
-        # 计算保证金
-        contract_size = self._get_contract_size(symbol)
-        notional_value = lots * contract_size * entry_price
-        required_margin = notional_value / self.default_leverage
-        
+        # BUG-010 修复：用汇率感知函数计算正确的 USD 保证金
+        # current_price = entry_price（开仓瞬间，浮动为零）
+        required_margin, _ = self._calculate_margin_and_pnl(
+            symbol, lots, entry_price, entry_price, action == "long"
+        )
+
         # 如果保证金不够
         available_margin = float(account["balance"]) - float(account["used_margin"])
         if required_margin > available_margin:
@@ -220,11 +297,10 @@ class SimTradingEngine:
         symbol = pos["symbol"]
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        contract_size = self._get_contract_size(symbol)
-        if action == "long":
-            pnl = (exit_price - entry) * quantity * contract_size
-        else:
-            pnl = (entry - exit_price) * quantity * contract_size
+        # BUG-010 修复：使用汇率感知函数计算正确的 USD 盈亏
+        _, pnl = self._calculate_margin_and_pnl(
+            symbol, quantity, entry, exit_price, action == "long"
+        )
 
         conn.execute("UPDATE sim_positions SET status='closed', floating_pnl=? WHERE id=?", (pnl, position_id))
         conn.execute(
@@ -307,7 +383,6 @@ class SimTradingEngine:
                 qty = float(pos["quantity"])
                 sl = float(pos["stop_loss"])
                 tp = float(pos["take_profit"])
-                contract_size = self._get_contract_size(symbol)
                 mark_price = latest_price
                 trigger_price = latest_price
                 if action == "long":
@@ -321,11 +396,10 @@ class SimTradingEngine:
                 if mark_price <= 0:
                     continue
 
-                # 计算浮盈
-                if action == "long":
-                    pnl = (mark_price - entry) * qty * contract_size
-                else:
-                    pnl = (entry - mark_price) * qty * contract_size
+                # BUG-010 修复：使用汇率感知函数计算正确的 USD 浮动盈亏
+                _, pnl = self._calculate_margin_and_pnl(
+                    symbol, qty, entry, mark_price, action == "long"
+                )
 
                 total_floating_pnl += pnl
                 conn.execute("UPDATE sim_positions SET floating_pnl=? WHERE id=?", (pnl, pos["id"]))
@@ -400,11 +474,10 @@ class SimTradingEngine:
                 continue
             action = pos["action"]
             entry = float(pos["entry_price"])
-            contract_size = self._get_contract_size(symbol)
-            if action == "long":
-                pnl = (current_price - entry) * float(pos["quantity"]) * contract_size
-            else:
-                pnl = (entry - current_price) * float(pos["quantity"]) * contract_size
+            # BUG-010 修复：使用汇率感知函数计算正确的 USD 盈亏，再决定是否需要强平
+            _, pnl = self._calculate_margin_and_pnl(
+                symbol, float(pos["quantity"]), entry, current_price, action == "long"
+            )
             # 只强平亏损仓
             if pnl < 0:
                 self._close_position_with_conn(conn, pos["id"], current_price, "触发爆仓强制平仓", user_id)
