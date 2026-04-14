@@ -355,6 +355,34 @@ def init_knowledge_base(db_path: Path | str | None = None) -> Path:
             CREATE INDEX IF NOT EXISTS idx_user_feedback_label ON user_feedback(feedback_label, created_at);
             CREATE INDEX IF NOT EXISTS idx_rule_feedback_scores_score ON rule_feedback_scores(score, total_count);
 
+            CREATE TABLE IF NOT EXISTS ai_signal_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_signature TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                snapshot_time TEXT NOT NULL DEFAULT '',
+                snapshot_symbols_json TEXT NOT NULL DEFAULT '[]',
+                symbol TEXT NOT NULL DEFAULT '',
+                action TEXT NOT NULL DEFAULT 'neutral',
+                entry_price REAL NOT NULL DEFAULT 0,
+                stop_loss REAL NOT NULL DEFAULT 0,
+                take_profit REAL NOT NULL DEFAULT 0,
+                signal_schema_version TEXT NOT NULL DEFAULT '',
+                signal_meta_valid INTEGER NOT NULL DEFAULT 0,
+                signal_meta_reason TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                api_base TEXT NOT NULL DEFAULT '',
+                is_fallback INTEGER NOT NULL DEFAULT 0,
+                push_sent INTEGER NOT NULL DEFAULT 0,
+                summary_line TEXT NOT NULL DEFAULT '',
+                content TEXT NOT NULL DEFAULT '',
+                signal_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                UNIQUE(signal_signature)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_ai_signal_events_time ON ai_signal_events(occurred_at, symbol);
+            CREATE INDEX IF NOT EXISTS idx_ai_signal_events_action ON ai_signal_events(action, signal_meta_valid);
+
             -- 3.2 修复：系统状态 KV 表，代替直接读写 JSON 文件，避免写入中断导致文件损坏
             CREATE TABLE IF NOT EXISTS system_state_kv (
                 key   TEXT PRIMARY KEY,
@@ -573,4 +601,3 @@ def kv_set(key: str, value, db_path: Path | str | None = None) -> None:
             """,
             (str(key), value_json, now_text),
         )
-

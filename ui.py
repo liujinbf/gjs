@@ -18,6 +18,7 @@ from event_schedule import resolve_event_risk_context
 from external_signal_context import apply_external_signal_context
 from knowledge_feedback import refresh_rule_feedback_scores, summarize_feedback_stats
 from knowledge_governance import build_learning_report, refresh_rule_governance
+from knowledge_ai_signals import record_ai_signal, summarize_recent_ai_signals
 from knowledge_runtime import backfill_snapshot_outcomes, record_snapshot, summarize_outcome_stats
 from knowledge_scoring import match_rules_to_snapshots, refresh_rule_scores, summarize_rule_scores
 from macro_data_feed import apply_macro_data_to_snapshot, load_macro_data_feed
@@ -814,6 +815,11 @@ class MetalMonitorWindow(QMainWindow):
         is_opp = _detect_opportunity(self._last_snapshot)
         push_result = send_ai_brief_notification(result, self._last_snapshot, self._config, is_opportunity=is_opp)
         history_count = append_ai_history_entry(build_ai_history_entry(result, self._last_snapshot, push_result=push_result))
+        ai_signal_result = {"inserted_count": 0}
+        try:
+            ai_signal_result = record_ai_signal(result, self._last_snapshot, push_result=push_result)
+        except Exception as exc:
+            self._append_log(f"[AI信号] 写入知识库失败（非致命）：{exc}")
         
         # 实时拦截并执行模拟挂单
         meta = dict(result.get("signal_meta", {}) or {}) or extract_signal_meta(content)
@@ -852,6 +858,8 @@ class MetalMonitorWindow(QMainWindow):
 
         if history_count:
             self._append_log("[AI留痕] 已记录本次 AI 研判结果。")
+        if int(ai_signal_result.get("inserted_count", 0) or 0) > 0:
+            self._append_log("[AI信号] 已写入知识库结构化信号台账。")
         self._append_log(f"[AI研判] {model} 已生成一份新的贵金属快照结论。")
         for line in push_result.get("messages", []):
             self._append_log(f"[AI推送] {line}")
@@ -933,6 +941,11 @@ class MetalMonitorWindow(QMainWindow):
             is_opp = _detect_opportunity(self._last_snapshot)
             push_result = send_ai_brief_notification(result, self._last_snapshot, self._config, is_opportunity=is_opp)
             history_count = append_ai_history_entry(build_ai_history_entry(result, self._last_snapshot, push_result=push_result))
+            ai_signal_result = {"inserted_count": 0}
+            try:
+                ai_signal_result = record_ai_signal(result, self._last_snapshot, push_result=push_result)
+            except Exception as exc:
+                self._append_log(f"[AI自动信号] 写入知识库失败（非致命）：{exc}")
             self.left_panel.set_ai_brief(content or "自动研判已完成，模型内容为空。")
 
             interval_min = int(getattr(self._config, "ai_auto_interval_min", 0) or 0)
@@ -944,6 +957,13 @@ class MetalMonitorWindow(QMainWindow):
 
             if history_count:
                 self._append_log("[AI自动留痕] 已记录本次自动 AI 研判结果。")
+            if int(ai_signal_result.get("inserted_count", 0) or 0) > 0:
+                self._append_log("[AI自动信号] 已写入知识库结构化信号台账。")
+            try:
+                ai_signal_summary = summarize_recent_ai_signals(days=30)
+                self._append_log(f"[AI信号统计] {ai_signal_summary.get('summary_text', '')}")
+            except Exception as exc:
+                self._append_log(f"[AI信号统计] 汇总失败（非致命）：{exc}")
             self._append_log(f"[AI自动研判] {model} 已完成自动研判。")
             for line in push_result.get("messages", []):
                 self._append_log(f"[AI推送] {line}")

@@ -11,6 +11,7 @@ from app_config import MetalMonitorConfig
 from knowledge_rulebook import build_rulebook
 from prompt_templates import AI_BRIEF_SYSTEM_PROMPT, build_metal_brief_prompt
 from backtest_engine import extract_signal_meta, get_historical_win_rate
+from signal_protocol import SIGNAL_SCHEMA_VERSION, build_empty_signal_meta, normalize_signal_meta, validate_signal_meta
 
 try:
     from json_repair import loads as _json_repair_loads
@@ -145,29 +146,6 @@ def _load_json_dict(text: str) -> dict | None:
             pass
     return None
 
-
-def _normalize_signal_meta(meta: dict | None) -> dict:
-    payload = dict(meta or {})
-    symbol = str(payload.get("symbol", "--") or "--").strip().upper() or "--"
-    action = str(payload.get("action", "neutral") or "neutral").strip().lower()
-    if action not in {"long", "short", "neutral"}:
-        action = "neutral"
-    price = float(payload.get("price", 0.0) or 0.0)
-    sl = float(payload.get("sl", 0.0) or 0.0)
-    tp = float(payload.get("tp", 0.0) or 0.0)
-    if action == "neutral":
-        price = 0.0
-        sl = 0.0
-        tp = 0.0
-    return {
-        "symbol": symbol,
-        "action": action,
-        "price": price,
-        "sl": sl,
-        "tp": tp,
-    }
-
-
 def _normalize_brief_result(content_text: str) -> dict:
     raw_text = str(content_text or "").strip()
     payload = _load_json_dict(raw_text)
@@ -184,15 +162,25 @@ def _normalize_brief_result(content_text: str) -> dict:
         if not summary_text:
             # 兼容模型只返回纯 signal_meta 的异常情况
             summary_text = "当前结论：模型已返回结构化结果，但未提供正文摘要。"
+        normalized_signal = normalize_signal_meta(signal_meta)
+        signal_valid, signal_reason = validate_signal_meta(normalized_signal)
         return {
             "content": summary_text,
-            "signal_meta": _normalize_signal_meta(signal_meta),
+            "signal_meta": normalized_signal,
+            "signal_schema_version": SIGNAL_SCHEMA_VERSION,
+            "signal_meta_valid": signal_valid,
+            "signal_meta_reason": signal_reason,
         }
 
     legacy_meta = extract_signal_meta(raw_text)
+    normalized_signal = normalize_signal_meta(legacy_meta)
+    signal_valid, signal_reason = validate_signal_meta(normalized_signal)
     return {
         "content": raw_text,
-        "signal_meta": _normalize_signal_meta(legacy_meta),
+        "signal_meta": normalized_signal,
+        "signal_schema_version": SIGNAL_SCHEMA_VERSION,
+        "signal_meta_valid": signal_valid,
+        "signal_meta_reason": signal_reason,
     }
 
 
@@ -270,6 +258,9 @@ def request_ai_brief(
         return {
             "content": normalized["content"],
             "signal_meta": normalized["signal_meta"],
+            "signal_schema_version": normalized["signal_schema_version"],
+            "signal_meta_valid": normalized["signal_meta_valid"],
+            "signal_meta_reason": normalized["signal_meta_reason"],
             "model": model,
             "api_base": api_base,
             "rulebook_summary_text": str(rulebook.get("summary_text", "") or "").strip(),
@@ -297,7 +288,10 @@ def _rule_engine_fallback(snapshot: dict) -> dict:
                 "[🔴 系统降级失败] AI 研判和规则引擎均不可用。\n"
                 "请检查：① AI API Key 是否配置正确；② 网络连接是否正常。\n"
             ),
-            "signal_meta": {"symbol": "--", "action": "neutral", "price": 0.0, "sl": 0.0, "tp": 0.0},
+            "signal_meta": build_empty_signal_meta(),
+            "signal_schema_version": SIGNAL_SCHEMA_VERSION,
+            "signal_meta_valid": True,
+            "signal_meta_reason": "应急降级，禁止自动执行",
             "model": "emergency-fallback",
             "api_base": "local",
             "rulebook_summary_text": "",

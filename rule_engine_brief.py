@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import logging
 
+from signal_protocol import SIGNAL_SCHEMA_VERSION, build_empty_signal_meta, validate_signal_meta
+
 logger = logging.getLogger(__name__)
 
 
@@ -298,7 +300,10 @@ def generate_rule_engine_brief(snapshot: dict) -> dict:
 
     return {
         "content": content,
-        "signal_meta": {"symbol": symbol, "action": "neutral", "price": 0.0, "sl": 0.0, "tp": 0.0},
+        "signal_meta": build_empty_signal_meta(symbol=symbol),
+        "signal_schema_version": SIGNAL_SCHEMA_VERSION,
+        "signal_meta_valid": validate_signal_meta(build_empty_signal_meta(symbol=symbol))[0],
+        "signal_meta_reason": "规则引擎降级模式，默认禁止自动执行",
         "model": "rule-engine-fallback",
         "api_base": "local",
         "rulebook_summary_text": rule_text,
