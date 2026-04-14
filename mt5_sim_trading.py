@@ -58,6 +58,13 @@ class SimTradingEngine:
             f"ATR 风险系数已启用（ATR/价格={atr_ratio:.4%}，风险预算={risk_pct:.2%}）。",
         )
 
+    def _resolve_take_profit_2(self, meta: dict) -> float:
+        for key in ("tp2", "take_profit_2", "target_2"):
+            value = float(meta.get(key, 0.0) or 0.0)
+            if value > 0:
+                return value
+        return 0.0
+
     def init_database(self):
         Path(self.db_file).parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
@@ -87,6 +94,10 @@ class SimTradingEngine:
                     margin REAL DEFAULT 0.0,
                     stop_loss REAL,
                     take_profit REAL,
+                    take_profit_2 REAL DEFAULT 0.0,
+                    break_even_armed INTEGER DEFAULT 0,
+                    partial_closed_quantity REAL DEFAULT 0.0,
+                    partial_realized_profit REAL DEFAULT 0.0,
                     opened_at TEXT,
                     status TEXT DEFAULT 'open'
                 )
@@ -112,7 +123,20 @@ class SimTradingEngine:
                 WHERE status='open'
                 """
             )
+            self._ensure_column(conn, "sim_positions", "take_profit_2", "REAL DEFAULT 0.0")
+            self._ensure_column(conn, "sim_positions", "break_even_armed", "INTEGER DEFAULT 0")
+            self._ensure_column(conn, "sim_positions", "partial_closed_quantity", "REAL DEFAULT 0.0")
+            self._ensure_column(conn, "sim_positions", "partial_realized_profit", "REAL DEFAULT 0.0")
             conn.commit()
+
+    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_sql: str) -> None:
+        existing = {
+            str(row["name"]).strip().lower()
+            for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if str(column_name).strip().lower() in existing:
+            return
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_file, timeout=15.0)
@@ -258,6 +282,7 @@ class SimTradingEngine:
         entry_price = float(meta.get("price", 0.0))
         sl = float(meta.get("sl", 0.0))
         tp = float(meta.get("tp", 0.0))
+        tp2 = self._resolve_take_profit_2(meta)
 
         if action not in ("long", "short"):
             return False, "非明确执行信号"
@@ -302,10 +327,13 @@ class SimTradingEngine:
                 conn.execute(
                     """
                     INSERT INTO sim_positions
-                    (user_id, symbol, action, entry_price, quantity, margin, stop_loss, take_profit, opened_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (
+                        user_id, symbol, action, entry_price, quantity, margin,
+                        stop_loss, take_profit, take_profit_2, opened_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (user_id, symbol, action, entry_price, lots, required_margin, sl, tp, now),
+                    (user_id, symbol, action, entry_price, lots, required_margin, sl, tp, tp2, now),
                 )
                 conn.commit()
             except sqlite3.IntegrityError:
@@ -314,7 +342,7 @@ class SimTradingEngine:
 
         logging.info(
             f"🟢 模拟盘已开仓: {action.upper()} {symbol} "
-            f"(手数: {lots:.2f}, 风险预算: {risk_pct_used:.2%}, 止损: {sl}, 止盈: {tp})"
+            f"(手数: {lots:.2f}, 风险预算: {risk_pct_used:.2%}, 止损: {sl}, 止盈1: {tp}, 止盈2: {tp2 or 0})"
         )
         return True, f"成功开仓 {lots:.2f} 手 {symbol}（{risk_note}）"
 
@@ -341,6 +369,7 @@ class SimTradingEngine:
         entry = float(pos["entry_price"])
         quantity = float(pos["quantity"])
         margin = float(pos["margin"] or 0.0)
+        partial_realized_profit = float(pos["partial_realized_profit"] or 0.0)
         symbol = pos["symbol"]
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -355,8 +384,9 @@ class SimTradingEngine:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (user_id, symbol, action, entry, exit_price, quantity, pnl, now, reason),
         )
-        win_add = 1 if pnl > 0 else 0
-        loss_add = 1 if pnl < 0 else 0
+        total_position_pnl = partial_realized_profit + pnl
+        win_add = 1 if total_position_pnl > 0 else 0
+        loss_add = 1 if total_position_pnl < 0 else 0
         conn.execute(
             """
             UPDATE sim_accounts
@@ -379,6 +409,80 @@ class SimTradingEngine:
         with self._connect() as conn:
             self._close_position_with_conn(conn, position_id, exit_price, reason, user_id)
             conn.commit()
+
+    def _partially_close_position_with_conn(
+        self,
+        conn: sqlite3.Connection,
+        position_id: int,
+        exit_price: float,
+        close_quantity: float,
+        reason: str,
+        user_id: str = "system",
+    ) -> float:
+        """分批止盈：减仓一部分，并把剩余仓位止损上移到保本。"""
+        conn.row_factory = sqlite3.Row
+        pos = conn.execute("SELECT * FROM sim_positions WHERE id=? AND status='open'", (position_id,)).fetchone()
+        if not pos:
+            return 0.0
+
+        total_quantity = float(pos["quantity"] or 0.0)
+        if close_quantity <= 0 or total_quantity <= 0 or close_quantity >= total_quantity:
+            return 0.0
+
+        action = str(pos["action"] or "").strip().lower()
+        symbol = str(pos["symbol"] or "").strip().upper()
+        entry = float(pos["entry_price"] or 0.0)
+        margin = float(pos["margin"] or 0.0)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        close_ratio = close_quantity / total_quantity
+        released_margin = margin * close_ratio
+        remaining_quantity = max(0.0, total_quantity - close_quantity)
+        remaining_margin = max(0.0, margin - released_margin)
+
+        _, pnl = self._calculate_margin_and_pnl(symbol, close_quantity, entry, exit_price, action == "long")
+        partial_closed_quantity = float(pos["partial_closed_quantity"] or 0.0) + close_quantity
+        partial_realized_profit = float(pos["partial_realized_profit"] or 0.0) + pnl
+
+        conn.execute(
+            """
+            UPDATE sim_positions
+            SET quantity = ?,
+                margin = ?,
+                break_even_armed = 1,
+                stop_loss = entry_price,
+                take_profit = CASE
+                    WHEN COALESCE(take_profit_2, 0) > 0 THEN take_profit_2
+                    ELSE take_profit
+                END,
+                partial_closed_quantity = ?,
+                partial_realized_profit = ?,
+                floating_pnl = 0.0
+            WHERE id = ?
+            """,
+            (remaining_quantity, remaining_margin, partial_closed_quantity, partial_realized_profit, position_id),
+        )
+        conn.execute(
+            "INSERT INTO sim_trades (user_id, symbol, action, entry_price, exit_price, quantity, profit, closed_at, reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, symbol, action, entry, exit_price, close_quantity, pnl, now, reason),
+        )
+        conn.execute(
+            """
+            UPDATE sim_accounts
+            SET balance = balance + ?,
+                used_margin = MAX(0, used_margin - ?),
+                total_profit = total_profit + ?,
+                updated_at = ?
+            WHERE user_id = ?
+            """,
+            (pnl, released_margin, pnl, now, user_id),
+        )
+        logging.info(
+            f"🟡 模拟盘分批止盈：{action.upper()} {symbol} 以 {exit_price:.2f} 减仓 {close_quantity:.2f} 手，"
+            f"已实现盈亏 ${pnl:.2f}，剩余 {remaining_quantity:.2f} 手并上移保本止损。"
+        )
+        return pnl
 
     def _normalize_price_quote(self, value: Any) -> dict:
         if isinstance(value, dict):
@@ -430,6 +534,8 @@ class SimTradingEngine:
                 qty = float(pos["quantity"])
                 sl = float(pos["stop_loss"])
                 tp = float(pos["take_profit"])
+                tp2 = float(pos["take_profit_2"] or 0.0)
+                break_even_armed = bool(int(pos["break_even_armed"] or 0))
                 mark_price = latest_price
                 trigger_price = latest_price
                 if action == "long":
@@ -451,19 +557,35 @@ class SimTradingEngine:
                 total_floating_pnl += pnl
                 conn.execute("UPDATE sim_positions SET floating_pnl=? WHERE id=?", (pnl, pos["id"]))
 
+                if tp2 > 0 and not break_even_armed:
+                    partial_qty = math.floor((qty / 2.0) * 100) / 100.0
+                    if partial_qty >= 0.01 and (qty - partial_qty) >= 0.01:
+                        tp1_hit = (action == "long" and trigger_price >= tp) or (action == "short" and trigger_price <= tp)
+                        if tp1_hit:
+                            self._partially_close_position_with_conn(
+                                conn,
+                                pos["id"],
+                                trigger_price,
+                                partial_qty,
+                                "命中目标1止盈（分批减仓并上移保本止损）",
+                                user_id,
+                            )
+                            conn.commit()
+                            continue
+
                 # 检测 SL / TP 触发（共享连接，不再嵌套 connect）
                 trigger_close = False
                 reason = ""
                 if action == "long":
                     if trigger_price <= sl:
-                        trigger_close, reason = True, "命中系统保护止损"
+                        trigger_close, reason = True, ("回撤至保本止损" if break_even_armed else "命中系统保护止损")
                     elif trigger_price >= tp:
-                        trigger_close, reason = True, "命中目标止盈"
+                        trigger_close, reason = True, ("命中目标2止盈" if break_even_armed and tp2 > 0 else "命中目标止盈")
                 elif action == "short":
                     if trigger_price >= sl:
-                        trigger_close, reason = True, "命中系统保护止损"
+                        trigger_close, reason = True, ("回撤至保本止损" if break_even_armed else "命中系统保护止损")
                     elif trigger_price <= tp:
-                        trigger_close, reason = True, "命中目标止盈"
+                        trigger_close, reason = True, ("命中目标2止盈" if break_even_armed and tp2 > 0 else "命中目标止盈")
 
                 if trigger_close:
                     # ✅ 使用共享连接版，避免嵌套 connect 导致 database is locked

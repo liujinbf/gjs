@@ -298,3 +298,52 @@ def test_dynamic_risk_pct_expands_moderately_when_atr_is_low():
     del eng
     gc.collect()
     shutil.rmtree(TEST_DIR, ignore_errors=True)
+
+
+def test_partial_take_profit_moves_stop_to_break_even():
+    test_dir = _prepare_dir()
+    eng = _make_engine(test_dir, "partial_tp")
+
+    ok, msg = eng.execute_signal(
+        {
+            "symbol": "XAUUSD",
+            "action": "long",
+            "price": 3300.0,
+            "sl": 3280.0,
+            "tp": 3340.0,
+            "tp2": 3360.0,
+            "atr14": 12.0,
+        }
+    )
+    assert ok, f"开仓失败：{msg}"
+
+    eng.update_prices(
+        {
+            "XAUUSD": {
+                "latest": 3340.2,
+                "bid": 3340.2,
+                "ask": 3340.4,
+            }
+        }
+    )
+
+    del eng
+    gc.collect()
+
+    with sqlite3.connect(str(test_dir / "partial_tp.sqlite")) as conn:
+        conn.row_factory = sqlite3.Row
+        pos = conn.execute("SELECT * FROM sim_positions WHERE status='open'").fetchone()
+        trades = conn.execute(
+            "SELECT reason, quantity FROM sim_trades WHERE user_id='system' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
+    assert pos is not None, "触发目标1后应保留剩余仓位"
+    assert int(pos["break_even_armed"]) == 1
+    assert abs(float(pos["stop_loss"]) - float(pos["entry_price"])) < 1e-6
+    assert float(pos["take_profit"]) == 3360.0
+    assert float(pos["partial_closed_quantity"]) > 0
+    assert trades is not None
+    assert "目标1止盈" in str(trades["reason"])
+    assert float(trades["quantity"]) > 0
+
+    shutil.rmtree(TEST_DIR, ignore_errors=True)

@@ -213,6 +213,8 @@ def _enrich_signal_with_snapshot_context(meta: dict, snapshot: dict) -> dict:
             payload["atr14_h4"] = float(item.get("atr14_h4", 0.0) or 0.0)
         if float(payload.get("risk_reward_atr", 0.0) or 0.0) <= 0:
             payload["risk_reward_atr"] = float(item.get("risk_reward_atr", 0.0) or 0.0)
+        if float(payload.get("tp2", 0.0) or 0.0) <= 0:
+            payload["tp2"] = float(item.get("risk_reward_target_price_2", 0.0) or 0.0)
         return payload
     return payload
 
