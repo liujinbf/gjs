@@ -121,6 +121,62 @@ def test_pick_notify_entries_allows_high_impact_macro_entry():
     shutil.rmtree(state_dir)
 
 
+def test_pick_notify_entries_skips_scope_less_high_impact_macro_without_result():
+    state_dir = ROOT / ".runtime_test_notify_macro_scope_less"
+    if state_dir.exists():
+        shutil.rmtree(state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_file = state_dir / "notify_state.json"
+
+    entries = [
+        {
+            "occurred_at": "2026-04-12 10:20:00",
+            "category": "macro",
+            "title": "宏观提醒",
+            "detail": "联储利率决议窗口内，先别抢第一脚。",
+            "tone": "warning",
+            "signature": "macro-high-scope-less-1",
+            "event_importance_text": "高影响",
+            "event_name": "联储利率决议",
+            "macro_actionable": True,
+            "macro_scope_bound": False,
+            "macro_has_result": False,
+        }
+    ]
+    picked = notification.pick_notify_entries(entries, _build_config(), state_file=state_file)
+    assert picked == []
+    shutil.rmtree(state_dir)
+
+
+def test_pick_notify_entries_allows_scope_bound_high_impact_macro_without_result():
+    state_dir = ROOT / ".runtime_test_notify_macro_scope_bound"
+    if state_dir.exists():
+        shutil.rmtree(state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_file = state_dir / "notify_state.json"
+
+    entries = [
+        {
+            "occurred_at": "2026-04-12 10:20:00",
+            "category": "macro",
+            "title": "美国 CPI 宏观提醒",
+            "detail": "高影响窗口内，黄金先别抢第一脚。",
+            "tone": "warning",
+            "signature": "macro-high-scope-bound-1",
+            "event_importance_text": "高影响",
+            "event_name": "美国 CPI",
+            "macro_actionable": True,
+            "macro_scope_bound": True,
+            "macro_has_result": False,
+            "symbol": "XAUUSD",
+        }
+    ]
+    picked = notification.pick_notify_entries(entries, _build_config(), state_file=state_file)
+    assert len(picked) == 1
+    assert picked[0]["title"] == "美国 CPI 宏观提醒"
+    shutil.rmtree(state_dir)
+
+
 def test_pick_notify_entries_skips_low_impact_accent_spread():
     state_dir = ROOT / ".runtime_test_notify_low"
     if state_dir.exists():

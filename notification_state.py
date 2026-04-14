@@ -120,12 +120,21 @@ def _get_notify_priority(entry: dict) -> int:
         return 3 if importance == "high" else 2
     if category == "macro":
         macro_actionable = bool(entry.get("macro_actionable", False))
+        macro_scope_bound = bool(entry.get("macro_scope_bound", False))
+        macro_has_result = bool(entry.get("macro_has_result", False))
+        has_explicit_scope_flag = "macro_scope_bound" in entry or "macro_has_result" in entry
         event_name = str(entry.get("event_name", "") or "").strip()
         event_note = str(entry.get("event_note", "") or "").strip()
         result_summary = str(entry.get("event_result_summary_text", "") or "").strip()
         if not (macro_actionable or event_name or event_note or result_summary):
             return 0
-        return 4 if importance == "high" or result_summary else 2
+        if result_summary or macro_has_result:
+            return 4 if importance == "high" else 3
+        if importance == "high" and not has_explicit_scope_flag:
+            return 3
+        if importance == "high" and macro_scope_bound:
+            return 3
+        return 0
     if category == "spread" or "点差" in title:
         if tone == "warning":
             return 5 if importance == "high" else 4

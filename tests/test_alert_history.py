@@ -91,6 +91,38 @@ def test_build_snapshot_history_entries_skips_generic_macro_broadcast_without_ac
     assert all(item["category"] != "macro" for item in entries)
 
 
+def test_build_snapshot_history_entries_skips_medium_macro_broadcast_without_result():
+    snapshot = {
+        "last_refresh_text": "2026-04-12 12:00:00",
+        "trade_grade": "只适合观察",
+        "trade_grade_detail": "先观察。",
+        "trade_next_review": "稍后再看。",
+        "runtime_status_cards": [],
+        "spread_focus_cards": [],
+        "event_risk_mode_text": "事件观察",
+        "event_active_name": "欧元区工业产出",
+        "event_active_time_text": "2026-04-12 15:00:00",
+        "event_active_importance_text": "中影响",
+        "items": [
+            {
+                "symbol": "EURUSD",
+                "latest_price": 1.1727,
+                "spread_points": 18.0,
+                "point": 0.0001,
+                "has_live_quote": True,
+                "trade_grade": "只适合观察",
+                "trade_grade_detail": "先看结构。",
+                "event_applies": True,
+                "event_note": "中影响窗口：欧元区工业产出将于 2026-04-12 15:00:00 落地。",
+            }
+        ],
+        "alert_text": "宏观提醒：先看数据是否显著偏离预期。",
+    }
+
+    entries = build_snapshot_history_entries(snapshot)
+    assert all(item["category"] != "macro" for item in entries)
+
+
 def test_build_snapshot_history_entries_adds_structure_entry_with_action_meta():
     snapshot = {
         "last_refresh_text": "2026-04-12 12:00:00",

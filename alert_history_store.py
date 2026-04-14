@@ -394,17 +394,54 @@ def _build_macro_entry(
     if not alert_text:
         return None
 
-    representative_item = _pick_representative_item(items_by_symbol)
     event_name = _normalize_text(snapshot_event_meta.get("event_name", ""))
     event_importance_text = _normalize_text(snapshot_event_meta.get("event_importance_text", ""))
+    event_scope_text = _normalize_text(snapshot_event_meta.get("event_scope_text", ""))
     event_result_summary_text = _normalize_text(snapshot.get("event_result_summary_text", ""))
+    importance_is_high = "高影响" in event_importance_text
+
+    candidate_items = []
+    for item in items_by_symbol.values():
+        normalized_item = dict(item or {})
+        if not bool(normalized_item.get("has_live_quote", False)):
+            continue
+        if not any(
+            [
+                _normalize_text(normalized_item.get("event_note", "")),
+                _normalize_text(normalized_item.get("external_bias_note", "")),
+                bool(normalized_item.get("event_applies", False)),
+                event_result_summary_text,
+            ]
+        ):
+            continue
+        candidate_items.append(normalized_item)
+
+    if event_result_summary_text:
+        representative_item = _pick_representative_item(
+            {
+                str(item.get("symbol", "") or "").strip().upper(): item
+                for item in candidate_items
+            }
+        ) or _pick_representative_item(items_by_symbol)
+    else:
+        representative_item = _pick_representative_item(
+            {
+                str(item.get("symbol", "") or "").strip().upper(): item
+                for item in candidate_items
+                if bool(item.get("event_applies", False))
+                or _normalize_text(item.get("event_note", ""))
+                or _normalize_text(item.get("external_bias_note", ""))
+            }
+        )
+
     external_bias_notes = [
         _normalize_text(item.get("external_bias_note", ""))
-        for item in items_by_symbol.values()
+        for item in candidate_items
         if _normalize_text(item.get("external_bias_note", ""))
     ]
-    has_actionable_event = bool(event_name or event_result_summary_text or external_bias_notes)
-    if not has_actionable_event:
+    if not representative_item and not event_result_summary_text:
+        return None
+    if not event_result_summary_text and not importance_is_high:
         return None
 
     representative_trade_meta = trade_meta
@@ -422,6 +459,16 @@ def _build_macro_entry(
             **_item_action_meta(representative_item, fallback_trade_meta=representative_trade_meta),
             **representative_event_meta,
         }
+
+    if not event_result_summary_text:
+        representative_grade = _normalize_text(representative_trade_meta.get("trade_grade", ""))
+        representative_has_event = bool(
+            _normalize_text(representative_event_meta.get("event_note", ""))
+            or representative_extra.get("symbol", "")
+            or event_scope_text
+        )
+        if representative_grade == "只适合观察" and not representative_has_event:
+            return None
 
     detail_parts = [alert_text]
     if event_result_summary_text:
@@ -446,6 +493,8 @@ def _build_macro_entry(
             **representative_event_meta,
             **representative_extra,
             "macro_actionable": True,
+            "macro_scope_bound": bool(representative_extra.get("symbol", "")),
+            "macro_has_result": bool(event_result_summary_text),
             "event_result_summary_text": event_result_summary_text,
         },
         sig_extra=[
