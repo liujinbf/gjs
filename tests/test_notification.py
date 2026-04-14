@@ -575,6 +575,9 @@ def test_build_markdown_includes_risk_reward_action_levels():
             "trade_grade_detail": "可作为候选机会观察。",
             "external_bias_note": "宏观数据：美国10年期实际利率 当前值 1.85，较前值 -0.06，背景偏多",
             "risk_reward_ratio": 2.4,
+            "model_ready": True,
+            "model_win_probability": 0.74,
+            "model_confidence_text": "中等信心",
             "stop_loss_price": 4748.0,
             "take_profit_1": 4788.0,
             "take_profit_2": 4810.0,
@@ -586,6 +589,7 @@ def test_build_markdown_includes_risk_reward_action_levels():
     assert "当前价格：4,759.82" in markdown
     assert "**执行参数**" in markdown
     assert "盈亏比：1:2.40" in markdown
+    assert "模型参考：74%（中等信心）" in markdown
     assert "止损：4,748.00" in markdown
     assert "目标1：4,788.00" in markdown
     assert "目标2：4,810.00" in markdown

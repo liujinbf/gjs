@@ -53,6 +53,8 @@ def _build_markdown(entry: dict) -> str:
     event_scope_text      = _normalize_text(entry.get("event_scope_text", ""))
     event_note            = _normalize_text(entry.get("event_note", ""))
     external_bias_note    = _normalize_text(entry.get("external_bias_note", ""))
+    model_note            = _normalize_text(entry.get("model_note", ""))
+    model_confidence_text = _normalize_text(entry.get("model_confidence_text", ""))
     position_plan_text    = _normalize_text(entry.get("position_plan_text", ""))
     entry_invalidation_text = _normalize_text(entry.get("entry_invalidation_text", ""))
     entry_zone_text       = _normalize_text(entry.get("entry_zone_text", ""))
@@ -67,6 +69,8 @@ def _build_markdown(entry: dict) -> str:
     stop_loss_price = entry.get("stop_loss_price")
     take_profit_1   = entry.get("take_profit_1")
     take_profit_2   = entry.get("take_profit_2")
+    model_ready = bool(entry.get("model_ready", False))
+    model_win_probability = entry.get("model_win_probability")
 
     if markdown_body:
         return markdown_body
@@ -112,6 +116,14 @@ def _build_markdown(entry: dict) -> str:
                 action_lines.append(f"- 盈亏比：1:{float(risk_reward_ratio):.2f}")
             except (TypeError, ValueError):
                 pass
+        if model_ready and model_win_probability is not None:
+            try:
+                model_line = f"- 模型参考：{float(model_win_probability) * 100:.0f}%"
+                if model_confidence_text:
+                    model_line += f"（{model_confidence_text}）"
+                action_lines.append(model_line)
+            except (TypeError, ValueError):
+                pass
         if entry_zone_text:
             action_lines.append(f"- 观察区间：{_clip_text(entry_zone_text, 64)}")
         if stop_loss_price:
@@ -145,6 +157,8 @@ def _build_markdown(entry: dict) -> str:
         background_lines.append(f"- 提醒：{_clip_text(event_note, 74)}")
     if external_bias_note:
         background_lines.append(f"- 外部背景：{_clip_text(external_bias_note, 74)}")
+    if category_key != "structure" and model_note:
+        background_lines.append(f"- 模型参考：{_clip_text(model_note, 74)}")
     _append_block(lines, "背景", background_lines)
 
     # ── 合并提醒说明 ──
