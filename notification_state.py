@@ -119,8 +119,13 @@ def _get_notify_priority(entry: dict) -> int:
     if category == "recovery":
         return 3 if importance == "high" else 2
     if category == "macro":
-        # 高影响事件 → 高优先级；中等/未知 → 中优先级（不再静默过滤）
-        return 4 if importance == "high" else 2
+        macro_actionable = bool(entry.get("macro_actionable", False))
+        event_name = str(entry.get("event_name", "") or "").strip()
+        event_note = str(entry.get("event_note", "") or "").strip()
+        result_summary = str(entry.get("event_result_summary_text", "") or "").strip()
+        if not (macro_actionable or event_name or event_note or result_summary):
+            return 0
+        return 4 if importance == "high" or result_summary else 2
     if category == "spread" or "点差" in title:
         if tone == "warning":
             return 5 if importance == "high" else 4

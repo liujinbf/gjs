@@ -31,7 +31,7 @@ def _build_config() -> MetalMonitorConfig:
     )
 
 
-def test_pick_notify_entries_honors_cooldown_and_macro_now_has_priority():
+def test_pick_notify_entries_honors_cooldown_and_session_keeps_priority_after_macro_silence():
     state_dir = ROOT / ".runtime_test_notify"
     if state_dir.exists():
         shutil.rmtree(state_dir)
@@ -68,11 +68,31 @@ def test_pick_notify_entries_honors_cooldown_and_macro_now_has_priority():
         },
     ]
     picked = notification.pick_notify_entries(entries, _build_config(), state_file=state_file)
-    # spread-1 在冷却期内被拦截；修复后 macro 有 priority=2、session 有 priority=3，两条均进入队列
-    assert len(picked) == 2
-    titles = [item["title"] for item in picked]
-    assert "休市 / 暂停提醒" in titles
-    assert "宏观提醒" in titles
+    # spread-1 在冷却期内被拦截；泛宏观广播现在默认静默，只保留真正有行动意义的 session 提醒
+    assert len(picked) == 1
+    assert picked[0]["title"] == "休市 / 暂停提醒"
+    shutil.rmtree(state_dir)
+
+
+def test_pick_notify_entries_skips_non_actionable_macro_entry():
+    state_dir = ROOT / ".runtime_test_notify_macro_skip"
+    if state_dir.exists():
+        shutil.rmtree(state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_file = state_dir / "notify_state.json"
+
+    entries = [
+        {
+            "occurred_at": "2026-04-12 10:20:00",
+            "category": "macro",
+            "title": "宏观提醒",
+            "detail": "先关注美元方向。",
+            "tone": "accent",
+            "signature": "macro-skip-1",
+        }
+    ]
+    picked = notification.pick_notify_entries(entries, _build_config(), state_file=state_file)
+    assert picked == []
     shutil.rmtree(state_dir)
 
 
@@ -504,13 +524,19 @@ def test_build_markdown_includes_trade_grade_and_next_review():
             "category": "spread",
             "title": "XAUUSD 点差高警戒",
             "detail": "当前点差明显放大。",
+            "symbol": "XAUUSD",
+            "baseline_latest_price": 4759.82,
+            "price_point": 0.01,
             "trade_grade": "当前不宜出手",
             "trade_grade_detail": "执行成本过高，强行追单容易被来回扫掉。",
             "trade_next_review": "等点差恢复正常后再复核。",
         }
     )
-    assert "建议：**当前不宜出手**" in markdown
-    assert "下次复核：等点差恢复正常后再复核。" in markdown
+    assert "品种：XAUUSD" in markdown
+    assert "当前价格：4,759.82" in markdown
+    assert "结论：**当前不宜出手**" in markdown
+    assert "**先看这个**" in markdown
+    assert "复核：等点差恢复正常后再复核。" in markdown
 
 
 def test_build_markdown_includes_event_window_details():
@@ -530,7 +556,8 @@ def test_build_markdown_includes_event_window_details():
             "event_note": "高影响窗口：欧元区通胀将于 2026-04-15 20:30 落地，当前品种先别抢第一脚。",
         }
     )
-    assert "欧元区通胀 | 2026-04-15 20:30 | 高影响 | EURUSD" in markdown
+    assert "**背景**" in markdown
+    assert "事件：欧元区通胀 | 2026-04-15 20:30 | 高影响 | EURUSD" in markdown
     assert "提醒：高影响窗口：欧元区通胀将于 2026-04-15 20:30 落地，当前品种先别抢第一脚。" in markdown
 
 
@@ -541,6 +568,9 @@ def test_build_markdown_includes_risk_reward_action_levels():
             "category": "structure",
             "title": "XAUUSD 结构候选",
             "detail": "结构和报价相对干净。",
+            "symbol": "XAUUSD",
+            "baseline_latest_price": 4759.82,
+            "price_point": 0.01,
             "trade_grade": "可轻仓试仓",
             "trade_grade_detail": "可作为候选机会观察。",
             "external_bias_note": "宏观数据：美国10年期实际利率 当前值 1.85，较前值 -0.06，背景偏多",
@@ -553,14 +583,18 @@ def test_build_markdown_includes_risk_reward_action_levels():
             "entry_invalidation_text": "若价格重新跌回 4748.00 下方，当前多头结构可视为失效。",
         }
     )
-    assert "外部背景：宏观数据：美国10年期实际利率 当前值 1.85，较前值 -0.06，背景偏多" in markdown
-    assert "预算盈亏比：1:2.40" in markdown
-    assert "止损位：4,748.00" in markdown
-    assert "目标位1：4,788.00" in markdown
-    assert "目标位2：4,810.00" in markdown
+    assert "当前价格：4,759.82" in markdown
+    assert "**执行参数**" in markdown
+    assert "盈亏比：1:2.40" in markdown
+    assert "止损：4,748.00" in markdown
+    assert "目标1：4,788.00" in markdown
+    assert "目标2：4,810.00" in markdown
     assert "观察区间：观察进场区间 4760.00 - 4770.00，若价格直接远离该区间，就不建议追。" in markdown
-    assert "仓位节奏：可轻仓试仓，优先分两段止盈，第一目标落袋后再看延续。" in markdown
-    assert "失效条件：若价格重新跌回 4748.00 下方，当前多头结构可视为失效。" in markdown
+    assert "仓位：可轻仓试仓，优先分两段止盈，第一目标落袋后再看延续。" in markdown
+    assert "失效：若价格重新跌回 4748.00 下方，当前多头结构可视为失效。" in markdown
+    assert "**背景**" in markdown
+    assert "外部背景：宏观数据：美国10年期实际利率 当前值 1.85，较前值 -0.06，背景偏多" in markdown
+    assert "技术面" not in markdown
 
 
 def test_send_test_notification_returns_channel_messages(monkeypatch):

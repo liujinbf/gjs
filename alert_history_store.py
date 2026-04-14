@@ -132,6 +132,7 @@ def _item_action_meta(item: dict, fallback_trade_meta: dict | None = None) -> di
     result = {
         "baseline_latest_price": float(item.get("latest_price", 0.0) or 0.0),
         "baseline_spread_points": float(item.get("spread_points", 0.0) or 0.0),
+        "price_point": float(item.get("point", 0.0) or 0.0),
         "trade_grade": str(item.get("trade_grade", "") or "").strip() or trade_meta.get("trade_grade", ""),
         "trade_grade_detail": _normalize_text(item.get("trade_grade_detail", "")) or trade_meta.get("trade_grade_detail", ""),
         "trade_next_review": _normalize_text(item.get("trade_next_review", "")) or trade_meta.get("trade_next_review", ""),
@@ -169,6 +170,34 @@ def _item_action_meta(item: dict, fallback_trade_meta: dict | None = None) -> di
     if result["risk_reward_ratio"] <= 0:
         result.pop("risk_reward_ratio", None)
     return result
+
+
+def _pick_representative_item(items_by_symbol: dict[str, dict]) -> dict:
+    candidates = [dict(item or {}) for item in items_by_symbol.values() if bool(item.get("has_live_quote", False))]
+    if not candidates:
+        return {}
+
+    def _trade_rank(item: dict) -> int:
+        grade = _normalize_text(item.get("trade_grade", ""))
+        if grade == "可轻仓试仓":
+            return 4
+        if grade == "当前不宜出手":
+            return 3
+        if grade == "等待事件落地":
+            return 2
+        if grade == "只适合观察":
+            return 1
+        return 0
+
+    candidates.sort(
+        key=lambda item: (
+            _trade_rank(item),
+            float(item.get("risk_reward_ratio", 0.0) or 0.0),
+            float(item.get("latest_price", 0.0) or 0.0),
+        ),
+        reverse=True,
+    )
+    return candidates[0]
 
 
 def _find_latest_symbol_event(symbol: str, history_file: Path | None = None) -> dict | None:
@@ -296,6 +325,15 @@ def _build_structure_entries(
                     **_item_action_meta(item, fallback_trade_meta=trade_meta),
                     **_item_event_meta(item, fallback=snapshot_event_meta),
                 },
+                sig_extra=[
+                    symbol,
+                    _normalize_text(item.get("signal_side", "")),
+                    _normalize_text(item.get("trade_grade_detail", "")),
+                    _normalize_text(item.get("risk_reward_state", "")),
+                    _normalize_text(item.get("risk_reward_entry_zone_text", "")),
+                    _normalize_text(item.get("external_bias_note", "")),
+                    _normalize_text(item.get("event_active_name", "")),
+                ],
             )
         )
     return result
@@ -332,9 +370,84 @@ def _build_external_source_entries(snapshot: dict, trade_meta: dict, snapshot_ev
                     **trade_meta,
                     **snapshot_event_meta,
                 },
+                sig_extra=[source_key, detail, tone],
             )
         )
     return entries
+
+
+def _build_macro_entry(
+    snapshot: dict,
+    items_by_symbol: dict[str, dict],
+    trade_meta: dict,
+    snapshot_event_meta: dict,
+) -> dict | None:
+    alert_text = _normalize_text(snapshot.get("alert_text", ""))
+    if not alert_text:
+        return None
+
+    representative_item = _pick_representative_item(items_by_symbol)
+    event_name = _normalize_text(snapshot_event_meta.get("event_name", ""))
+    event_importance_text = _normalize_text(snapshot_event_meta.get("event_importance_text", ""))
+    event_result_summary_text = _normalize_text(snapshot.get("event_result_summary_text", ""))
+    external_bias_notes = [
+        _normalize_text(item.get("external_bias_note", ""))
+        for item in items_by_symbol.values()
+        if _normalize_text(item.get("external_bias_note", ""))
+    ]
+    has_actionable_event = bool(event_name or event_result_summary_text or external_bias_notes)
+    if not has_actionable_event:
+        return None
+
+    representative_trade_meta = trade_meta
+    representative_event_meta = snapshot_event_meta
+    representative_extra = {}
+    if representative_item:
+        representative_trade_meta = {
+            "trade_grade": str(representative_item.get("trade_grade", "") or "").strip() or trade_meta.get("trade_grade", ""),
+            "trade_grade_detail": _normalize_text(representative_item.get("trade_grade_detail", "")) or trade_meta.get("trade_grade_detail", ""),
+            "trade_next_review": _normalize_text(representative_item.get("trade_next_review", "")) or trade_meta.get("trade_next_review", ""),
+        }
+        representative_event_meta = _item_event_meta(representative_item, fallback=snapshot_event_meta)
+        representative_extra = {
+            "symbol": str(representative_item.get("symbol", "") or "").strip().upper(),
+            **_item_action_meta(representative_item, fallback_trade_meta=representative_trade_meta),
+            **representative_event_meta,
+        }
+
+    detail_parts = [alert_text]
+    if event_result_summary_text:
+        detail_parts.append(event_result_summary_text)
+    if external_bias_notes:
+        detail_parts.append(external_bias_notes[0])
+    detail = " ".join(part for part in detail_parts if part)
+    title = "宏观提醒"
+    if event_name:
+        title = f"{event_name} 宏观提醒"
+    elif event_importance_text:
+        title = f"{event_importance_text}宏观提醒"
+
+    return _build_entry(
+        "macro",
+        title,
+        detail,
+        "warning" if "高影响" in event_importance_text or event_result_summary_text else "accent",
+        str(snapshot.get("last_refresh_text", "") or "").strip(),
+        extra={
+            **representative_trade_meta,
+            **representative_event_meta,
+            **representative_extra,
+            "macro_actionable": True,
+            "event_result_summary_text": event_result_summary_text,
+        },
+        sig_extra=[
+            event_name or "macro",
+            event_result_summary_text,
+            representative_trade_meta.get("trade_grade", ""),
+            representative_trade_meta.get("trade_grade_detail", ""),
+            representative_extra.get("symbol", ""),
+        ],
+    )
 
 
 def build_snapshot_history_entries(snapshot: dict, history_file: Path | None = None) -> list[dict]:
@@ -405,28 +518,9 @@ def build_snapshot_history_entries(snapshot: dict, history_file: Path | None = N
 
     entries.extend(_build_structure_entries(snapshot, items_by_symbol, trade_meta, snapshot_event_meta))
 
-    alert_text = _normalize_text(snapshot.get("alert_text", ""))
-    if alert_text:
-        # 宏观提醒签名策略：以「下一个关注事件名称 + 出手分级」作为区分键。
-        # 只有当下一个关注事件或市场出手分级真正发生改变时，才触发新推送。
-        # 修复：避免每小时重复推送内容几乎相同的通用宏观建议。
-        macro_next_event = _normalize_text(
-            snapshot_event_meta.get("event_name", "")
-            or snapshot.get("event_next_name", "")
-            or "no_event"
-        )
-        macro_grade = _normalize_text(trade_meta.get("trade_grade", "") or "observe")
-        entries.append(
-            _build_entry(
-                "macro",
-                "宏观提醒",
-                alert_text,
-                "warning",
-                occurred_at,
-                extra={**trade_meta, **snapshot_event_meta},
-                sig_extra=[macro_next_event, macro_grade],
-            )
-        )
+    macro_entry = _build_macro_entry(snapshot, items_by_symbol, trade_meta, snapshot_event_meta)
+    if macro_entry:
+        entries.append(macro_entry)
     entries.extend(_build_external_source_entries(snapshot, trade_meta, snapshot_event_meta))
     entries.extend(
         _build_spread_recovery_entries(

@@ -32,11 +32,15 @@ def test_build_snapshot_history_entries_collects_spread_macro_and_session_items(
         "event_risk_mode_text": "事件前高敏",
         "event_active_name": "美国 CPI",
         "event_active_time_text": "2026-04-12 20:30:00",
+        "event_active_importance_text": "高影响",
+        "event_result_summary_text": "事件结果：美国 CPI：实际 3.4%，预期 3.2%，结果解读偏空。",
         "items": [
             {
                 "symbol": "XAUUSD",
                 "latest_price": 4759.82,
                 "spread_points": 250.0,
+                "point": 0.01,
+                "has_live_quote": True,
                 "trade_grade": "当前不宜出手",
                 "trade_grade_detail": "点差明显放大，先不要追单。",
                 "trade_next_review": "等点差恢复正常后再看。",
@@ -51,14 +55,40 @@ def test_build_snapshot_history_entries_collects_spread_macro_and_session_items(
     titles = [item["title"] for item in entries]
     assert "休市 / 暂停提醒" in titles
     assert "XAUUSD 点差高警戒" in titles
-    assert "宏观提醒" in titles
+    assert "美国 CPI 宏观提醒" in titles
     assert "点差状态稳定" not in titles
     spread_entry = next(item for item in entries if item["title"] == "XAUUSD 点差高警戒")
     assert spread_entry["trade_grade"] == "当前不宜出手"
     assert spread_entry["event_importance_text"] == "高影响"
     assert "高影响窗口" in spread_entry["event_note"]
-    macro_entry = next(item for item in entries if item["title"] == "宏观提醒")
-    assert macro_entry["trade_grade"] == "等待事件落地"
+    macro_entry = next(item for item in entries if item["title"] == "美国 CPI 宏观提醒")
+    assert macro_entry["trade_grade"] == "当前不宜出手"
+    assert macro_entry["symbol"] == "XAUUSD"
+    assert macro_entry["baseline_latest_price"] == 4759.82
+
+
+def test_build_snapshot_history_entries_skips_generic_macro_broadcast_without_actionable_event():
+    snapshot = {
+        "last_refresh_text": "2026-04-12 12:00:00",
+        "trade_grade": "只适合观察",
+        "trade_grade_detail": "先观察。",
+        "trade_next_review": "稍后再看。",
+        "runtime_status_cards": [],
+        "spread_focus_cards": [],
+        "items": [
+            {
+                "symbol": "XAUUSD",
+                "latest_price": 4759.82,
+                "spread_points": 17.0,
+                "point": 0.01,
+                "has_live_quote": True,
+                "trade_grade": "只适合观察",
+            }
+        ],
+        "alert_text": "贵金属提醒：先看美元方向和点差。",
+    }
+    entries = build_snapshot_history_entries(snapshot)
+    assert all(item["category"] != "macro" for item in entries)
 
 
 def test_build_snapshot_history_entries_adds_structure_entry_with_action_meta():
@@ -74,6 +104,7 @@ def test_build_snapshot_history_entries_adds_structure_entry_with_action_meta():
                 "symbol": "XAUUSD",
                 "latest_price": 4759.82,
                 "spread_points": 17.0,
+                "point": 0.01,
                 "has_live_quote": True,
                 "tone": "success",
                 "trade_grade": "可轻仓试仓",
