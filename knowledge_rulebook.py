@@ -37,6 +37,19 @@ def _format_rule_line(row: sqlite3.Row, prefix: str = "") -> str:
     ).strip()
 
 
+def _classify_regime_status(row: sqlite3.Row) -> str:
+    sample_count = int(row["sample_count"] or 0)
+    success_rate = float(row["success_rate"] or 0.0)
+    score = float(row["score"] or 0.0)
+    if sample_count < 2:
+        return "insufficient"
+    if sample_count >= 3 and score >= 20.0 and success_rate >= 0.55:
+        return "preferred"
+    if score >= 0.0 and success_rate >= 0.45:
+        return "watch"
+    return "avoid"
+
+
 def build_rulebook(
     db_path: Path | str | None = None,
     horizon_min: int = 30,
@@ -142,85 +155,57 @@ def build_rulebook(
 
         regime_rows = []
         if regime_tag:
-            if governance_count > 0:
-                regime_rows = conn.execute(
-                    """
-                    SELECT
-                        kr.rule_text,
-                        kr.category,
-                        COUNT(*) AS sample_count,
-                        (
-                            COALESCE(SUM(CASE WHEN so.outcome_label = 'success' THEN 1 ELSE 0 END), 0) +
-                            COALESCE(SUM(CASE WHEN so.outcome_label = 'mixed' THEN 0.5 ELSE 0 END), 0)
-                        ) * 1.0 / NULLIF(
-                            COALESCE(SUM(CASE WHEN so.outcome_label IN ('success', 'mixed', 'fail') THEN 1 ELSE 0 END), 0),
-                            0
-                        ) AS success_rate,
-                        (
-                            COALESCE(SUM(CASE WHEN so.outcome_label = 'success' THEN 1 ELSE 0 END), 0) +
-                            COALESCE(SUM(CASE WHEN so.outcome_label = 'mixed' THEN 0.35 ELSE 0 END), 0) -
-                            COALESCE(SUM(CASE WHEN so.outcome_label = 'fail' THEN 1 ELSE 0 END), 0)
-                        ) * 100.0 / NULLIF(
-                            COALESCE(SUM(CASE WHEN so.outcome_label IN ('success', 'mixed', 'fail') THEN 1 ELSE 0 END), 0),
-                            0
-                        ) AS score
-                    FROM rule_governance rg
-                    JOIN knowledge_rules kr ON kr.id = rg.rule_id
-                    JOIN rule_snapshot_matches rm ON rm.rule_id = rg.rule_id
-                    JOIN market_snapshots ms ON ms.id = rm.snapshot_id
-                    JOIN snapshot_outcomes so ON so.snapshot_id = rm.snapshot_id AND so.horizon_min = rg.horizon_min
-                    WHERE rg.horizon_min = ?
-                      AND rg.governance_status IN ('active', 'watch')
-                      AND ms.regime_tag = ?
-                    GROUP BY rg.rule_id, kr.rule_text, kr.category
-                    HAVING COUNT(*) >= 1
-                    ORDER BY score DESC, sample_count DESC, rg.rule_id ASC
-                    LIMIT ?
-                    """,
-                    (int(horizon_min), regime_tag, max(1, int(validated_limit))),
-                ).fetchall()
-            else:
-                regime_rows = conn.execute(
-                    """
-                    SELECT
-                        kr.rule_text,
-                        kr.category,
-                        COUNT(*) AS sample_count,
-                        (
-                            COALESCE(SUM(CASE WHEN so.outcome_label = 'success' THEN 1 ELSE 0 END), 0) +
-                            COALESCE(SUM(CASE WHEN so.outcome_label = 'mixed' THEN 0.5 ELSE 0 END), 0)
-                        ) * 1.0 / NULLIF(
-                            COALESCE(SUM(CASE WHEN so.outcome_label IN ('success', 'mixed', 'fail') THEN 1 ELSE 0 END), 0),
-                            0
-                        ) AS success_rate,
-                        (
-                            COALESCE(SUM(CASE WHEN so.outcome_label = 'success' THEN 1 ELSE 0 END), 0) +
-                            COALESCE(SUM(CASE WHEN so.outcome_label = 'mixed' THEN 0.35 ELSE 0 END), 0) -
-                            COALESCE(SUM(CASE WHEN so.outcome_label = 'fail' THEN 1 ELSE 0 END), 0)
-                        ) * 100.0 / NULLIF(
-                            COALESCE(SUM(CASE WHEN so.outcome_label IN ('success', 'mixed', 'fail') THEN 1 ELSE 0 END), 0),
-                            0
-                        ) AS score
-                    FROM rule_scores rs
-                    JOIN knowledge_rules kr ON kr.id = rs.rule_id
-                    JOIN rule_snapshot_matches rm ON rm.rule_id = rs.rule_id
-                    JOIN market_snapshots ms ON ms.id = rm.snapshot_id
-                    JOIN snapshot_outcomes so ON so.snapshot_id = rm.snapshot_id AND so.horizon_min = rs.horizon_min
-                    WHERE rs.horizon_min = ?
-                      AND rs.validation_status IN ('validated', 'candidate')
-                      AND ms.regime_tag = ?
-                    GROUP BY rs.rule_id, kr.rule_text, kr.category
-                    HAVING COUNT(*) >= 1
-                    ORDER BY score DESC, sample_count DESC, rs.rule_id ASC
-                    LIMIT ?
-                    """,
-                    (int(horizon_min), regime_tag, max(1, int(validated_limit))),
-                ).fetchall()
+            regime_rows = conn.execute(
+                """
+                SELECT
+                    kr.rule_text,
+                    kr.category,
+                    COUNT(*) AS sample_count,
+                    (
+                        COALESCE(SUM(CASE WHEN so.outcome_label = 'success' THEN 1 ELSE 0 END), 0) +
+                        COALESCE(SUM(CASE WHEN so.outcome_label = 'mixed' THEN 0.5 ELSE 0 END), 0)
+                    ) * 1.0 / NULLIF(
+                        COALESCE(SUM(CASE WHEN so.outcome_label IN ('success', 'mixed', 'fail') THEN 1 ELSE 0 END), 0),
+                        0
+                    ) AS success_rate,
+                    (
+                        COALESCE(SUM(CASE WHEN so.outcome_label = 'success' THEN 1 ELSE 0 END), 0) +
+                        COALESCE(SUM(CASE WHEN so.outcome_label = 'mixed' THEN 0.35 ELSE 0 END), 0) -
+                        COALESCE(SUM(CASE WHEN so.outcome_label = 'fail' THEN 1 ELSE 0 END), 0)
+                    ) * 100.0 / NULLIF(
+                        COALESCE(SUM(CASE WHEN so.outcome_label IN ('success', 'mixed', 'fail') THEN 1 ELSE 0 END), 0),
+                        0
+                    ) AS score
+                FROM knowledge_rules kr
+                JOIN rule_snapshot_matches rm ON rm.rule_id = kr.id
+                JOIN market_snapshots ms ON ms.id = rm.snapshot_id
+                JOIN snapshot_outcomes so ON so.snapshot_id = rm.snapshot_id AND so.horizon_min = ?
+                WHERE ms.regime_tag = ?
+                GROUP BY kr.id, kr.rule_text, kr.category
+                HAVING COUNT(*) >= 1
+                ORDER BY score DESC, sample_count DESC, kr.id ASC
+                """,
+                (int(horizon_min), regime_tag),
+            ).fetchall()
 
     validated_rules = [_format_rule_line(row, prefix="- ") for row in active_rows]
     candidate_rules = [_format_rule_line(row, prefix="- ") for row in watch_rows]
     rejected_rules = [_format_rule_line(row, prefix="- ") for row in frozen_rows]
-    regime_rules = [_format_rule_line(row, prefix="- ") for row in regime_rows]
+    regime_preferred_rules = [
+        _format_rule_line(row, prefix="- ")
+        for row in regime_rows
+        if _classify_regime_status(row) == "preferred"
+    ][: max(1, int(validated_limit))]
+    regime_watch_rules = [
+        _format_rule_line(row, prefix="- ")
+        for row in regime_rows
+        if _classify_regime_status(row) == "watch"
+    ][: max(1, int(candidate_limit))]
+    regime_avoid_rules = [
+        _format_rule_line(row, prefix="- ")
+        for row in regime_rows
+        if _classify_regime_status(row) == "avoid"
+    ][: max(1, int(rejected_limit))]
     governance_summary = summarize_rule_governance(db_path=db_path, horizon_min=horizon_min)
 
     if validated_rules:
@@ -235,7 +220,13 @@ def build_rulebook(
 
     candidate_rules_text = "\n".join(candidate_rules) if candidate_rules else "暂无候选规则。"
     rejected_rules_text = "\n".join(rejected_rules) if rejected_rules else "暂无明确淘汰规则。"
-    regime_rules_text = "\n".join(regime_rules) if regime_rules else "当前环境样本仍不足，先参考全局规则并服从快照风控。"
+    regime_rules_text = (
+        "\n".join(regime_preferred_rules)
+        if regime_preferred_rules
+        else "当前环境样本仍不足，先参考全局规则并服从快照风控。"
+    )
+    regime_watch_rules_text = "\n".join(regime_watch_rules) if regime_watch_rules else "当前环境暂无明确观察规则。"
+    regime_avoid_rules_text = "\n".join(regime_avoid_rules) if regime_avoid_rules else "当前环境暂无明确回避规则。"
 
     result = {
         "horizon_min": int(horizon_min),
@@ -243,14 +234,19 @@ def build_rulebook(
         "validated_rules": validated_rules,
         "candidate_rules": candidate_rules,
         "rejected_rules": rejected_rules,
-        "regime_rules": regime_rules,
+        "regime_rules": regime_preferred_rules,
+        "regime_preferred_rules": regime_preferred_rules,
+        "regime_watch_rules": regime_watch_rules,
+        "regime_avoid_rules": regime_avoid_rules,
         "active_rules_text": active_rules_text,
         "candidate_rules_text": candidate_rules_text,
         "rejected_rules_text": rejected_rules_text,
         "regime_rules_text": regime_rules_text,
+        "regime_watch_rules_text": regime_watch_rules_text,
+        "regime_avoid_rules_text": regime_avoid_rules_text,
         "regime_summary_text": (
-            f"当前环境 {regime_tag.replace('_', ' ')} 下，优先参考 {len(regime_rules)} 条历史更稳规则。"
-            if regime_tag and regime_rules
+            f"当前环境 {regime_tag.replace('_', ' ')} 下，优先 {len(regime_preferred_rules)} 条，观察 {len(regime_watch_rules)} 条，回避 {len(regime_avoid_rules)} 条。"
+            if regime_tag and (regime_preferred_rules or regime_watch_rules or regime_avoid_rules)
             else (
                 f"当前环境 {regime_tag.replace('_', ' ')} 的样本仍不足，先参考全局规则。"
                 if regime_tag

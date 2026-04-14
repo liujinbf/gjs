@@ -62,6 +62,8 @@ def test_build_snapshot_prompt_contains_symbols_and_alerts():
         rulebook={
             "active_rules_text": "- [entry] 回调至关键支撑位企稳后介入（样本 8，成功率 63%，评分 32.0）",
             "regime_rules_text": "- [trend] 趋势扩张时优先等回踩确认，不追第一次远离（样本 6，成功率 67%，评分 35.0）",
+            "regime_watch_rules_text": "- [trend] 趋势扩张后若远离回踩区，先观察不要追（样本 3，成功率 50%，评分 8.0）",
+            "regime_avoid_rules_text": "- [directional] 趋势扩张时连续冲高直接追多（样本 4，成功率 25%，评分 -20.0）",
             "candidate_rules_text": "- [trend] 不追第一次突破，优先等回踩确认（样本 4，成功率 50%，评分 12.0）",
             "rejected_rules_text": "- [directional] 连续冲高时直接追多（样本 6，成功率 17%，评分 -40.0）",
         },
@@ -72,6 +74,8 @@ def test_build_snapshot_prompt_contains_symbols_and_alerts():
     assert "执行建议" in prompt
     assert "当前有效规则集" in prompt
     assert "当前环境优先规则" in prompt
+    assert "当前环境观察规则" in prompt
+    assert "当前环境回避规则" in prompt
     assert "暂不采用规则" in prompt
     assert "观察进场区间" in prompt
     assert "外部背景修正" in prompt

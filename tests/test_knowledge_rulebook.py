@@ -125,3 +125,5 @@ def test_build_rulebook_can_surface_regime_specific_rules(tmp_path):
     assert rulebook["current_regime_tag"] == "low_volatility_range"
     assert "当前环境" in rulebook["regime_summary_text"]
     assert rulebook["regime_rules_text"]
+    assert "当前环境暂无明确观察规则。" in rulebook["regime_watch_rules_text"] or rulebook["regime_watch_rules"]
+    assert "当前环境暂无明确回避规则。" in rulebook["regime_avoid_rules_text"] or rulebook["regime_avoid_rules"]
