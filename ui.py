@@ -28,7 +28,7 @@ from monitor_engine import run_monitor_cycle
 from mt5_gateway import shutdown_connection
 from notification import get_notification_status, send_ai_brief_notification, send_learning_report_notification, send_notifications
 from settings_dialog import MetalSettingsDialog
-from sim_signal_bridge import build_rule_sim_signal
+from sim_signal_bridge import build_rule_sim_signal_decision
 from ui_panels import DashboardMetricsPanel, InsightPanel, LeftTabPanel, WatchListTable
 
 SNAPSHOT_TASK_QUEUE: queue.Queue = queue.Queue(maxsize=100)
@@ -292,7 +292,7 @@ def process_snapshot_side_effects(
             for item in list(SIM_ENGINE.get_open_positions() or [])
             if str(item.get("symbol", "") or "").strip()
         }
-        rule_signal = build_rule_sim_signal(snapshot)
+        rule_signal, rule_reason = build_rule_sim_signal_decision(snapshot)
         if rule_signal and str(rule_signal.get("symbol", "") or "").strip().upper() not in open_symbols:
             sim_success, sim_message = SIM_ENGINE.execute_signal(rule_signal)
             if sim_success:
@@ -302,6 +302,8 @@ def process_snapshot_side_effects(
                 )
             else:
                 result["log_lines"].append(f"[模拟盘规则跟单被拒] {sim_message}")
+        elif rule_reason:
+            result["log_lines"].append(f"[模拟盘规则候选未执行] {rule_reason}")
 
     if run_backtest:
         try:

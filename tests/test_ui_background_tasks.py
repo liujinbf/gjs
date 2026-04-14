@@ -124,3 +124,40 @@ def test_queue_latest_task_drops_oldest_snapshot_when_full(monkeypatch):
     assert dropped_count == 1
     queued = task_queue.get_nowait()
     assert queued["snapshot"]["last_refresh_text"] == "new"
+
+
+def test_process_snapshot_side_effects_logs_reason_when_rule_signal_not_executed(monkeypatch):
+    monkeypatch.setattr(ui, "record_snapshot", lambda snapshot: {"inserted_count": 0, "inserted_snapshot_ids": [], "snapshot_bindings": {}})
+    monkeypatch.setattr(ui, "build_snapshot_history_entries", lambda snapshot: [])
+    monkeypatch.setattr(ui, "append_history_entries", lambda entries: 0)
+    monkeypatch.setattr(ui, "send_notifications", lambda entries, config: {"messages": [], "errors": []})
+    monkeypatch.setattr(ui.SIM_ENGINE, "update_prices", lambda quotes: None)
+    monkeypatch.setattr(ui.SIM_ENGINE, "get_open_positions", lambda: [])
+
+    snapshot = {
+        "last_refresh_text": "2026-04-13 10:00:00",
+        "items": [
+            {
+                "symbol": "XAUUSD",
+                "latest_price": 4780.0,
+                "bid": 4779.9,
+                "ask": 4780.1,
+                "has_live_quote": True,
+                "trade_grade": "可轻仓试仓",
+                "trade_grade_source": "structure",
+                "signal_side": "long",
+                "risk_reward_ready": True,
+                "risk_reward_ratio": 2.2,
+                "risk_reward_stop_price": 4748.0,
+                "risk_reward_target_price": 4810.0,
+                "risk_reward_entry_zone_low": 4750.0,
+                "risk_reward_entry_zone_high": 4765.0,
+                "atr14": 18.0,
+            }
+        ],
+    }
+    config = SimpleNamespace(notify_cooldown_min=30)
+
+    result = ui.process_snapshot_side_effects(snapshot, config, run_backtest=False)
+
+    assert any("模拟盘规则候选未执行" in line for line in result["log_lines"])
