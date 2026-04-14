@@ -43,10 +43,19 @@ def build_rulebook(
     validated_limit: int = 6,
     candidate_limit: int = 4,
     rejected_limit: int = 3,
+    current_regime_tag: str = "",
 ) -> dict:
     # N-012 修复：5 分钟内存缓存，相同参数直接返回缓存结果，避免高频查 SQLite
     global _rulebook_cache
-    _cache_key = (str(db_path), int(horizon_min), int(validated_limit), int(candidate_limit), int(rejected_limit))
+    regime_tag = _normalize_text(current_regime_tag).lower().replace(" ", "_")
+    _cache_key = (
+        str(db_path),
+        int(horizon_min),
+        int(validated_limit),
+        int(candidate_limit),
+        int(rejected_limit),
+        regime_tag,
+    )
     _cached = _rulebook_cache.get(_cache_key)
     if _cached and _time.time() < _cached["expires_at"]:
         return _cached["result"]
@@ -131,9 +140,87 @@ def build_rulebook(
                 (int(horizon_min), max(1, int(rejected_limit))),
             ).fetchall()
 
+        regime_rows = []
+        if regime_tag:
+            if governance_count > 0:
+                regime_rows = conn.execute(
+                    """
+                    SELECT
+                        kr.rule_text,
+                        kr.category,
+                        COUNT(*) AS sample_count,
+                        (
+                            COALESCE(SUM(CASE WHEN so.outcome_label = 'success' THEN 1 ELSE 0 END), 0) +
+                            COALESCE(SUM(CASE WHEN so.outcome_label = 'mixed' THEN 0.5 ELSE 0 END), 0)
+                        ) * 1.0 / NULLIF(
+                            COALESCE(SUM(CASE WHEN so.outcome_label IN ('success', 'mixed', 'fail') THEN 1 ELSE 0 END), 0),
+                            0
+                        ) AS success_rate,
+                        (
+                            COALESCE(SUM(CASE WHEN so.outcome_label = 'success' THEN 1 ELSE 0 END), 0) +
+                            COALESCE(SUM(CASE WHEN so.outcome_label = 'mixed' THEN 0.35 ELSE 0 END), 0) -
+                            COALESCE(SUM(CASE WHEN so.outcome_label = 'fail' THEN 1 ELSE 0 END), 0)
+                        ) * 100.0 / NULLIF(
+                            COALESCE(SUM(CASE WHEN so.outcome_label IN ('success', 'mixed', 'fail') THEN 1 ELSE 0 END), 0),
+                            0
+                        ) AS score
+                    FROM rule_governance rg
+                    JOIN knowledge_rules kr ON kr.id = rg.rule_id
+                    JOIN rule_snapshot_matches rm ON rm.rule_id = rg.rule_id
+                    JOIN market_snapshots ms ON ms.id = rm.snapshot_id
+                    JOIN snapshot_outcomes so ON so.snapshot_id = rm.snapshot_id AND so.horizon_min = rg.horizon_min
+                    WHERE rg.horizon_min = ?
+                      AND rg.governance_status IN ('active', 'watch')
+                      AND ms.regime_tag = ?
+                    GROUP BY rg.rule_id, kr.rule_text, kr.category
+                    HAVING COUNT(*) >= 1
+                    ORDER BY score DESC, sample_count DESC, rg.rule_id ASC
+                    LIMIT ?
+                    """,
+                    (int(horizon_min), regime_tag, max(1, int(validated_limit))),
+                ).fetchall()
+            else:
+                regime_rows = conn.execute(
+                    """
+                    SELECT
+                        kr.rule_text,
+                        kr.category,
+                        COUNT(*) AS sample_count,
+                        (
+                            COALESCE(SUM(CASE WHEN so.outcome_label = 'success' THEN 1 ELSE 0 END), 0) +
+                            COALESCE(SUM(CASE WHEN so.outcome_label = 'mixed' THEN 0.5 ELSE 0 END), 0)
+                        ) * 1.0 / NULLIF(
+                            COALESCE(SUM(CASE WHEN so.outcome_label IN ('success', 'mixed', 'fail') THEN 1 ELSE 0 END), 0),
+                            0
+                        ) AS success_rate,
+                        (
+                            COALESCE(SUM(CASE WHEN so.outcome_label = 'success' THEN 1 ELSE 0 END), 0) +
+                            COALESCE(SUM(CASE WHEN so.outcome_label = 'mixed' THEN 0.35 ELSE 0 END), 0) -
+                            COALESCE(SUM(CASE WHEN so.outcome_label = 'fail' THEN 1 ELSE 0 END), 0)
+                        ) * 100.0 / NULLIF(
+                            COALESCE(SUM(CASE WHEN so.outcome_label IN ('success', 'mixed', 'fail') THEN 1 ELSE 0 END), 0),
+                            0
+                        ) AS score
+                    FROM rule_scores rs
+                    JOIN knowledge_rules kr ON kr.id = rs.rule_id
+                    JOIN rule_snapshot_matches rm ON rm.rule_id = rs.rule_id
+                    JOIN market_snapshots ms ON ms.id = rm.snapshot_id
+                    JOIN snapshot_outcomes so ON so.snapshot_id = rm.snapshot_id AND so.horizon_min = rs.horizon_min
+                    WHERE rs.horizon_min = ?
+                      AND rs.validation_status IN ('validated', 'candidate')
+                      AND ms.regime_tag = ?
+                    GROUP BY rs.rule_id, kr.rule_text, kr.category
+                    HAVING COUNT(*) >= 1
+                    ORDER BY score DESC, sample_count DESC, rs.rule_id ASC
+                    LIMIT ?
+                    """,
+                    (int(horizon_min), regime_tag, max(1, int(validated_limit))),
+                ).fetchall()
+
     validated_rules = [_format_rule_line(row, prefix="- ") for row in active_rows]
     candidate_rules = [_format_rule_line(row, prefix="- ") for row in watch_rows]
     rejected_rules = [_format_rule_line(row, prefix="- ") for row in frozen_rows]
+    regime_rules = [_format_rule_line(row, prefix="- ") for row in regime_rows]
     governance_summary = summarize_rule_governance(db_path=db_path, horizon_min=horizon_min)
 
     if validated_rules:
@@ -148,15 +235,28 @@ def build_rulebook(
 
     candidate_rules_text = "\n".join(candidate_rules) if candidate_rules else "暂无候选规则。"
     rejected_rules_text = "\n".join(rejected_rules) if rejected_rules else "暂无明确淘汰规则。"
+    regime_rules_text = "\n".join(regime_rules) if regime_rules else "当前环境样本仍不足，先参考全局规则并服从快照风控。"
 
     result = {
         "horizon_min": int(horizon_min),
+        "current_regime_tag": regime_tag,
         "validated_rules": validated_rules,
         "candidate_rules": candidate_rules,
         "rejected_rules": rejected_rules,
+        "regime_rules": regime_rules,
         "active_rules_text": active_rules_text,
         "candidate_rules_text": candidate_rules_text,
         "rejected_rules_text": rejected_rules_text,
+        "regime_rules_text": regime_rules_text,
+        "regime_summary_text": (
+            f"当前环境 {regime_tag.replace('_', ' ')} 下，优先参考 {len(regime_rules)} 条历史更稳规则。"
+            if regime_tag and regime_rules
+            else (
+                f"当前环境 {regime_tag.replace('_', ' ')} 的样本仍不足，先参考全局规则。"
+                if regime_tag
+                else ""
+            )
+        ),
         "governance_summary_text": governance_summary.get("summary_text", ""),
         "summary_text": (
             f"{active_summary} 已验证 {len(validated_rules)} 条，"

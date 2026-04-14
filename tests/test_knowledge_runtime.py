@@ -13,6 +13,8 @@ def _build_snapshot(snapshot_time: str, price: float, trade_grade: str = "可轻
         "last_refresh_text": snapshot_time,
         "event_risk_mode_text": "正常观察",
         "event_active_name": "",
+        "regime_tag": "trend_expansion",
+        "regime_text": "趋势扩张",
         "summary_text": "测试快照",
         "items": [
             {
@@ -44,6 +46,9 @@ def _build_snapshot(snapshot_time: str, price: float, trade_grade: str = "可轻
                 "status_text": "实时报价",
                 "quote_text": "Bid 100.00 / Ask 100.18",
                 "execution_note": "测试执行建议",
+                "regime_tag": "trend_expansion",
+                "regime_text": "趋势扩张",
+                "regime_reason": "多周期同向偏多。",
                 "intraday_context_text": "近1小时偏多",
                 "multi_timeframe_context_text": "多周期同向偏多",
             }
@@ -72,6 +77,13 @@ def test_record_snapshot_and_backfill_outcomes(tmp_path):
     assert result["labeled_count"] >= 2
     assert stats_30m["total_count"] >= 2
     assert stats_30m["success_count"] >= 1
+
+    import sqlite3
+
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute("SELECT regime_tag, regime_text FROM market_snapshots LIMIT 1").fetchone()
+    conn.close()
+    assert row == ("trend_expansion", "趋势扩张")
 
 
 def test_backfill_marks_non_signal_snapshot_as_observe(tmp_path):

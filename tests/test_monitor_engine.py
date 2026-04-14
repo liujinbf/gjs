@@ -878,3 +878,34 @@ def test_build_snapshot_from_rows_tracks_alert_state_transition(tmp_path):
     assert any("状态迁移" in card["detail"] for card in second_snapshot["alert_status_cards"])
     assert "近30分钟迁移" in second_snapshot["summary_text"]
     assert "EURUSD：高影响事件前 -> 高影响事件后观察" in second_snapshot["alert_transition_summary_text"]
+
+
+def test_build_snapshot_from_rows_includes_regime_summary():
+    snapshot = build_snapshot_from_rows(
+        ["XAUUSD"],
+        [
+            {
+                "symbol": "XAUUSD",
+                "latest_price": 4759.82,
+                "bid": 4759.74,
+                "ask": 4759.91,
+                "spread_points": 17,
+                "point": 0.01,
+                "status": "实时报价",
+                "has_live_quote": True,
+                "atr14": 16.0,
+                "intraday_volatility": "normal",
+                "intraday_bias": "bullish",
+                "multi_timeframe_alignment": "aligned",
+                "multi_timeframe_bias": "bullish",
+                "breakout_state": "confirmed_above",
+                "retest_state": "confirmed_support",
+            }
+        ],
+        True,
+        "MT5 连接成功。",
+        event_risk_mode="normal",
+    )
+    assert snapshot["regime_tag"] == "trend_expansion"
+    assert "趋势扩张" in snapshot["regime_summary_text"]
+    assert snapshot["items"][0]["regime_text"] == "趋势扩张"

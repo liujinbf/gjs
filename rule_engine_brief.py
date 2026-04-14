@@ -182,12 +182,12 @@ def _get_event_text(snapshot: dict) -> str:
     return "暂无重大宏观窗口，关注盘中价格结构变化。"
 
 
-def _get_rulebook_text() -> str:
+def _get_rulebook_text(snapshot: dict | None = None) -> str:
     """从知识库拉取当前有效规则摘要（最多取前 3 条）。"""
     try:
         from knowledge_rulebook import build_rulebook
-        rulebook = build_rulebook()
-        active = _ss(rulebook.get("active_rules_text", ""), "")
+        rulebook = build_rulebook(current_regime_tag=_ss((snapshot or {}).get("regime_tag", ""), ""))
+        active = _ss(rulebook.get("regime_rules_text", ""), "") or _ss(rulebook.get("active_rules_text", ""), "")
         if active and "暂无" not in active:
             rules = [r.strip() for r in active.split("\n") if r.strip()][:3]
             return "；".join(rules) if rules else "暂无有效规则"
@@ -231,7 +231,7 @@ def generate_rule_engine_brief(snapshot: dict) -> dict:
     h4_summary = _ss(item.get("tech_summary_h4", ""), "")
     vix_text = _get_vix_text(snapshot)
     event_text = _get_event_text(snapshot)
-    rule_text = _get_rulebook_text()
+    rule_text = _get_rulebook_text(snapshot)
 
     # 布林带止损/目标 fallback（若 R/R 计算完成则用 R/R 数据）
     boll_upper = _sf(item.get("bollinger_upper"))

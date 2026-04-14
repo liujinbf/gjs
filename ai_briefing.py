@@ -37,7 +37,10 @@ def build_snapshot_prompt(snapshot: dict, rulebook: dict | None = None) -> str:
     market_text = str(snapshot_copy.get("market_text", "") or "").strip()
     snapshot_copy["market_text"] = market_text + "\n" + wr_text if market_text else wr_text
 
-    effective_rulebook = dict(rulebook or build_rulebook())
+    effective_rulebook = dict(
+        rulebook
+        or build_rulebook(current_regime_tag=str(snapshot_copy.get("regime_tag", "") or "").strip())
+    )
     return build_metal_brief_prompt(snapshot_copy, rulebook=effective_rulebook)
 
 
@@ -281,7 +284,7 @@ def request_ai_brief(
 
     api_base = str(config.ai_api_base or "https://api.siliconflow.cn/v1").strip().rstrip("/")
     model = str(config.ai_model or "deepseek-ai/DeepSeek-R1").strip()
-    rulebook = build_rulebook()
+    rulebook = build_rulebook(current_regime_tag=str(snapshot.get("regime_tag", "") or "").strip())
     prompt = build_snapshot_prompt(snapshot, rulebook=rulebook)
 
     try:

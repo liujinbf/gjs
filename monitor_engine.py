@@ -8,6 +8,7 @@ from alert_status_state import apply_alert_state_transitions, read_recent_transi
 from app_config import EVENT_RISK_MODES
 from macro_focus import build_global_market_focus, build_symbol_macro_focus
 from monitor_cards import build_alert_status_cards, build_event_window_cards, build_macro_data_status_card, build_runtime_status_cards, build_spread_focus_cards
+from regime_classifier import build_snapshot_regime_summary, classify_market_regime
 from risk_reward import analyze_risk_reward
 from monitor_rules import (
     build_portfolio_trade_grade,
@@ -239,6 +240,7 @@ def build_snapshot_from_rows(
             item_event_meta,
             latest_symbol_event=latest_symbol_events.get(str(symbol).strip().upper()),
         )
+        regime_meta = classify_market_regime(symbol, enriched_row, tone, item_event_meta)
         execution_segments = [
             f"{trade_grade['grade']}：{trade_grade['detail'] if str(trade_grade.get('source', '') or '').strip() == 'event' else execution_note}"
         ]
@@ -334,6 +336,10 @@ def build_snapshot_from_rows(
                 "alert_state_detail": alert_state["alert_state_detail"],
                 "alert_state_tone": alert_state["alert_state_tone"],
                 "alert_state_rank": int(alert_state["alert_state_rank"] or 0),
+                "regime_tag": str(regime_meta.get("regime_tag", "") or "").strip(),
+                "regime_text": str(regime_meta.get("regime_text", "") or "").strip(),
+                "regime_reason": str(regime_meta.get("regime_reason", "") or "").strip(),
+                "regime_rank": int(regime_meta.get("regime_rank", 0) or 0),
                 "tone": tone,
                 "signal_side": signal_side,
                 "signal_side_text": signal_side_text,
@@ -364,6 +370,7 @@ def build_snapshot_from_rows(
     items = apply_alert_state_transitions(items, state_file=status_state_file, now=snapshot_time)
     recent_transitions = read_recent_transitions(state_file=status_state_file, now=snapshot_time)
     market_focus = build_global_market_focus(symbols, event_context=context)
+    regime_summary = build_snapshot_regime_summary(items)
     portfolio_grade = build_portfolio_trade_grade(
         items,
         connected,
@@ -375,6 +382,7 @@ def build_snapshot_from_rows(
         f"当前共观察 {len(symbols)} 个品种，实时报价 {live_count} 个，休市或暂无报价 {inactive_count} 个。",
         f"事件纪律：{EVENT_RISK_MODES.get(str(event_risk_mode or 'normal').strip().lower(), '正常观察')}。",
         f"出手分级：{portfolio_grade['grade']}。{portfolio_grade['detail']}",
+        regime_summary.get("regime_summary_text", "") or "当前环境样本不足，先服从点差与事件窗口纪律。",
         market_focus.get("hint_text", "") or "先看点差、美元方向和宏观事件窗口。",
     ]
     intraday_digest = [
@@ -469,6 +477,9 @@ def build_snapshot_from_rows(
         "status_tone": "success" if connected else "negative",
         "status_hint": connection_message or "可继续观察点差、关键位和宏观窗口。",
         "summary_text": "\n".join(line for line in summary_lines if str(line).strip()),
+        "regime_tag": str(regime_summary.get("regime_tag", "") or "").strip(),
+        "regime_text": str(regime_summary.get("regime_text", "") or "").strip(),
+        "regime_summary_text": str(regime_summary.get("regime_summary_text", "") or "").strip(),
         "alert_text": market_focus.get("alert_text", ""),
         "market_text": market_focus.get("market_text", ""),
         "trade_grade": portfolio_grade["grade"],

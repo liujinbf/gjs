@@ -129,6 +129,8 @@ def _snapshot_text(snapshot: sqlite3.Row) -> str:
         _normalize_text(snapshot["event_active_name"]),
         _normalize_text(snapshot["event_importance_text"]),
         _normalize_text(snapshot["event_note"]),
+        _normalize_text(snapshot["regime_tag"]),
+        _normalize_text(snapshot["regime_text"]),
         _normalize_text(snapshot["signal_side"]),
         _load_feature_text(str(snapshot["feature_json"] or "{}")),
     ]
@@ -230,7 +232,7 @@ def _fetch_snapshots(conn: sqlite3.Connection, snapshot_ids: list[int] | None = 
         return conn.execute(
             f"""
             SELECT id, symbol, trade_grade, trade_grade_source, alert_state_text, event_risk_mode_text,
-                   event_active_name, event_importance_text, event_note, signal_side, feature_json
+                   event_active_name, event_importance_text, event_note, regime_tag, regime_text, signal_side, feature_json
             FROM market_snapshots
             WHERE id IN ({placeholders})
             ORDER BY id ASC
@@ -240,7 +242,7 @@ def _fetch_snapshots(conn: sqlite3.Connection, snapshot_ids: list[int] | None = 
     return conn.execute(
         """
         SELECT id, symbol, trade_grade, trade_grade_source, alert_state_text, event_risk_mode_text,
-               event_active_name, event_importance_text, event_note, signal_side, feature_json
+               event_active_name, event_importance_text, event_note, regime_tag, regime_text, signal_side, feature_json
         FROM market_snapshots
         ORDER BY id ASC
         """

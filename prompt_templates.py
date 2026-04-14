@@ -105,6 +105,9 @@ AI_BRIEF_TASK_TEMPLATE = """\
 当前有效规则集：
 {rulebook_text}
 
+当前环境优先规则：
+{regime_rulebook_text}
+
 候选观察规则：
 {candidate_rulebook_text}
 
@@ -254,7 +257,8 @@ def _build_item_lines(snapshot: dict) -> str:
         tech_summary = str(item.get("tech_summary", "") or "").strip()
         line = (
             f"- {symbol} | 最新价 {latest_text} | 报价结构 {quote_text} | "
-            f"报价状态 {status_text} | 宏观提醒 {macro_focus} | 执行提醒 {execution_note}"
+            f"报价状态 {status_text} | 市场环境 {str(item.get('regime_text', '--') or '--').strip()} | "
+            f"宏观提醒 {macro_focus} | 执行提醒 {execution_note}"
         )
         if tech_summary:
             line += f"\n  技术指标(H1节奏): {tech_summary}"
@@ -338,6 +342,7 @@ def build_metal_brief_prompt(snapshot: dict, rulebook: dict | None = None) -> st
         market_text=str(snapshot.get("market_text", "") or "").strip() or "暂无市场提示",
         macro_data_text=_build_macro_data_lines(snapshot),
         rulebook_text=str(rulebook.get("active_rules_text", "") or "").strip() or "暂无已验证规则，优先服从当前快照。",
+        regime_rulebook_text=str(rulebook.get("regime_rules_text", "") or "").strip() or "当前环境样本仍不足，先参考全局规则。",
         candidate_rulebook_text=str(rulebook.get("candidate_rules_text", "") or "").strip() or "暂无候选规则。",
         rejected_rulebook_text=str(rulebook.get("rejected_rules_text", "") or "").strip() or "暂无明确淘汰规则。",
         item_lines=_build_item_lines(snapshot),

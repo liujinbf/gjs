@@ -84,6 +84,9 @@ def _build_feature_payload(snapshot: dict, item: dict) -> dict:
     return {
         "atr14": float(item.get("atr14", 0.0) or 0.0),
         "atr14_h4": float(item.get("atr14_h4", 0.0) or 0.0),
+        "regime_tag": _normalize_text(item.get("regime_tag", "")),
+        "regime_text": _normalize_text(item.get("regime_text", "")),
+        "regime_reason": _normalize_text(item.get("regime_reason", "")),
         "trade_grade_detail": _normalize_text(item.get("trade_grade_detail", "")),
         "trade_next_review": _normalize_text(item.get("trade_next_review", "")),
         "status_text": _normalize_text(item.get("status_text", "")),
@@ -160,8 +163,9 @@ def record_snapshot(snapshot: dict, db_path: Path | str | None = None) -> dict:
                 INSERT OR IGNORE INTO market_snapshots (
                     snapshot_time, symbol, latest_price, spread_points, has_live_quote, tone,
                     trade_grade, trade_grade_source, alert_state_text, event_risk_mode_text,
-                    event_active_name, event_importance_text, event_note, signal_side, feature_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    event_active_name, event_importance_text, event_note, signal_side,
+                    regime_tag, regime_text, feature_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot_time,
@@ -178,6 +182,8 @@ def record_snapshot(snapshot: dict, db_path: Path | str | None = None) -> dict:
                     _normalize_text(item.get("event_importance_text", "")),
                     _normalize_text(item.get("event_note", "")),
                     _infer_signal_side(item),
+                    _normalize_text(item.get("regime_tag", "")) or _normalize_text(snapshot.get("regime_tag", "")),
+                    _normalize_text(item.get("regime_text", "")) or _normalize_text(snapshot.get("regime_text", "")),
                     feature_json,
                     snapshot_time,
                 ),

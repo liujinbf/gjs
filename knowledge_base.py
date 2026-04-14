@@ -234,6 +234,8 @@ def init_knowledge_base(db_path: Path | str | None = None) -> Path:
                 event_importance_text TEXT NOT NULL DEFAULT '',
                 event_note TEXT NOT NULL DEFAULT '',
                 signal_side TEXT NOT NULL DEFAULT 'neutral',
+                regime_tag TEXT NOT NULL DEFAULT '',
+                regime_text TEXT NOT NULL DEFAULT '',
                 feature_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL,
                 UNIQUE(snapshot_time, symbol)
@@ -398,6 +400,21 @@ def init_knowledge_base(db_path: Path | str | None = None) -> Path:
             )
         except Exception:
             pass  # 列已存在，忽略
+        try:
+            conn.execute(
+                "ALTER TABLE market_snapshots ADD COLUMN regime_tag TEXT NOT NULL DEFAULT ''"
+            )
+        except Exception:
+            pass
+        try:
+            conn.execute(
+                "ALTER TABLE market_snapshots ADD COLUMN regime_text TEXT NOT NULL DEFAULT ''"
+            )
+        except Exception:
+            pass
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_market_snapshots_regime_time ON market_snapshots(regime_tag, snapshot_time)"
+        )
     return target
 
 
