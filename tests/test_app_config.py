@@ -48,6 +48,12 @@ def test_runtime_config_has_notify_defaults():
     assert hasattr(config, "event_feed_enabled")
     assert hasattr(config, "event_feed_url")
     assert hasattr(config, "event_feed_refresh_min")
+    assert hasattr(config, "notify_dnd_enabled")
+    assert hasattr(config, "notify_dnd_start_hour")
+    assert hasattr(config, "notify_dnd_end_hour")
+    assert hasattr(config, "overnight_spread_guard_enabled")
+    assert hasattr(config, "overnight_spread_guard_start_hour")
+    assert hasattr(config, "overnight_spread_guard_end_hour")
 
 
 def test_migrate_legacy_ai_and_notification_settings(tmp_path, monkeypatch):

@@ -229,6 +229,90 @@ def test_pick_notify_entries_allows_source_alert_entry():
     shutil.rmtree(state_dir)
 
 
+def test_pick_notify_entries_respects_dnd_for_market_alerts():
+    state_dir = ROOT / ".runtime_test_notify_dnd"
+    if state_dir.exists():
+        shutil.rmtree(state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_file = state_dir / "notify_state.json"
+
+    config = _build_config()
+    config.notify_dnd_enabled = True
+    config.notify_dnd_start_hour = 0
+    config.notify_dnd_end_hour = 7
+
+    picked = notification.pick_notify_entries(
+        [
+            {
+                "occurred_at": "2026-04-12 01:20:00",
+                "category": "spread",
+                "title": "XAUUSD 点差高警戒",
+                "detail": "当前点差明显放大。",
+                "tone": "warning",
+                "signature": "spread-dnd-1",
+            },
+            {
+                "occurred_at": "2026-04-12 01:21:00",
+                "category": "source",
+                "title": "宏观数据状态提醒",
+                "detail": "结构化宏观数据拉取失败：timeout",
+                "tone": "warning",
+                "signature": "source-dnd-1",
+                "source_name": "macro_data",
+            },
+        ],
+        config,
+        state_file=state_file,
+    )
+
+    assert len(picked) == 1
+    assert picked[0]["title"] == "宏观数据状态提醒"
+    shutil.rmtree(state_dir)
+
+
+def test_pick_notify_entries_skips_rollover_spread_between_five_and_seven():
+    state_dir = ROOT / ".runtime_test_notify_rollover"
+    if state_dir.exists():
+        shutil.rmtree(state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_file = state_dir / "notify_state.json"
+
+    config = _build_config()
+    config.notify_dnd_enabled = False
+    config.overnight_spread_guard_enabled = True
+    config.overnight_spread_guard_start_hour = 5
+    config.overnight_spread_guard_end_hour = 7
+
+    picked = notification.pick_notify_entries(
+        [
+            {
+                "occurred_at": "2026-04-12 05:30:00",
+                "category": "spread",
+                "title": "XAUUSD 点差高警戒",
+                "detail": "当前点差明显放大。",
+                "tone": "warning",
+                "signature": "spread-rollover-1",
+            },
+            {
+                "occurred_at": "2026-04-12 05:35:00",
+                "category": "macro",
+                "title": "宏观提醒",
+                "detail": "联储利率决议窗口内，先别抢第一脚。",
+                "tone": "warning",
+                "signature": "macro-rollover-1",
+                "event_importance_text": "高影响",
+                "event_name": "联储利率决议",
+            },
+        ],
+        config,
+        state_file=state_file,
+    )
+
+    assert len(picked) == 1
+    assert picked[0]["title"] == "宏观提醒"
+    shutil.rmtree(state_dir)
+
+
 def test_send_notifications_aggregates_same_group_entries(monkeypatch):
     state_dir = ROOT / ".runtime_test_notify_aggregate"
     if state_dir.exists():

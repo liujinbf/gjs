@@ -71,6 +71,12 @@ python main.py
 - `MACRO_DATA_FEED_REFRESH_MIN`
 - `LEARNING_PUSH_ENABLED`
 - `LEARNING_PUSH_MIN_INTERVAL_HOUR`
+- `NOTIFY_DND_ENABLED`
+- `NOTIFY_DND_START_HOUR`
+- `NOTIFY_DND_END_HOUR`
+- `OVERNIGHT_SPREAD_GUARD_ENABLED`
+- `OVERNIGHT_SPREAD_GUARD_START_HOUR`
+- `OVERNIGHT_SPREAD_GUARD_END_HOUR`
 - `DINGTALK_WEBHOOK`
 - `PUSHPLUS_TOKEN`
 - `NOTIFY_COOLDOWN_MIN`
@@ -120,6 +126,10 @@ python main.py
 - 如果你准备直接试跑，可以把 `.env` 中的 `MACRO_DATA_FEED_SPECS` 指向 `macro_data_sources.official.json`
 - 其中 `FRED` 需要 `FRED_API_KEY`，`BLS` 可匿名调用但建议配置 `BLS_API_KEY` 以获得更稳定的频率和参数支持
 - `LEARNING_PUSH_ENABLED=1` 后，知识库在形成新的规则学习摘要时，会自动向已配置渠道推送一份精简学习日报
+- `NOTIFY_DND_ENABLED=1` 后，普通市场提醒会在免打扰窗口内静默；默认仍允许 `MT5` 断连和外部数据源失效这类系统级提醒继续送达
+- `NOTIFY_DND_START_HOUR / NOTIFY_DND_END_HOUR` 控制免打扰时段，默认是 `00:00-07:00`
+- `OVERNIGHT_SPREAD_GUARD_ENABLED=1` 后，系统会在默认 `05:00-07:00` 的隔夜交割敏感窗口里压制普通点差异常推送，避免隔夜结算把人从睡眠中吵醒
+- `OVERNIGHT_SPREAD_GUARD_START_HOUR / OVERNIGHT_SPREAD_GUARD_END_HOUR` 控制隔夜点差过滤窗口；如果同时处于高影响事件窗口，关键宏观提醒仍然会继续发出
 
 结构化宏观数据规格示例：
 
@@ -151,6 +161,7 @@ python main.py
 - 如果你希望显式指定终端位置，可以填写 `MT5_PATH`
 - 如果需要主动提醒，可以填写 `DINGTALK_WEBHOOK` 或 `PUSHPLUS_TOKEN`
 - 推送默认只针对关键提醒（例如点差异常、MT5 断连、休市/流动性异常），并按 `NOTIFY_COOLDOWN_MIN` 节流
+- 系统默认会在 `00:00-07:00` 开启免打扰，并在 `05:00-07:00` 额外压制隔夜结算带来的普通点差告警；如果你是夜间盯盘用户，可在 `.env` 里关闭或调整
 - 如果需要手动 AI 研判，可以填写 `AI_API_KEY`；当前独立项目默认使用与老项目一致的硅基流动配置：
   - `AI_API_BASE=https://api.siliconflow.cn/v1`
   - `AI_MODEL=deepseek-ai/DeepSeek-R1`

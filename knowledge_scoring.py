@@ -405,42 +405,37 @@ def refresh_rule_scores(
                 updated_count += 1
                 continue
 
-            # 只查询比上次处理更新的结果（增量）
-            new_rows = conn.execute(
+            # 只查询比上次处理更新的结果（增量），并直接在 SQLite 内聚合，避免把标签全拉回 Python 内存。
+            aggregate_row = conn.execute(
                 """
-                SELECT so.id, so.outcome_label
+                SELECT
+                    COALESCE(MAX(so.id), 0) AS max_outcome_id,
+                    COALESCE(SUM(CASE WHEN so.outcome_label = 'success' THEN 1 ELSE 0 END), 0) AS add_success,
+                    COALESCE(SUM(CASE WHEN so.outcome_label = 'mixed' THEN 1 ELSE 0 END), 0)   AS add_mixed,
+                    COALESCE(SUM(CASE WHEN so.outcome_label = 'fail' THEN 1 ELSE 0 END), 0)    AS add_fail,
+                    COALESCE(SUM(CASE WHEN so.outcome_label = 'observe' THEN 1 ELSE 0 END), 0) AS add_observe,
+                    COUNT(*) AS new_count
                 FROM rule_snapshot_matches rm
                 JOIN snapshot_outcomes so ON so.snapshot_id = rm.snapshot_id
                 WHERE rm.rule_id = ? AND so.horizon_min = ? AND so.id > ?
-                ORDER BY so.id ASC
                 """,
                 (rule_id, int(horizon_min), last_outcome_id),
-            ).fetchall()
+            ).fetchone()
 
-            if not new_rows:
+            if aggregate_row is None or int(aggregate_row["new_count"] or 0) <= 0:
                 # 没有新结果：不更新任何内容，保留现有计数
                 continue
 
-            # 累加新增量
-            max_new_id = last_outcome_id
-            add_success = add_mixed = add_fail = add_observe = 0
-            for row in new_rows:
-                label = _normalize_text(row["outcome_label"]).lower()
-                if label == "success":
-                    add_success += 1
-                elif label == "mixed":
-                    add_mixed += 1
-                elif label == "fail":
-                    add_fail += 1
-                elif label == "observe":
-                    add_observe += 1
-                if int(row["id"]) > max_new_id:
-                    max_new_id = int(row["id"])
+            max_new_id = int(aggregate_row["max_outcome_id"] or last_outcome_id)
+            add_success = int(aggregate_row["add_success"] or 0)
+            add_mixed = int(aggregate_row["add_mixed"] or 0)
+            add_fail = int(aggregate_row["add_fail"] or 0)
+            add_observe = int(aggregate_row["add_observe"] or 0)
 
             new_success = int(rule["cur_success"]) + add_success
-            new_mixed   = int(rule["cur_mixed"])   + add_mixed
-            new_fail    = int(rule["cur_fail"])     + add_fail
-            new_observe = int(rule["cur_observe"])  + add_observe
+            new_mixed   = int(rule["cur_mixed"]) + add_mixed
+            new_fail    = int(rule["cur_fail"]) + add_fail
+            new_observe = int(rule["cur_observe"]) + add_observe
             sample_count = new_success + new_mixed + new_fail
 
             if sample_count <= 0:

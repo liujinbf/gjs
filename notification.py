@@ -33,6 +33,56 @@ from notification_state import (
 )
 
 
+_DND_ALLOWED_CATEGORIES = {"mt5", "source"}
+
+
+def _is_hour_in_window(current: datetime, start_hour: int, end_hour: int) -> bool:
+    current_hour = int(current.hour)
+    start = max(0, min(23, int(start_hour)))
+    end = max(0, min(23, int(end_hour)))
+    if start == end:
+        return False
+    if start < end:
+        return start <= current_hour < end
+    return current_hour >= start or current_hour < end
+
+
+def _entry_occured_at(entry: dict, now: datetime | None = None) -> datetime:
+    return now or _parse_time(entry.get("occurred_at", "")) or datetime.now()
+
+
+def _is_dnd_suppressed(entry: dict, config: MetalMonitorConfig, current: datetime) -> bool:
+    if not bool(getattr(config, "notify_dnd_enabled", True)):
+        return False
+    if not _is_hour_in_window(
+        current,
+        int(getattr(config, "notify_dnd_start_hour", 0) or 0),
+        int(getattr(config, "notify_dnd_end_hour", 7) or 7),
+    ):
+        return False
+    category = str(entry.get("category", "") or "").strip().lower()
+    return category not in _DND_ALLOWED_CATEGORIES
+
+
+def _is_overnight_spread_suppressed(entry: dict, config: MetalMonitorConfig, current: datetime) -> bool:
+    if not bool(getattr(config, "overnight_spread_guard_enabled", True)):
+        return False
+    category = str(entry.get("category", "") or "").strip().lower()
+    title = str(entry.get("title", "") or "").strip()
+    if category != "spread" and "点差" not in title:
+        return False
+    if not _is_hour_in_window(
+        current,
+        int(getattr(config, "overnight_spread_guard_start_hour", 5) or 5),
+        int(getattr(config, "overnight_spread_guard_end_hour", 7) or 7),
+    ):
+        return False
+    importance_text = str(entry.get("event_importance_text", "") or "").strip()
+    if "高影响" in importance_text:
+        return False
+    return True
+
+
 def pick_notify_entries(
     entries: list[dict],
     config: MetalMonitorConfig,
@@ -47,10 +97,15 @@ def pick_notify_entries(
     for entry in entries or []:
         if not _should_notify_entry(entry):
             continue
+        current = _entry_occured_at(entry, now=now)
+        if _is_dnd_suppressed(entry, config, current):
+            continue
+        if _is_overnight_spread_suppressed(entry, config, current):
+            continue
         due_channels = [
             channel_key
             for channel_key, _channel_name, _channel_value in channels
-            if not _is_within_cooldown(entry, state, config.notify_cooldown_min, now=now, channel_key=channel_key)
+            if not _is_within_cooldown(entry, state, config.notify_cooldown_min, now=current, channel_key=channel_key)
         ]
         if due_channels:
             result.append(entry)
@@ -438,7 +493,12 @@ def get_notification_status(config: MetalMonitorConfig, state_file: Path | None 
     channels.append("PushPlus已配置" if str(config.pushplus_token or "").strip() else "PushPlus未配置")
     return {
         "channels_text": " | ".join(channels),
-        "cooldown_text": f"冷却 {int(config.notify_cooldown_min)} 分钟",
+        "cooldown_text": (
+            f"冷却 {int(config.notify_cooldown_min)} 分钟"
+            f" | DND {'开' if bool(getattr(config, 'notify_dnd_enabled', True)) else '关'}"
+            f" {int(getattr(config, 'notify_dnd_start_hour', 0) or 0):02d}:00-"
+            f"{int(getattr(config, 'notify_dnd_end_hour', 7) or 7):02d}:00"
+        ),
         "last_result_text": str(state.get("last_result_text", "最近还没有推送记录。") or "最近还没有推送记录。").strip(),
         "last_result_time": str(state.get("last_result_time", "--") or "--").strip(),
     }

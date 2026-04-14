@@ -108,6 +108,12 @@ class MetalMonitorConfig:
     macro_data_feed_refresh_min: int = 60
     learning_push_enabled: bool = False
     learning_push_min_interval_hour: int = 12
+    notify_dnd_enabled: bool = True
+    notify_dnd_start_hour: int = 0
+    notify_dnd_end_hour: int = 7
+    overnight_spread_guard_enabled: bool = True
+    overnight_spread_guard_start_hour: int = 5
+    overnight_spread_guard_end_hour: int = 7
 
 
 def _clean_env_value(value: object) -> str:
@@ -254,6 +260,28 @@ def get_runtime_config() -> MetalMonitorConfig:
         )
     except ValueError:
         learning_push_min_interval_hour = 12
+    try:
+        notify_dnd_start_hour = min(23, max(0, int(str(os.getenv("NOTIFY_DND_START_HOUR", "0") or "0").strip())))
+    except ValueError:
+        notify_dnd_start_hour = 0
+    try:
+        notify_dnd_end_hour = min(23, max(0, int(str(os.getenv("NOTIFY_DND_END_HOUR", "7") or "7").strip())))
+    except ValueError:
+        notify_dnd_end_hour = 7
+    try:
+        overnight_spread_guard_start_hour = min(
+            23,
+            max(0, int(str(os.getenv("OVERNIGHT_SPREAD_GUARD_START_HOUR", "5") or "5").strip())),
+        )
+    except ValueError:
+        overnight_spread_guard_start_hour = 5
+    try:
+        overnight_spread_guard_end_hour = min(
+            23,
+            max(0, int(str(os.getenv("OVERNIGHT_SPREAD_GUARD_END_HOUR", "7") or "7").strip())),
+        )
+    except ValueError:
+        overnight_spread_guard_end_hour = 7
 
     return MetalMonitorConfig(
         symbols=symbols,
@@ -287,6 +315,12 @@ def get_runtime_config() -> MetalMonitorConfig:
         macro_data_feed_refresh_min=macro_data_feed_refresh_min,
         learning_push_enabled=_parse_bool_env("LEARNING_PUSH_ENABLED", default=False),
         learning_push_min_interval_hour=learning_push_min_interval_hour,
+        notify_dnd_enabled=_parse_bool_env("NOTIFY_DND_ENABLED", default=True),
+        notify_dnd_start_hour=notify_dnd_start_hour,
+        notify_dnd_end_hour=notify_dnd_end_hour,
+        overnight_spread_guard_enabled=_parse_bool_env("OVERNIGHT_SPREAD_GUARD_ENABLED", default=True),
+        overnight_spread_guard_start_hour=overnight_spread_guard_start_hour,
+        overnight_spread_guard_end_hour=overnight_spread_guard_end_hour,
     )
 
 
@@ -333,4 +367,10 @@ def save_runtime_config(config: MetalMonitorConfig) -> None:
     _set_env_key("MACRO_DATA_FEED_REFRESH_MIN", str(max(5, int(config.macro_data_feed_refresh_min))))
     _set_env_key("LEARNING_PUSH_ENABLED", "1" if bool(config.learning_push_enabled) else "0")
     _set_env_key("LEARNING_PUSH_MIN_INTERVAL_HOUR", str(max(1, int(config.learning_push_min_interval_hour))))
+    _set_env_key("NOTIFY_DND_ENABLED", "1" if bool(config.notify_dnd_enabled) else "0")
+    _set_env_key("NOTIFY_DND_START_HOUR", str(min(23, max(0, int(config.notify_dnd_start_hour)))))
+    _set_env_key("NOTIFY_DND_END_HOUR", str(min(23, max(0, int(config.notify_dnd_end_hour)))))
+    _set_env_key("OVERNIGHT_SPREAD_GUARD_ENABLED", "1" if bool(config.overnight_spread_guard_enabled) else "0")
+    _set_env_key("OVERNIGHT_SPREAD_GUARD_START_HOUR", str(min(23, max(0, int(config.overnight_spread_guard_start_hour)))))
+    _set_env_key("OVERNIGHT_SPREAD_GUARD_END_HOUR", str(min(23, max(0, int(config.overnight_spread_guard_end_hour)))))
     _set_env_key(LEGACY_MIGRATION_DONE_KEY, "1")

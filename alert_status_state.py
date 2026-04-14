@@ -106,9 +106,6 @@ def _parse_time(value: str) -> datetime | None:
 
 
 def apply_alert_state_transitions(items: list[dict], state_file: Path | None = None, now: datetime | None = None) -> list[dict]:
-    if state_file is None:
-        return list(items or [])
-
     current = now or datetime.now()
     payload = _read_state(state_file=state_file)
     state = dict(payload.get(STATE_KEY, {}) or {})
@@ -162,9 +159,6 @@ def read_recent_transitions(
     window_min: int = 30,
     limit: int = 6,
 ) -> list[dict]:
-    if state_file is None:
-        return []
-
     payload = _read_state(state_file=state_file)
     current = now or datetime.now()
     result = []
