@@ -335,6 +335,8 @@ class MetalMonitorWindow(QMainWindow):
         self._last_ai_auto_time = None  # 上次自动 AI 研判时间
         self._ai_auto_is_running = False  # 防止自动触发重叠
         self._last_external_source_warning_digest = ""
+        self._last_macro_sync_status_digest = ""
+        self._macro_sync_refresh_pending = False
         self._build_ui()
         self._start_background_task_worker()
         # 炸弹三修复：保留 _timer 对象（供 closeEvent/toggle_polling 使用），
@@ -573,8 +575,34 @@ class MetalMonitorWindow(QMainWindow):
         self._macro_worker.error_signal.connect(self._on_macro_sync_error)
         self._macro_worker.start()
 
-    def _on_macro_sync_ready(self, _result: dict):
+    def _on_macro_sync_ready(self, result: dict):
         self._macro_worker = None
+        payload = dict(result or {})
+        status_parts = []
+        refresh_needed = False
+        for result_key, snapshot_key, label in (
+            ("event_feed", "event_feed_status_text", "事件源"),
+            ("macro_news", "macro_news_status_text", "资讯流"),
+            ("macro_data", "macro_data_status_text", "宏观数据"),
+        ):
+            item = dict(payload.get(result_key, {}) or {})
+            status_text = str(item.get("status_text", "") or "").strip()
+            status = str(item.get("status", "") or "").strip().lower()
+            if status_text:
+                status_parts.append(f"{label}:{status_text}")
+                if status not in {"disabled", "missing"} and self._last_snapshot.get(snapshot_key) != status_text:
+                    refresh_needed = True
+        digest = " | ".join(status_parts)
+        if digest and digest != self._last_macro_sync_status_digest:
+            self._append_log(f"[宏观同步] {digest}")
+        self._last_macro_sync_status_digest = digest
+
+        if not refresh_needed:
+            return
+        if self._worker and self._worker.isRunning():
+            self._macro_sync_refresh_pending = True
+            return
+        self.refresh_snapshot()
 
     def _on_macro_sync_error(self, message: str):
         self._macro_worker = None
@@ -708,6 +736,7 @@ class MetalMonitorWindow(QMainWindow):
             # 自动研判间隔变化时重置上次触发时间，立即应用新设置
             self._last_ai_auto_time = None
             self._update_notify_status()
+            self._trigger_macro_sync()
             self.refresh_snapshot()
 
     def refresh_snapshot(self):
@@ -757,6 +786,9 @@ class MetalMonitorWindow(QMainWindow):
         # 炸弹三修复：本轮彻底结束后，精准等待 interval 秒再续约下一轮
         if self._polling_enabled:
             self._timer.start(self._config.refresh_interval_sec * 1000)
+        if self._macro_sync_refresh_pending:
+            self._macro_sync_refresh_pending = False
+            QTimer.singleShot(120, self.refresh_snapshot)
 
     def _on_snapshot_error(self, message: str):
         self._worker = None
@@ -768,6 +800,9 @@ class MetalMonitorWindow(QMainWindow):
         # 炸弹三修复：失败后同样续约，确保轮询持续
         if self._polling_enabled:
             self._timer.start(self._config.refresh_interval_sec * 1000)
+        if self._macro_sync_refresh_pending:
+            self._macro_sync_refresh_pending = False
+            QTimer.singleShot(120, self.refresh_snapshot)
 
     def _on_ai_brief_ready(self, result: dict):
         self._ai_worker = None
