@@ -33,10 +33,18 @@ def _safe_text(value: Any, default: str = "") -> str:
         return default
 
 
+def _normalize_explicit_quote_status_code(value: Any) -> str:
+    text = _safe_text(value).lower()
+    if not text:
+        return ""
+    valid_values = {status.value for status in QuoteStatus}
+    return text if text in valid_values else ""
+
+
 def _infer_quote_status_code(source: dict[str, Any]) -> str:
-    explicit_code = _safe_text(source.get("quote_status_code", ""))
+    explicit_code = _normalize_explicit_quote_status_code(source.get("quote_status_code", ""))
     if explicit_code:
-        return explicit_code.lower()
+        return explicit_code
 
     has_live_quote = bool(source.get("has_live_quote", False))
     if has_live_quote:

@@ -284,3 +284,17 @@ def test_quote_row_normalizes_core_fields():
     assert payload["quote_status_code"] == "live"
     assert payload["has_live_quote"] is True
     assert payload["intraday_bias"] == "bullish"
+
+
+def test_quote_row_ignores_unknown_explicit_quote_status_code():
+    row = QuoteRow.from_payload(
+        {
+            "symbol": "eurusd",
+            "status": "经纪商自定义实时状态",
+            "quote_status_code": "custom_live",
+            "has_live_quote": True,
+        }
+    )
+
+    payload = row.to_dict()
+    assert payload["quote_status_code"] == "live"
