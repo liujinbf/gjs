@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from app_config import PROJECT_DIR
+from quote_models import SnapshotItem
 from runtime_utils import parse_time as _parse_time_impl
 
 RUNTIME_DIR = PROJECT_DIR / ".runtime"
@@ -33,6 +34,11 @@ def _pick_summary_line(content: str) -> str:
     return fallback_lines[0] if fallback_lines else ""
 
 
+def _normalize_snapshot_item(item: dict | SnapshotItem | None) -> dict:
+    """统一 AI 留痕链消费的快照项字段契约。"""
+    return SnapshotItem.from_payload(item).to_dict()
+
+
 def build_ai_history_entry(result: dict, snapshot: dict, push_result: dict | None = None) -> dict:
     content = str((result or {}).get("content", "") or "").strip()
     model = str((result or {}).get("model", "") or "").strip() or "unknown"
@@ -42,7 +48,7 @@ def build_ai_history_entry(result: dict, snapshot: dict, push_result: dict | Non
     signal_meta_reason = _normalize_text((result or {}).get("signal_meta_reason", "") or "")
     symbols = [
         str(item.get("symbol", "") or "").strip().upper()
-        for item in list((snapshot or {}).get("items", []) or [])
+        for item in [_normalize_snapshot_item(item) for item in list((snapshot or {}).get("items", []) or [])]
         if str(item.get("symbol", "") or "").strip()
     ]
     push_result = push_result or {}

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ai_history import _pick_summary_line
 from knowledge_base import KNOWLEDGE_DB_FILE, open_knowledge_connection
+from quote_models import SnapshotItem
 from signal_protocol import build_empty_signal_meta, normalize_signal_meta, validate_signal_meta
 
 
@@ -20,9 +21,14 @@ def _normalize_text(value: object) -> str:
     return " ".join(str(value or "").replace("\n", " ").split()).strip()
 
 
+def _normalize_snapshot_item(item: dict | SnapshotItem | None) -> dict:
+    """统一 AI 信号入库链消费的快照项字段契约。"""
+    return SnapshotItem.from_payload(item).to_dict()
+
+
 def _build_snapshot_symbols(snapshot: dict) -> list[str]:
     result = []
-    for item in list((snapshot or {}).get("items", []) or []):
+    for item in [_normalize_snapshot_item(item) for item in list((snapshot or {}).get("items", []) or [])]:
         symbol = str(item.get("symbol", "") or "").strip().upper()
         if symbol and symbol not in result:
             result.append(symbol)

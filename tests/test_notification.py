@@ -904,28 +904,26 @@ def test_send_ai_brief_notification_cooldown_blocks_second_push(monkeypatch):
     shutil.rmtree(state_dir)
 
 
-def test_write_state_purges_expired_notify_records():
+def test_write_state_purges_expired_notify_records(tmp_path):
     """M-006 修复验证：写入 state 时自动清理超过7天的 notified:: 记录。"""
     from notification_state import _write_state, _read_state
-    import tempfile
     from datetime import timedelta
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        state_file = Path(tmpdir) / "notify_state.json"
-        old_time = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S")
-        fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        state = {
-            "notified::dingtalk::old-sig": old_time,      # 应被清理
-            "notified::pushplus::old-sig": old_time,       # 应被清理
-            "notified::dingtalk::fresh-sig": fresh_time,  # 应保留
-            "last_result_text": "最后推送",               # 非冷却记录，应保留
-        }
-        _write_state(state, state_file=state_file)
-        result = _read_state(state_file=state_file)
-        assert "notified::dingtalk::old-sig" not in result, "10天前的记录应被清理"
-        assert "notified::pushplus::old-sig" not in result, "10天前的记录应被清理"
-        assert "notified::dingtalk::fresh-sig" in result, "新鲜记录应保留"
-        assert "last_result_text" in result, "非冷却字段应保留"
+    state_file = tmp_path / "notify_state.json"
+    old_time = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S")
+    fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    state = {
+        "notified::dingtalk::old-sig": old_time,      # 应被清理
+        "notified::pushplus::old-sig": old_time,       # 应被清理
+        "notified::dingtalk::fresh-sig": fresh_time,  # 应保留
+        "last_result_text": "最后推送",               # 非冷却记录，应保留
+    }
+    _write_state(state, state_file=state_file)
+    result = _read_state(state_file=state_file)
+    assert "notified::dingtalk::old-sig" not in result, "10天前的记录应被清理"
+    assert "notified::pushplus::old-sig" not in result, "10天前的记录应被清理"
+    assert "notified::dingtalk::fresh-sig" in result, "新鲜记录应保留"
+    assert "last_result_text" in result, "非冷却字段应保留"
 
 
 def test_send_learning_report_notification_honors_enable_flag(monkeypatch):

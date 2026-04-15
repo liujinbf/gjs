@@ -7,6 +7,7 @@ sys.path.insert(0, str(ROOT))
 
 from knowledge_ai_signals import record_ai_signal, summarize_recent_ai_signals
 from knowledge_base import open_knowledge_connection
+from quote_models import SnapshotItem
 
 
 def _build_snapshot() -> dict:
@@ -81,3 +82,31 @@ def test_summarize_recent_ai_signals_counts_valid_and_executable(tmp_path):
     assert summary["total_count"] == 2
     assert summary["valid_count"] == 2
     assert summary["executable_count"] == 1
+
+
+def test_record_ai_signal_accepts_snapshot_item_objects(tmp_path):
+    db_path = tmp_path / "knowledge.db"
+    snapshot = {
+        "last_refresh_text": "2026-04-14 16:30:00",
+        "items": [
+            SnapshotItem(symbol="XAUUSD"),
+            SnapshotItem(symbol="EURUSD"),
+        ],
+    }
+
+    result = record_ai_signal(
+        {
+            "content": "当前结论：轻仓试多。",
+            "signal_meta": {"symbol": "XAUUSD", "action": "long", "price": 2350.0, "sl": 2342.0, "tp": 2366.0},
+            "signal_schema_version": "signal-meta-v1",
+            "signal_meta_valid": True,
+            "signal_meta_reason": "做多信号结构有效",
+            "model": "demo-model",
+            "api_base": "https://example.com/v1",
+        },
+        snapshot,
+        db_path=db_path,
+    )
+
+    assert result["inserted_count"] == 1
+    assert '"XAUUSD"' in result["entry"]["snapshot_symbols_json"]
