@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app_config import get_quote_risk_thresholds
-from signal_enums import TradeGrade
+from signal_enums import AlertTone, QuoteStatus, TradeGrade
 
 
 def format_quote_price(value: float, point: float = 0.0) -> str:
@@ -95,7 +95,7 @@ def _build_event_mode_adjustment(event_risk_mode: str, event_context: dict | Non
                         f"{scope_text or '会直接影响当前品种'}，数据前第一脚和点差都更容易失真。"
                     ),
                     "next_review": "至少等事件公布后 15-20 分钟，并确认点差明显收敛后再复核。",
-                    "tone": "warning",
+                    "tone": AlertTone.WARNING.value,
                     "source": "event",
                 }
             if importance == "low":
@@ -106,7 +106,7 @@ def _build_event_mode_adjustment(event_risk_mode: str, event_context: dict | Non
                         "但短线节奏仍可能被打乱，先观察别抢。"
                     ),
                     "next_review": "等事件落地后 5-10 分钟，再复核短线节奏和点差。",
-                    "tone": "accent",
+                    "tone": AlertTone.ACCENT.value,
                     "source": "event",
                 }
             return {
@@ -116,14 +116,14 @@ def _build_event_mode_adjustment(event_risk_mode: str, event_context: dict | Non
                     "当前先别抢第一脚波动。"
                 ),
                 "next_review": "等事件公布后 10-15 分钟，并确认点差开始收敛后再复核。",
-                "tone": "warning",
+                "tone": AlertTone.WARNING.value,
                 "source": "event",
             }
         return {
             "grade": TradeGrade.WAIT_EVENT.value,
             "detail": "当前处于事件前高敏阶段，第一脚波动和点差都更容易失真，先别抢。",
             "next_review": "等事件公布后 15 分钟，并确认点差明显收敛后再复核。",
-            "tone": "warning",
+            "tone": AlertTone.WARNING.value,
             "source": "event",
         }
     if mode == "post_event":
@@ -136,7 +136,7 @@ def _build_event_mode_adjustment(event_risk_mode: str, event_context: dict | Non
                         "市场往往还在重新定价阶段，别急着追第二脚。"
                     ),
                     "next_review": "至少等 15-20 分钟，并确认关键位与点差一起稳定后再复核。",
-                    "tone": "warning",
+                    "tone": AlertTone.WARNING.value,
                     "source": "event",
                 }
             if importance == "low":
@@ -147,7 +147,7 @@ def _build_event_mode_adjustment(event_risk_mode: str, event_context: dict | Non
                         "但短线还可能有一次回摆，先别急着追。"
                     ),
                     "next_review": "建议 5-10 分钟后再复核方向、点差和关键位。",
-                    "tone": "accent",
+                    "tone": AlertTone.ACCENT.value,
                     "source": "event",
                 }
             return {
@@ -157,14 +157,14 @@ def _build_event_mode_adjustment(event_risk_mode: str, event_context: dict | Non
                     "方向还在重新定价阶段，先观察再决定更稳。"
                 ),
                 "next_review": "建议 10-15 分钟后再复核方向、点差和关键位。",
-                "tone": "accent",
+                "tone": AlertTone.ACCENT.value,
                 "source": "event",
             }
         return {
             "grade": TradeGrade.OBSERVE_ONLY.value,
             "detail": "事件刚落地，方向还在重新定价阶段，先等波动和报价稳定下来。",
             "next_review": "建议 10-15 分钟后再复核方向、点差和关键位。",
-            "tone": "accent",
+            "tone": AlertTone.ACCENT.value,
             "source": "event",
         }
     if mode == "illiquid":
@@ -172,7 +172,7 @@ def _build_event_mode_adjustment(event_risk_mode: str, event_context: dict | Non
             "grade": TradeGrade.NO_TRADE.value,
             "detail": "当前人为标记为流动性偏弱阶段，点差和执行成本都不适合普通用户硬做。",
             "next_review": "等进入正常观察模式后再复核。",
-            "tone": "warning",
+            "tone": AlertTone.WARNING.value,
             "source": "event",
         }
     return None
@@ -213,7 +213,7 @@ def _build_clean_quote_grade_with_context(symbol_key: str, family: str, row: dic
             "grade": TradeGrade.OBSERVE_ONLY.value,
             "detail": detail,
             "next_review": "至少再等一到两轮 M5 重新站稳关键位后再复核，不要在失败回踩后硬追。",
-            "tone": "accent",
+            "tone": AlertTone.ACCENT.value,
         }
 
     if breakout_ready and breakout_state in {"failed_above", "failed_below"}:
@@ -224,7 +224,7 @@ def _build_clean_quote_grade_with_context(symbol_key: str, family: str, row: dic
             "grade": TradeGrade.OBSERVE_ONLY.value,
             "detail": detail,
             "next_review": "优先等下一到两根 M5 收线确认，别在假突破后第一时间反手硬追。",
-            "tone": "accent",
+            "tone": AlertTone.ACCENT.value,
         }
 
     if breakout_ready and breakout_state in {"pending_above", "pending_below"}:
@@ -235,7 +235,7 @@ def _build_clean_quote_grade_with_context(symbol_key: str, family: str, row: dic
             "grade": TradeGrade.OBSERVE_ONLY.value,
             "detail": detail,
             "next_review": "至少再看一到两根 M5 收线，确认站稳或失守后再决定。",
-            "tone": "accent",
+            "tone": AlertTone.ACCENT.value,
         }
 
     if key_level_ready and key_level_state in {"near_high", "breakout_above"} and bullish_pressure and breakout_state != "confirmed_above":
@@ -248,7 +248,7 @@ def _build_clean_quote_grade_with_context(symbol_key: str, family: str, row: dic
             "grade": TradeGrade.OBSERVE_ONLY.value,
             "detail": detail,
             "next_review": "优先等回踩确认或突破后二次站稳，再复核是否还有空间。",
-            "tone": "accent",
+            "tone": AlertTone.ACCENT.value,
         }
 
     if key_level_ready and key_level_state in {"near_low", "breakout_below"} and bearish_pressure and breakout_state != "confirmed_below":
@@ -261,7 +261,7 @@ def _build_clean_quote_grade_with_context(symbol_key: str, family: str, row: dic
             "grade": TradeGrade.OBSERVE_ONLY.value,
             "detail": detail,
             "next_review": "优先等反抽确认或跌破后二次失守，再复核是否还有空间。",
-            "tone": "accent",
+            "tone": AlertTone.ACCENT.value,
         }
 
     if risk_reward_ready and risk_reward_state == "poor":
@@ -270,7 +270,7 @@ def _build_clean_quote_grade_with_context(symbol_key: str, family: str, row: dic
             "grade": TradeGrade.OBSERVE_ONLY.value,
             "detail": detail,
             "next_review": "优先等回踩更深一点，或等目标空间重新拉开后再复核。",
-            "tone": "neutral",
+            "tone": AlertTone.NEUTRAL.value,
         }
 
     if multi_ready and multi_alignment == "mixed":
@@ -281,7 +281,7 @@ def _build_clean_quote_grade_with_context(symbol_key: str, family: str, row: dic
             "grade": TradeGrade.OBSERVE_ONLY.value,
             "detail": detail,
             "next_review": "建议等 M5 / M15 / H1 至少两档重新同向后再复核。",
-            "tone": "neutral",
+            "tone": AlertTone.NEUTRAL.value,
         }
 
     if intraday_ready and (intraday_volatility == "low" or intraday_bias == "sideways"):
@@ -296,7 +296,7 @@ def _build_clean_quote_grade_with_context(symbol_key: str, family: str, row: dic
             "grade": TradeGrade.OBSERVE_ONLY.value,
             "detail": detail,
             "next_review": "建议 5-10 分钟后再看一次短线节奏和关键位变化。",
-            "tone": "neutral",
+            "tone": AlertTone.NEUTRAL.value,
         }
 
     if family == "metal":
@@ -321,7 +321,7 @@ def _build_clean_quote_grade_with_context(symbol_key: str, family: str, row: dic
             "grade": TradeGrade.LIGHT_POSITION.value,
             "detail": detail,
             "next_review": next_review,
-            "tone": "success",
+            "tone": AlertTone.SUCCESS.value,
         }
 
     detail = "外汇报价虽然稳定，但更容易受央行和美元方向扰动，普通用户先观察会更稳。"
@@ -341,7 +341,7 @@ def _build_clean_quote_grade_with_context(symbol_key: str, family: str, row: dic
         "grade": TradeGrade.OBSERVE_ONLY.value,
         "detail": detail,
         "next_review": "建议等美元方向更清楚或下一轮复核后再决定。",
-        "tone": "neutral",
+        "tone": AlertTone.NEUTRAL.value,
     }
 
 
@@ -371,10 +371,15 @@ def build_quote_risk_note(symbol: str, row: dict) -> tuple[str, str]:
     point = float(row.get("point", 0.0) or 0.0)
     latest = float(row.get("latest_price", 0.0) or 0.0)
     status_code = str(row.get("quote_status_code", "") or "").strip().lower()
-    if status_code in {"inactive", "unknown_symbol", "not_selected", "error"}:
-        return "neutral", "当前暂无完整报价，先确认 MT5 终端和品种报价状态。"
+    if status_code in {
+        QuoteStatus.INACTIVE.value,
+        QuoteStatus.UNKNOWN_SYMBOL.value,
+        QuoteStatus.NOT_SELECTED.value,
+        QuoteStatus.ERROR.value,
+    }:
+        return AlertTone.NEUTRAL.value, "当前暂无完整报价，先确认 MT5 终端和品种报价状态。"
     if bid <= 0 or ask <= 0 or ask < bid:
-        return "neutral", "当前暂无完整报价，先确认 MT5 终端和品种报价状态。"
+        return AlertTone.NEUTRAL.value, "当前暂无完整报价，先确认 MT5 终端和品种报价状态。"
 
     spread_price = max(ask - bid, 0.0)
     spread_points = float(row.get("spread_points", 0.0) or 0.0)
@@ -385,10 +390,10 @@ def build_quote_risk_note(symbol: str, row: dict) -> tuple[str, str]:
     spread_text = format_quote_price(spread_price, point)
 
     if spread_points >= thresholds["alert_points"] or spread_pct >= thresholds["alert_pct"]:
-        return "warning", f"点差明显放大（{spread_points:.0f}点 / {spread_text}），先等报价收敛再考虑追单。"
+        return AlertTone.WARNING.value, f"点差明显放大（{spread_points:.0f}点 / {spread_text}），先等报价收敛再考虑追单。"
     if spread_points >= thresholds["warn_points"] or spread_pct >= thresholds["warn_pct"]:
-        return "accent", f"点差偏宽（{spread_points:.0f}点 / {spread_text}），顺势单也先等点差回落再跟。"
-    return "success", f"报价相对平稳（点差 {spread_points:.0f}点 / {spread_text}），适合继续观察关键位。"
+        return AlertTone.ACCENT.value, f"点差偏宽（{spread_points:.0f}点 / {spread_text}），顺势单也先等点差回落再跟。"
+    return AlertTone.SUCCESS.value, f"报价相对平稳（点差 {spread_points:.0f}点 / {spread_text}），适合继续观察关键位。"
 
 def build_trade_grade(
     symbol: str,
@@ -408,15 +413,20 @@ def build_trade_grade(
             "grade": TradeGrade.NO_TRADE.value,
             "detail": "MT5 终端当前未连通，先恢复报价链路，再讨论任何入场时机。",
             "next_review": "先恢复终端连接后立即复核。",
-            "tone": "warning",
+            "tone": AlertTone.WARNING.value,
             "source": "connection",
         }
-    if not has_live_quote or status_code in {"inactive", "unknown_symbol", "not_selected", "error"}:
+    if not has_live_quote or status_code in {
+        QuoteStatus.INACTIVE.value,
+        QuoteStatus.UNKNOWN_SYMBOL.value,
+        QuoteStatus.NOT_SELECTED.value,
+        QuoteStatus.ERROR.value,
+    }:
         return {
             "grade": TradeGrade.NO_TRADE.value,
             "detail": f"{symbol_key} 当前没有活跃报价，静态价格不适合做临场判断。",
             "next_review": "等待下一个活跃时段或 MT5 报价恢复后再看。",
-            "tone": "warning",
+            "tone": AlertTone.WARNING.value,
             "source": "inactive",
         }
 
@@ -424,15 +434,15 @@ def build_trade_grade(
     if event_adjustment is not None:
         return event_adjustment
 
-    if tone == "warning":
+    if tone == AlertTone.WARNING.value:
         return {
             "grade": TradeGrade.NO_TRADE.value,
             "detail": "点差已经明显放大，执行成本偏高，强行追单很容易被反向扫掉。",
             "next_review": "至少等点差回到正常区间后再复核。",
-            "tone": "warning",
+            "tone": AlertTone.WARNING.value,
             "source": "spread",
         }
-    if tone == "accent":
+    if tone == AlertTone.ACCENT.value:
         if family == "metal":
             detail = "报价还在，但点差已经偏宽，黄金/白银这时候容易出现假动作，先别急着伸手。"
             context_text = _intraday_context_text(row)
@@ -445,7 +455,7 @@ def build_trade_grade(
                 "grade": TradeGrade.OBSERVE_ONLY.value,
                 "detail": detail,
                 "next_review": "建议 10-15 分钟后复核一次点差和报价节奏。",
-                "tone": "accent",
+                "tone": AlertTone.ACCENT.value,
                 "source": "spread",
             }
         detail = "外汇品种本来就更吃消息和美元方向，点差又在变宽，先等波动收敛再判断更稳。"
@@ -459,7 +469,7 @@ def build_trade_grade(
             "grade": TradeGrade.WAIT_EVENT.value,
             "detail": detail,
             "next_review": "先等 15 分钟后或消息波动落地后再复核。",
-            "tone": "accent",
+            "tone": AlertTone.ACCENT.value,
             "source": "spread",
         }
     result = _build_clean_quote_grade_with_context(symbol_key, family, row)
@@ -479,7 +489,7 @@ def _build_portfolio_event_mode_adjustment(
             "grade": TradeGrade.NO_TRADE.value,
             "detail": "MT5 连接尚未稳定，当前只能做状态检查，不适合做任何临场执行判断。",
             "next_review": "先恢复终端连接后立即复核。",
-            "tone": "warning",
+            "tone": AlertTone.WARNING.value,
             "source": "connection",
         }
 
@@ -489,7 +499,7 @@ def _build_portfolio_event_mode_adjustment(
             "grade": TradeGrade.NO_TRADE.value,
             "detail": "观察池还没有有效快照，先等第一轮报价回来。",
             "next_review": "等到至少 1 个品种出现活跃报价后再复核。",
-            "tone": "warning",
+            "tone": AlertTone.WARNING.value,
             "source": "inactive",
         }
 
@@ -498,7 +508,7 @@ def _build_portfolio_event_mode_adjustment(
             "grade": TradeGrade.NO_TRADE.value,
             "detail": "当前被标记为流动性偏弱阶段，执行面整体不干净，先不建议主动出手。",
             "next_review": "等回到正常观察模式后再复核。",
-            "tone": "warning",
+            "tone": AlertTone.WARNING.value,
             "source": "event",
         }
     if mode not in {"pre_event", "post_event"}:
@@ -533,7 +543,7 @@ def _build_portfolio_event_mode_adjustment(
                 "grade": TradeGrade.NO_TRADE.value,
                 "detail": f"{active_name} 属于{importance_text}，并且会直接影响当前观察池，先别抢数据前第一脚。",
                 "next_review": "至少等事件公布后 15-20 分钟，并确认点差回到正常区间后再看。",
-                "tone": "warning",
+                "tone": AlertTone.WARNING.value,
                 "source": "event",
             }
         if active_name and importance == "low":
@@ -541,14 +551,14 @@ def _build_portfolio_event_mode_adjustment(
                 "grade": TradeGrade.OBSERVE_ONLY.value,
                 "detail": f"{active_name} 虽然只是{importance_text}，但当前仍在事件前窗口，先观察更稳。",
                 "next_review": "等事件落地后 5-10 分钟，再复核短线节奏和点差。",
-                "tone": "accent",
+                "tone": AlertTone.ACCENT.value,
                 "source": "event",
             }
         return {
             "grade": TradeGrade.WAIT_EVENT.value,
             "detail": "当前被标记为事件前高敏阶段，整个观察池都应先防假突破和点差放大，不抢第一脚。",
             "next_review": "等事件落地后 10-15 分钟，并确认点差回到正常区间后再看。",
-            "tone": "warning",
+            "tone": AlertTone.WARNING.value,
             "source": "event",
         }
 
@@ -557,14 +567,14 @@ def _build_portfolio_event_mode_adjustment(
             "grade": TradeGrade.NO_TRADE.value,
             "detail": f"{active_name} 刚落地且属于{importance_text}，当前观察池更适合先等重新定价完成。",
             "next_review": "至少等 15-20 分钟，并确认关键位与点差一起稳定后再复核。",
-            "tone": "warning",
+            "tone": AlertTone.WARNING.value,
             "source": "event",
         }
     return {
         "grade": TradeGrade.OBSERVE_ONLY.value,
         "detail": "当前被标记为事件落地观察阶段，方向正在重新定价，先观察再决定更稳。",
         "next_review": "建议 10-15 分钟后再复核。",
-        "tone": "accent",
+        "tone": AlertTone.ACCENT.value,
         "source": "event",
     }
 
@@ -600,7 +610,7 @@ def build_portfolio_trade_grade(
             "grade": TradeGrade.NO_TRADE.value,
             "detail": f"当前观察池里 {'、'.join(risk_symbols[:3])} 已经触发高风险条件，先把重点放在控制节奏，而不是抢第一脚。",
             "next_review": "等点差回落、报价恢复或休市结束后再看。",
-            "tone": "warning",
+            "tone": AlertTone.WARNING.value,
             "source": "risk",
         }
 
@@ -614,7 +624,7 @@ def build_portfolio_trade_grade(
             "grade": TradeGrade.WAIT_EVENT.value,
             "detail": f"{'、'.join(event_symbols[:3])} 当前更受宏观和美元方向影响，先等波动落地比强行猜方向更划算。",
             "next_review": "优先在 15 分钟后或事件波动明显收敛后复核。",
-            "tone": "accent",
+            "tone": AlertTone.ACCENT.value,
             "source": "event",
         }
 
@@ -636,7 +646,7 @@ def build_portfolio_trade_grade(
             "grade": TradeGrade.LIGHT_POSITION.value,
             "detail": detail,
             "next_review": "建议 10-15 分钟内复核关键位、点差和美元方向。",
-            "tone": "success",
+            "tone": AlertTone.SUCCESS.value,
             "source": "setup",
         }
 
@@ -650,7 +660,7 @@ def build_portfolio_trade_grade(
             "grade": TradeGrade.OBSERVE_ONLY.value,
             "detail": f"{'、'.join(event_blockers[:3])} 当前主要受事件窗口约束，先观察、等节奏重新稳定更稳。",
             "next_review": "建议事件波动收敛后再结合关键位复核。",
-            "tone": "accent",
+            "tone": AlertTone.ACCENT.value,
             "source": "event",
         }
 
@@ -663,6 +673,6 @@ def build_portfolio_trade_grade(
         "grade": TradeGrade.OBSERVE_ONLY.value,
         "detail": f"{'、'.join(observe_symbols[:3]) or '当前观察池'} 还没有形成足够干净的执行环境，先观察更稳。",
         "next_review": "建议下一轮轮询后结合 MT5 图表再评估。",
-        "tone": "neutral",
+        "tone": AlertTone.NEUTRAL.value,
         "source": "structure",
     }
