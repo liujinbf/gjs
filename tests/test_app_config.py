@@ -56,6 +56,21 @@ def test_runtime_config_has_notify_defaults():
     assert hasattr(config, "overnight_spread_guard_end_hour")
 
 
+def test_get_quote_risk_thresholds_supports_env_override(monkeypatch):
+    monkeypatch.setattr(app_config, "load_project_env", lambda: Path("."))
+    monkeypatch.setenv(
+        "QUOTE_RISK_THRESHOLDS_JSON",
+        '{"FX":{"warn_points":31,"alert_points":46,"warn_pct":0.021,"alert_pct":0.041}}',
+    )
+
+    thresholds = app_config.get_quote_risk_thresholds("EURUSD")
+
+    assert thresholds["warn_points"] == 31.0
+    assert thresholds["alert_points"] == 46.0
+    assert thresholds["warn_pct"] == 0.021
+    assert thresholds["alert_pct"] == 0.041
+
+
 def test_migrate_legacy_ai_and_notification_settings(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     legacy_env = tmp_path / "legacy.env"

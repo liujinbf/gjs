@@ -13,6 +13,15 @@ from ui import MetalMonitorWindow
 _LOG_FILE = Path(__file__).parent / "error_log.txt"
 
 
+def _can_show_exception_dialog(app: QApplication | None = None) -> bool:
+    current_app = app or QApplication.instance()
+    if current_app is None:
+        return False
+    if threading.current_thread() is not threading.main_thread():
+        return False
+    return True
+
+
 def _configure_logging() -> None:
     """配置全局日志：同时输出到控制台和 error_log.txt。追加模式，保留历史。"""
     fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -40,7 +49,9 @@ def _install_global_exception_hooks(app: QApplication) -> None:
         prefix = f"[Thread: {thread_name}] " if thread_name else ""
         msg = f"未处理异常 {prefix}\n{tb_text}"
         logging.critical(msg)
-        # 尝试弹出错误对话框，如果 GUI 已关闭则静默跳过
+        # 只允许主线程弹窗，子线程异常只写日志，避免 Qt 跨线程操作导致段错误。
+        if not _can_show_exception_dialog(app):
+            return
         try:
             box = QMessageBox()
             box.setWindowTitle("程序错误")

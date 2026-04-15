@@ -224,3 +224,35 @@ def test_shutdown_connection_resets_broker_offset(monkeypatch):
 
     assert mt5_gateway._mt5_initialized is False
     assert mt5_gateway._broker_utc_offset_sec is None
+
+
+def test_fetch_quotes_keeps_other_symbols_alive_when_one_symbol_errors(monkeypatch):
+    class FakeMt5:
+        @staticmethod
+        def symbol_select(symbol, enable):
+            return False
+
+        @staticmethod
+        def symbol_info(symbol):
+            return SimpleNamespace(spread=17.0, point=0.01)
+
+        @staticmethod
+        def symbol_info_tick(symbol):
+            if symbol == "EURUSD":
+                raise RuntimeError("terminal pipe broken")
+            return SimpleNamespace(time=1_000, bid=4759.74, ask=4759.91, last=4759.82)
+
+    monkeypatch.setattr(mt5_gateway, "mt5", FakeMt5)
+    monkeypatch.setattr(mt5_gateway, "HAS_MT5", True)
+    monkeypatch.setattr(mt5_gateway, "initialize_connection", lambda: (True, "ok"))
+    monkeypatch.setattr(mt5_gateway, "_force_reconnect_if_needed", lambda: True)
+    monkeypatch.setattr(mt5_gateway, "_is_live_tick", lambda tick, now_ts=None, max_age_sec=180: True)
+
+    rows = mt5_gateway.fetch_quotes(["XAUUSD", "EURUSD"])
+
+    assert len(rows) == 2
+    xau = next(item for item in rows if item["symbol"] == "XAUUSD")
+    eur = next(item for item in rows if item["symbol"] == "EURUSD")
+    assert xau["quote_status_code"] in {"live", "not_selected"}
+    assert eur["quote_status_code"] == "error"
+    assert eur["has_live_quote"] is False

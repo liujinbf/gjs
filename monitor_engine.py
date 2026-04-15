@@ -90,6 +90,7 @@ def _build_symbol_alert_state(
 ) -> dict:
     symbol_key = str(symbol or "").strip().upper()
     status_text = str(row.get("status", "") or "").strip()
+    status_code = str(row.get("quote_status_code", "") or "").strip().lower()
     has_live_quote = bool(row.get("has_live_quote", False))
     current_spread_points = float(row.get("spread_points", 0.0) or 0.0)
     event_note = str(item_event_meta.get("event_note", "") or "").strip()
@@ -99,7 +100,7 @@ def _build_symbol_alert_state(
     event_mode_text = str(item_event_meta.get("event_mode_text", "") or "").strip()
     trade_source = str(trade_grade.get("source", "") or "").strip()
 
-    if not has_live_quote or "休市" in status_text or "暂无" in status_text:
+    if not has_live_quote or status_code in {"inactive", "unknown_symbol", "not_selected", "error"}:
         return {
             "alert_state_text": "休市 / 暂无报价",
             "alert_state_detail": f"{symbol_key} 当前暂无活跃报价，先不做临场判断。",

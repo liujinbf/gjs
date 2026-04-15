@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app_config import get_quote_risk_thresholds
+
 
 def format_quote_price(value: float, point: float = 0.0) -> str:
     decimals = 2
@@ -9,15 +11,6 @@ def format_quote_price(value: float, point: float = 0.0) -> str:
         if "." in point_text:
             decimals = max(2, min(6, len(point_text.split(".")[1])))
     return f"{float(value or 0.0):.{decimals}f}"
-
-
-def _get_quote_risk_thresholds(symbol: str) -> dict[str, float]:
-    symbol_key = str(symbol or "").strip().upper()
-    if symbol_key.startswith("XAU"):
-        return {"warn_points": 45.0, "alert_points": 70.0, "warn_pct": 0.018, "alert_pct": 0.030}
-    if symbol_key.startswith("XAG"):
-        return {"warn_points": 80.0, "alert_points": 120.0, "warn_pct": 0.040, "alert_pct": 0.065}
-    return {"warn_points": 25.0, "alert_points": 40.0, "warn_pct": 0.020, "alert_pct": 0.035}
 
 
 def _symbol_family(symbol: str) -> str:
@@ -376,6 +369,9 @@ def build_quote_risk_note(symbol: str, row: dict) -> tuple[str, str]:
     ask = float(row.get("ask", 0.0) or 0.0)
     point = float(row.get("point", 0.0) or 0.0)
     latest = float(row.get("latest_price", 0.0) or 0.0)
+    status_code = str(row.get("quote_status_code", "") or "").strip().lower()
+    if status_code in {"inactive", "unknown_symbol", "not_selected", "error"}:
+        return "neutral", "当前暂无完整报价，先确认 MT5 终端和品种报价状态。"
     if bid <= 0 or ask <= 0 or ask < bid:
         return "neutral", "当前暂无完整报价，先确认 MT5 终端和品种报价状态。"
 
@@ -384,7 +380,7 @@ def build_quote_risk_note(symbol: str, row: dict) -> tuple[str, str]:
     if spread_points <= 0 and point > 0:
         spread_points = spread_price / point
     spread_pct = (spread_price / latest * 100.0) if latest > 0 else 0.0
-    thresholds = _get_quote_risk_thresholds(symbol)
+    thresholds = get_quote_risk_thresholds(symbol)
     spread_text = format_quote_price(spread_price, point)
 
     if spread_points >= thresholds["alert_points"] or spread_pct >= thresholds["alert_pct"]:
@@ -403,7 +399,7 @@ def build_trade_grade(
 ) -> dict[str, str]:
     symbol_key = str(symbol or "").strip().upper()
     family = _symbol_family(symbol_key)
-    status_text = str(row.get("status", "") or "").strip()
+    status_code = str(row.get("quote_status_code", "") or "").strip().lower()
     has_live_quote = bool(row.get("has_live_quote", False))
 
     if not connected:
@@ -414,7 +410,7 @@ def build_trade_grade(
             "tone": "warning",
             "source": "connection",
         }
-    if not has_live_quote or "休市" in status_text or "暂无" in status_text:
+    if not has_live_quote or status_code in {"inactive", "unknown_symbol", "not_selected", "error"}:
         return {
             "grade": "当前不宜出手",
             "detail": f"{symbol_key} 当前没有活跃报价，静态价格不适合做临场判断。",

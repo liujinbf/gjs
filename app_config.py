@@ -8,6 +8,11 @@ from dotenv import dotenv_values, load_dotenv, set_key
 PROJECT_DIR = Path(__file__).resolve().parent
 ENV_FILE = PROJECT_DIR / ".env"
 DEFAULT_SYMBOLS = ["XAUUSD", "XAGUSD", "EURUSD", "USDJPY"]
+DEFAULT_QUOTE_RISK_THRESHOLDS = {
+    "XAU": {"warn_points": 45.0, "alert_points": 70.0, "warn_pct": 0.018, "alert_pct": 0.030},
+    "XAG": {"warn_points": 80.0, "alert_points": 120.0, "warn_pct": 0.040, "alert_pct": 0.065},
+    "FX": {"warn_points": 25.0, "alert_points": 40.0, "warn_pct": 0.020, "alert_pct": 0.035},
+}
 EVENT_RISK_MODES = {
     "normal": "正常观察",
     "pre_event": "事件前高敏",
@@ -73,6 +78,39 @@ def normalize_symbols(raw_text: str, fallback_to_defaults: bool = True) -> list[
     if cleaned:
         return cleaned
     return list(DEFAULT_SYMBOLS) if bool(fallback_to_defaults) else []
+
+
+def get_quote_risk_thresholds(symbol: str) -> dict[str, float]:
+    """读取点差风险阈值，优先使用环境变量覆盖。"""
+    load_project_env()
+    payload = str(os.getenv("QUOTE_RISK_THRESHOLDS_JSON", "") or "").strip()
+    overrides = {}
+    if payload:
+        try:
+            parsed = json.loads(payload)
+            if isinstance(parsed, dict):
+                overrides = parsed
+        except json.JSONDecodeError:
+            overrides = {}
+
+    symbol_key = str(symbol or "").strip().upper()
+    family_key = "FX"
+    if symbol_key.startswith("XAU"):
+        family_key = "XAU"
+    elif symbol_key.startswith("XAG"):
+        family_key = "XAG"
+
+    merged = dict(DEFAULT_QUOTE_RISK_THRESHOLDS.get(family_key, DEFAULT_QUOTE_RISK_THRESHOLDS["FX"]))
+    override_payload = overrides.get(family_key, {}) if isinstance(overrides, dict) else {}
+    if isinstance(override_payload, dict):
+        for key in ("warn_points", "alert_points", "warn_pct", "alert_pct"):
+            value = override_payload.get(key)
+            try:
+                if value is not None:
+                    merged[key] = float(value)
+            except (TypeError, ValueError):
+                continue
+    return merged
 
 
 @dataclass

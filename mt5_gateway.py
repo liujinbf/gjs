@@ -356,100 +356,137 @@ def fetch_quotes(symbols: list[str], include_inactive: bool = True) -> list[dict
         symbol_key = str(symbol or "").strip().upper()
         if not symbol_key:
             continue
+        try:
+            selected = mt5.symbol_select(symbol_key, True)
+            info = mt5.symbol_info(symbol_key)
+            tick = mt5.symbol_info_tick(symbol_key)
+            has_live_quote = _is_live_tick(tick)
 
-        selected = mt5.symbol_select(symbol_key, True)
-        info = mt5.symbol_info(symbol_key)
-        tick = mt5.symbol_info_tick(symbol_key)
-        has_live_quote = _is_live_tick(tick)
+            if not include_inactive and not has_live_quote:
+                continue
 
-        if not include_inactive and not has_live_quote:
-            continue
-
-        bid = float(getattr(tick, "bid", 0.0) or 0.0) if tick is not None else 0.0
-        ask = float(getattr(tick, "ask", 0.0) or 0.0) if tick is not None else 0.0
-        last = float(getattr(tick, "last", 0.0) or 0.0) if tick is not None else 0.0
-        latest = last if last > 0 else ((bid + ask) / 2.0 if max(bid, ask) > 0 else 0.0)
-        point = float(getattr(info, "point", 0.0) or 0.0) if info is not None else 0.0
-        if point > 0 and bid > 0 and ask > 0 and ask >= bid:
-            spread = round(max((ask - bid) / point, 0.0), 6)
-        else:
-            spread = float(getattr(info, "spread", 0.0) or 0.0) if info is not None else 0.0
-        tick_time = int(getattr(tick, "time", 0) or 0) if tick is not None else 0
-        intraday_context = build_empty_intraday_context()
-        multi_timeframe_context = {
-            "multi_timeframe_context_ready": False,
-            "multi_timeframe_alignment": "unknown",
-            "multi_timeframe_alignment_text": "多周期不足",
-            "multi_timeframe_bias": "unknown",
-            "multi_timeframe_bias_text": "待确认",
-            "multi_timeframe_context_text": "",
-            "multi_timeframe_detail": "",
-            "m15_context_text": "",
-            "h1_context_text": "",
-            "h4_context_text": "",
-        }
-        key_level_context = build_empty_key_level_context()
-        breakout_context = build_empty_breakout_context()
-        if selected:
-            timeframe_contexts = {}
-            timeframe_rates = {}
-            for key, timeframe_attr, count, label in INTRADAY_CONTEXT_SPECS:
-                timeframe_value = getattr(mt5, timeframe_attr, None)
-                if timeframe_value is None:
-                    continue
-                try:
-                    recent_rates = mt5.copy_rates_from_pos(symbol_key, timeframe_value, 1, count)
-                    timeframe_rates[key] = recent_rates
-                    timeframe_contexts[key] = analyze_intraday_bars(symbol_key, recent_rates, lookback_label=label)
-                except Exception:  # noqa: BLE001
-                    timeframe_contexts[key] = build_empty_intraday_context()
-            intraday_context = dict(timeframe_contexts.get("m5", build_empty_intraday_context()))
-            multi_timeframe_context = analyze_multi_timeframe_context(timeframe_contexts)
-            multi_timeframe_context["m15_context_text"] = str(timeframe_contexts.get("m15", {}).get("intraday_context_text", "") or "").strip()
-            multi_timeframe_context["h1_context_text"]  = str(timeframe_contexts.get("h1",  {}).get("intraday_context_text", "") or "").strip()
-            multi_timeframe_context["h4_context_text"]  = str(timeframe_contexts.get("h4",  {}).get("intraday_context_text", "") or "").strip()
-            try:
-                key_level_context = analyze_key_levels(symbol_key, latest, timeframe_rates.get("h1", []))
-            except Exception:  # noqa: BLE001  numpy ValueError 等
-                key_level_context = build_empty_key_level_context()
-            try:
-                breakout_context = analyze_breakout_signal(key_level_context, timeframe_rates.get("m5", []))
-            except Exception:  # noqa: BLE001
-                breakout_context = build_empty_breakout_context()
-
-            tech_indicators = build_technical_indicators({
-                "m5": timeframe_rates.get("m5"),
-                "h1": timeframe_rates.get("h1"),
-                "h4": timeframe_rates.get("h4"),
-            })
-        else:
-            tech_indicators = {}
-
-        if info is None:
-            status = "未识别品种"
-        elif not selected:
-            status = "未加入市场报价"
-        elif has_live_quote:
-            status = "实时报价"
-        else:
-            status = "休市或暂无实时报价"
-
-        rows.append(
-            {
-                "symbol": symbol_key,
-                "latest_price": latest,
-                "bid": bid,
-                "ask": ask,
-                "spread_points": spread,
-                "point": point,
-                "tick_time": tick_time,
-                "status": status,
-                "has_live_quote": has_live_quote,
-                **intraday_context,
-                **multi_timeframe_context,
-                **key_level_context,
-                **breakout_context,
-                **tech_indicators,
+            bid = float(getattr(tick, "bid", 0.0) or 0.0) if tick is not None else 0.0
+            ask = float(getattr(tick, "ask", 0.0) or 0.0) if tick is not None else 0.0
+            last = float(getattr(tick, "last", 0.0) or 0.0) if tick is not None else 0.0
+            latest = last if last > 0 else ((bid + ask) / 2.0 if max(bid, ask) > 0 else 0.0)
+            point = float(getattr(info, "point", 0.0) or 0.0) if info is not None else 0.0
+            if point > 0 and bid > 0 and ask > 0 and ask >= bid:
+                spread = round(max((ask - bid) / point, 0.0), 6)
+            else:
+                spread = float(getattr(info, "spread", 0.0) or 0.0) if info is not None else 0.0
+            tick_time = int(getattr(tick, "time", 0) or 0) if tick is not None else 0
+            intraday_context = build_empty_intraday_context()
+            multi_timeframe_context = {
+                "multi_timeframe_context_ready": False,
+                "multi_timeframe_alignment": "unknown",
+                "multi_timeframe_alignment_text": "多周期不足",
+                "multi_timeframe_bias": "unknown",
+                "multi_timeframe_bias_text": "待确认",
+                "multi_timeframe_context_text": "",
+                "multi_timeframe_detail": "",
+                "m15_context_text": "",
+                "h1_context_text": "",
+                "h4_context_text": "",
             }
-        )
+            key_level_context = build_empty_key_level_context()
+            breakout_context = build_empty_breakout_context()
+            if selected:
+                timeframe_contexts = {}
+                timeframe_rates = {}
+                for key, timeframe_attr, count, label in INTRADAY_CONTEXT_SPECS:
+                    timeframe_value = getattr(mt5, timeframe_attr, None)
+                    if timeframe_value is None:
+                        continue
+                    try:
+                        recent_rates = mt5.copy_rates_from_pos(symbol_key, timeframe_value, 1, count)
+                        timeframe_rates[key] = recent_rates
+                        timeframe_contexts[key] = analyze_intraday_bars(symbol_key, recent_rates, lookback_label=label)
+                    except Exception:  # noqa: BLE001
+                        timeframe_contexts[key] = build_empty_intraday_context()
+                intraday_context = dict(timeframe_contexts.get("m5", build_empty_intraday_context()))
+                multi_timeframe_context = analyze_multi_timeframe_context(timeframe_contexts)
+                multi_timeframe_context["m15_context_text"] = str(timeframe_contexts.get("m15", {}).get("intraday_context_text", "") or "").strip()
+                multi_timeframe_context["h1_context_text"] = str(timeframe_contexts.get("h1", {}).get("intraday_context_text", "") or "").strip()
+                multi_timeframe_context["h4_context_text"] = str(timeframe_contexts.get("h4", {}).get("intraday_context_text", "") or "").strip()
+                try:
+                    key_level_context = analyze_key_levels(symbol_key, latest, timeframe_rates.get("h1", []))
+                except Exception:  # noqa: BLE001
+                    key_level_context = build_empty_key_level_context()
+                try:
+                    breakout_context = analyze_breakout_signal(key_level_context, timeframe_rates.get("m5", []))
+                except Exception:  # noqa: BLE001
+                    breakout_context = build_empty_breakout_context()
+                tech_indicators = build_technical_indicators({
+                    "m5": timeframe_rates.get("m5"),
+                    "h1": timeframe_rates.get("h1"),
+                    "h4": timeframe_rates.get("h4"),
+                })
+            else:
+                tech_indicators = {}
+
+            if info is None:
+                status = "未识别品种"
+                status_code = "unknown_symbol"
+            elif not selected:
+                status = "未加入市场报价"
+                status_code = "not_selected"
+            elif has_live_quote:
+                status = "实时报价"
+                status_code = "live"
+            else:
+                status = "休市或暂无实时报价"
+                status_code = "inactive"
+
+            rows.append(
+                {
+                    "symbol": symbol_key,
+                    "latest_price": latest,
+                    "bid": bid,
+                    "ask": ask,
+                    "spread_points": spread,
+                    "point": point,
+                    "tick_time": tick_time,
+                    "status": status,
+                    "quote_status_code": status_code,
+                    "has_live_quote": has_live_quote,
+                    **intraday_context,
+                    **multi_timeframe_context,
+                    **key_level_context,
+                    **breakout_context,
+                    **tech_indicators,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            logging.exception(f"MT5 拉取 {symbol_key} 报价异常：{exc}")
+            if not include_inactive:
+                continue
+            rows.append(
+                {
+                    "symbol": symbol_key,
+                    "latest_price": 0.0,
+                    "bid": 0.0,
+                    "ask": 0.0,
+                    "spread_points": 0.0,
+                    "point": 0.0,
+                    "tick_time": 0,
+                    "status": f"报价拉取异常：{exc}",
+                    "quote_status_code": "error",
+                    "has_live_quote": False,
+                    **build_empty_intraday_context(),
+                    **{
+                        "multi_timeframe_context_ready": False,
+                        "multi_timeframe_alignment": "unknown",
+                        "multi_timeframe_alignment_text": "多周期不足",
+                        "multi_timeframe_bias": "unknown",
+                        "multi_timeframe_bias_text": "待确认",
+                        "multi_timeframe_context_text": "",
+                        "multi_timeframe_detail": "",
+                        "m15_context_text": "",
+                        "h1_context_text": "",
+                        "h4_context_text": "",
+                    },
+                    **build_empty_key_level_context(),
+                    **build_empty_breakout_context(),
+                }
+            )
     return rows
