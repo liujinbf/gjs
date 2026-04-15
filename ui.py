@@ -27,12 +27,18 @@ from macro_news_feed import apply_macro_news_to_snapshot, load_macro_news_feed
 from monitor_engine import run_monitor_cycle
 from mt5_gateway import shutdown_connection
 from notification import get_notification_status, send_ai_brief_notification, send_learning_report_notification, send_notifications
+from quote_models import SnapshotItem
 from settings_dialog import MetalSettingsDialog
 from sim_signal_bridge import build_rule_sim_signal_decision
 from ui_panels import DashboardMetricsPanel, InsightPanel, LeftTabPanel, WatchListTable
 
 SNAPSHOT_TASK_QUEUE: queue.Queue = queue.Queue(maxsize=100)
 MACRO_SYNC_INTERVAL_MS = 15 * 60 * 1000
+
+
+def _normalize_snapshot_item(item: dict | SnapshotItem | None) -> dict:
+    """统一 UI 主链消费的快照项字段契约。"""
+    return SnapshotItem.from_payload(item).to_dict()
 
 
 def _queue_latest_task(task_payload: dict) -> int:
@@ -184,7 +190,7 @@ class AiBriefWorker(QThread):
 
 def _build_snapshot_live_quotes(snapshot: dict) -> dict:
     result = {}
-    for item in list((snapshot or {}).get("items", []) or []):
+    for item in [_normalize_snapshot_item(item) for item in list((snapshot or {}).get("items", []) or [])]:
         symbol = str(item.get("symbol", "") or "").strip().upper()
         latest_price = float(item.get("latest_price", 0.0) or 0.0)
         bid = float(item.get("bid", 0.0) or 0.0)
@@ -204,7 +210,7 @@ def _enrich_signal_with_snapshot_context(meta: dict, snapshot: dict) -> dict:
     symbol = str(payload.get("symbol", "") or "").strip().upper()
     if not symbol:
         return payload
-    for item in list((snapshot or {}).get("items", []) or []):
+    for item in [_normalize_snapshot_item(item) for item in list((snapshot or {}).get("items", []) or [])]:
         item_symbol = str(item.get("symbol", "") or "").strip().upper()
         if item_symbol != symbol:
             continue
@@ -226,7 +232,7 @@ def _detect_opportunity(snapshot: dict, rr_threshold: float = 2.0) -> bool:
     判定条件：任意观察品种的 risk_reward_ratio ≥ rr_threshold（2.0）
     且 risk_reward_ready == True。
     """
-    for item in list((snapshot or {}).get("items", []) or []):
+    for item in [_normalize_snapshot_item(item) for item in list((snapshot or {}).get("items", []) or [])]:
         if bool(item.get("risk_reward_ready", False)):
             rr = float(item.get("risk_reward_ratio", 0.0) or 0.0)
             if rr >= rr_threshold:

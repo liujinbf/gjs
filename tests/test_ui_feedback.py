@@ -13,6 +13,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication
 
+from quote_models import SnapshotItem
 from ui_panels import WatchListTable
 
 
@@ -112,6 +113,55 @@ def test_watch_list_feedback_shows_failure_when_snapshot_missing(monkeypatch):
 
         assert "反馈未写入" in widget._lbl_feedback_hint.text()
         assert "未找到可关联的市场快照" in widget._lbl_feedback_hint.text()
+    finally:
+        widget.close()
+        app.processEvents()
+
+
+def test_watch_list_accepts_snapshot_item_objects(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    captured = {}
+
+    def fake_record_user_feedback(**kwargs):
+        captured.update(kwargs)
+        return {
+            "inserted_count": 1,
+            "feedback_id": 22,
+            "snapshot_id": 78,
+        }
+
+    monkeypatch.setattr("knowledge_feedback.record_user_feedback", fake_record_user_feedback)
+
+    snapshot = {
+        "last_refresh_text": "2026-04-13 10:00:00",
+        "items": [
+            SnapshotItem(
+                symbol="XAUUSD",
+                latest_price=3310.20,
+                quote_status_code="live",
+                extra={
+                    "snapshot_id": 78,
+                    "latest_text": "3310.20",
+                    "quote_text": "Bid 3310.10 / Ask 3310.20 / 点差 10点",
+                    "status_text": "实时报价",
+                    "macro_focus": "关注美国 CPI。",
+                    "alert_state_text": "结构候选",
+                    "execution_note": "等待回踩确认。",
+                    "tone": "neutral",
+                },
+            )
+        ],
+    }
+
+    widget = WatchListTable()
+    try:
+        widget.update_from_snapshot(snapshot)
+        widget._on_row_clicked(widget.table.item(0, 0))
+        widget._submit_feedback("helpful")
+
+        assert captured["symbol"] == "XAUUSD"
+        assert captured["snapshot_id"] == 78
+        assert "已记录" in widget._lbl_feedback_hint.text()
     finally:
         widget.close()
         app.processEvents()

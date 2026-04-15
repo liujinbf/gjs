@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QPushButton, QTableWidget,
     QTableWidgetItem, QTextEdit, QTabWidget, QVBoxLayout, QWidget, QHeaderView
 )
+from quote_models import SnapshotItem
 import style
 from alert_history import (
     read_recent_history, summarize_effectiveness, summarize_recent_history
@@ -11,6 +12,11 @@ from alert_history import (
 from ai_history import (
     read_recent_ai_history, summarize_recent_ai_history
 )
+
+
+def _normalize_snapshot_item(item: dict | SnapshotItem | None) -> dict:
+    """统一前台面板消费的快照项字段契约。"""
+    return SnapshotItem.from_payload(item).to_dict()
 
 
 # ─────────────────────────────────────────────
@@ -373,7 +379,7 @@ class WatchListTable(QFrame):
         self._selected_feedback_target: dict = {}
 
     def update_from_snapshot(self, snapshot: dict):
-        items = snapshot.get("items", [])
+        items = [_normalize_snapshot_item(item) for item in list(snapshot.get("items", []) or [])]
         snapshot_time = str(snapshot.get("last_refresh_text", "") or "").strip()
         self.table.setRowCount(len(items))
         tone_bg = style.TABLE_ROW_BG_MAP
