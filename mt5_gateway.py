@@ -11,6 +11,7 @@ from app_config import load_project_env
 from breakout_context import analyze_breakout_signal, build_empty_breakout_context
 from intraday_context import analyze_intraday_bars, analyze_multi_timeframe_context, build_empty_intraday_context
 from key_levels import analyze_key_levels, build_empty_key_level_context
+from quote_models import QuoteRow
 from technical_indicators import build_technical_indicators
 
 try:
@@ -438,55 +439,53 @@ def fetch_quotes(symbols: list[str], include_inactive: bool = True) -> list[dict
                 status_code = "inactive"
 
             rows.append(
-                {
-                    "symbol": symbol_key,
-                    "latest_price": latest,
-                    "bid": bid,
-                    "ask": ask,
-                    "spread_points": spread,
-                    "point": point,
-                    "tick_time": tick_time,
-                    "status": status,
-                    "quote_status_code": status_code,
-                    "has_live_quote": has_live_quote,
-                    **intraday_context,
-                    **multi_timeframe_context,
-                    **key_level_context,
-                    **breakout_context,
-                    **tech_indicators,
-                }
+                QuoteRow(
+                    symbol=symbol_key,
+                    latest_price=latest,
+                    bid=bid,
+                    ask=ask,
+                    spread_points=spread,
+                    point=point,
+                    tick_time=tick_time,
+                    status=status,
+                    quote_status_code=status_code,
+                    has_live_quote=has_live_quote,
+                    extra={
+                        **intraday_context,
+                        **multi_timeframe_context,
+                        **key_level_context,
+                        **breakout_context,
+                        **tech_indicators,
+                    },
+                ).to_dict()
             )
         except Exception as exc:  # noqa: BLE001
             logging.exception(f"MT5 拉取 {symbol_key} 报价异常：{exc}")
             if not include_inactive:
                 continue
             rows.append(
-                {
-                    "symbol": symbol_key,
-                    "latest_price": 0.0,
-                    "bid": 0.0,
-                    "ask": 0.0,
-                    "spread_points": 0.0,
-                    "point": 0.0,
-                    "tick_time": 0,
-                    "status": f"报价拉取异常：{exc}",
-                    "quote_status_code": "error",
-                    "has_live_quote": False,
-                    **build_empty_intraday_context(),
-                    **{
-                        "multi_timeframe_context_ready": False,
-                        "multi_timeframe_alignment": "unknown",
-                        "multi_timeframe_alignment_text": "多周期不足",
-                        "multi_timeframe_bias": "unknown",
-                        "multi_timeframe_bias_text": "待确认",
-                        "multi_timeframe_context_text": "",
-                        "multi_timeframe_detail": "",
-                        "m15_context_text": "",
-                        "h1_context_text": "",
-                        "h4_context_text": "",
+                QuoteRow(
+                    symbol=symbol_key,
+                    status=f"报价拉取异常：{exc}",
+                    quote_status_code="error",
+                    has_live_quote=False,
+                    extra={
+                        **build_empty_intraday_context(),
+                        **{
+                            "multi_timeframe_context_ready": False,
+                            "multi_timeframe_alignment": "unknown",
+                            "multi_timeframe_alignment_text": "多周期不足",
+                            "multi_timeframe_bias": "unknown",
+                            "multi_timeframe_bias_text": "待确认",
+                            "multi_timeframe_context_text": "",
+                            "multi_timeframe_detail": "",
+                            "m15_context_text": "",
+                            "h1_context_text": "",
+                            "h4_context_text": "",
+                        },
+                        **build_empty_key_level_context(),
+                        **build_empty_breakout_context(),
                     },
-                    **build_empty_key_level_context(),
-                    **build_empty_breakout_context(),
-                }
+                ).to_dict()
             )
     return rows

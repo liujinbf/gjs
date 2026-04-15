@@ -13,6 +13,7 @@ from monitor_engine import (
     build_snapshot_from_rows,
     build_trade_grade,
 )
+from quote_models import QuoteRow
 
 
 def test_build_symbol_macro_focus_for_gold():
@@ -913,3 +914,31 @@ def test_build_snapshot_from_rows_includes_regime_summary():
     assert snapshot["regime_tag"] == "trend_expansion"
     assert "趋势扩张" in snapshot["regime_summary_text"]
     assert snapshot["items"][0]["regime_text"] == "趋势扩张"
+
+
+def test_build_snapshot_from_rows_accepts_quote_row_objects():
+    snapshot = build_snapshot_from_rows(
+        ["XAUUSD"],
+        [
+            QuoteRow(
+                symbol="XAUUSD",
+                latest_price=4759.82,
+                bid=4759.74,
+                ask=4759.91,
+                spread_points=17.0,
+                point=0.01,
+                tick_time=1000,
+                status="实时报价",
+                quote_status_code="live",
+                has_live_quote=True,
+                extra={"intraday_bias": "bullish"},
+            )
+        ],
+        True,
+        "MT5 连接成功。",
+        event_risk_mode="normal",
+    )
+    item = snapshot["items"][0]
+    assert item["symbol"] == "XAUUSD"
+    assert item["quote_status_code"] == "live"
+    assert item["latest_text"] != "--"

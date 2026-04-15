@@ -9,6 +9,7 @@ from app_config import EVENT_RISK_MODES
 from macro_focus import build_global_market_focus, build_symbol_macro_focus
 from monitor_cards import build_alert_status_cards, build_event_window_cards, build_macro_data_status_card, build_runtime_status_cards, build_spread_focus_cards
 from regime_classifier import build_snapshot_regime_summary, classify_market_regime
+from quote_models import QuoteRow
 from risk_reward import analyze_risk_reward
 from monitor_rules import (
     build_portfolio_trade_grade,
@@ -36,6 +37,14 @@ def _safe_field(d: dict, key: str) -> str:
         return str(val).lower().strip() if val is not None else ""
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _normalize_quote_row(row: dict | QuoteRow | None) -> dict:
+    """将原始报价行归一化为稳定字典结构。
+
+    说明：当前先在 monitor_engine 内部消费稳定字段契约，暂不一次性替换整个快照模型。
+    """
+    return QuoteRow.from_payload(row).to_dict()
 
 
 def _event_targets_symbol(context: dict, symbol: str) -> bool:
@@ -201,7 +210,8 @@ def build_snapshot_from_rows(
     status_state_file: Path | None = None,
 ) -> dict:
     snapshot_time = datetime.now()
-    rows_by_symbol = {str(item.get("symbol", "")).strip().upper(): item for item in rows or []}
+    normalized_rows = [_normalize_quote_row(item) for item in rows or []]
+    rows_by_symbol = {str(item.get("symbol", "")).strip().upper(): item for item in normalized_rows}
     items = []
     live_count = 0
     inactive_count = 0

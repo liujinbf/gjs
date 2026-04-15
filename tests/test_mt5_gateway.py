@@ -9,6 +9,7 @@ import mt5_gateway
 from breakout_context import analyze_breakout_signal
 from intraday_context import analyze_intraday_bars, analyze_multi_timeframe_context
 from key_levels import analyze_key_levels
+from quote_models import QuoteRow
 
 
 def test_is_live_tick_rejects_stale_tick():
@@ -256,3 +257,30 @@ def test_fetch_quotes_keeps_other_symbols_alive_when_one_symbol_errors(monkeypat
     assert xau["quote_status_code"] in {"live", "not_selected"}
     assert eur["quote_status_code"] == "error"
     assert eur["has_live_quote"] is False
+
+
+def test_quote_row_normalizes_core_fields():
+    row = QuoteRow.from_payload(
+        {
+            "symbol": "xauusd",
+            "latest_price": "4759.82",
+            "bid": "4759.74",
+            "ask": "4759.91",
+            "spread_points": "17",
+            "point": "0.01",
+            "tick_time": "1000",
+            "status": " 实时报价 ",
+            "quote_status_code": "LIVE",
+            "has_live_quote": 1,
+            "intraday_bias": "bullish",
+        }
+    )
+
+    payload = row.to_dict()
+    assert payload["symbol"] == "XAUUSD"
+    assert payload["latest_price"] == 4759.82
+    assert payload["spread_points"] == 17.0
+    assert payload["tick_time"] == 1000
+    assert payload["quote_status_code"] == "live"
+    assert payload["has_live_quote"] is True
+    assert payload["intraday_bias"] == "bullish"
