@@ -7,6 +7,7 @@ sys.path.insert(0, str(ROOT))
 
 from ai_briefing import _post_json_with_headers, build_snapshot_prompt, request_ai_brief
 from app_config import MetalMonitorConfig
+from external_feed_models import MacroDataItem
 from prompt_templates import build_metal_advisor_prompt, build_metal_batch_prompt
 from quote_models import SnapshotItem
 
@@ -148,6 +149,40 @@ def test_build_snapshot_prompt_accepts_snapshot_item_objects():
     assert "XAUUSD" in prompt
     assert "报价状态 活跃报价" in prompt
     assert "参考胜率 71%" in prompt
+
+
+def test_build_snapshot_prompt_accepts_macro_data_item_objects():
+    snapshot = {
+        "summary_text": "当前共观察 1 个品种。",
+        "alert_text": "贵金属提醒：先盯点差和美元方向。",
+        "market_text": "黄金优先看非农和 CPI。",
+        "macro_data_items": [
+            MacroDataItem(
+                name="美国10年期实际利率",
+                source="FRED",
+                published_at="2026-04-15 20:30:00",
+                value_text="1.85",
+                delta_text="较前值 -0.06",
+                direction="bullish",
+            )
+        ],
+        "items": [
+            {
+                "symbol": "XAUUSD",
+                "latest_text": "4759.82",
+                "quote_text": "Bid 4759.74 | Ask 4759.91 | 点差 17点",
+                "status_text": "实时报价",
+                "quote_status_code": "live",
+                "macro_focus": "重点看非农、CPI 和联储。",
+                "execution_note": "点差稳定，可继续观察。",
+            }
+        ],
+    }
+
+    prompt = build_snapshot_prompt(snapshot, rulebook={})
+
+    assert "美国10年期实际利率" in prompt
+    assert "当前值 1.85" in prompt
 
 
 def test_full_prompt_assets_are_independent():

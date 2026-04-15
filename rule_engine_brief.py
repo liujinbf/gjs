@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 
+from external_feed_models import MacroDataItem
 from quote_models import SnapshotItem
 from signal_protocol import SIGNAL_SCHEMA_VERSION, build_empty_signal_meta, validate_signal_meta
 
@@ -42,6 +43,11 @@ def _ss(v, default: str = "--") -> str:
 def _normalize_snapshot_item(item: dict | SnapshotItem | None) -> dict:
     """统一降级简报链消费的快照项字段契约。"""
     return SnapshotItem.from_payload(item).to_dict()
+
+
+def _normalize_macro_data_item(item: dict | MacroDataItem | None) -> dict:
+    """统一降级简报链消费的结构化宏观数据条目契约。"""
+    return MacroDataItem.from_payload(item).to_dict()
 
 
 def _first_item(snapshot: dict) -> dict:
@@ -172,7 +178,7 @@ def _describe_rr(item: dict) -> tuple[str, float, float]:
 
 
 def _get_vix_text(snapshot: dict) -> str:
-    for item in list(snapshot.get("macro_data_items", []) or []):
+    for item in [_normalize_macro_data_item(item) for item in list(snapshot.get("macro_data_items", []) or [])]:
         name = _ss(item.get("name", ""))
         if "VIX" in name:
             val_text = _ss(item.get("value_text", ""), "")

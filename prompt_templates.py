@@ -7,6 +7,7 @@
 3. 保持"硬核数据 + 大白话"双轨风格，既专业又易读
 """
 
+from external_feed_models import MacroDataItem
 from quote_models import SnapshotItem
 from signal_enums import QuoteStatus
 
@@ -32,6 +33,11 @@ def _format_quote_status_text(item: dict) -> str:
 def _normalize_snapshot_item(item: dict | SnapshotItem | None) -> dict:
     """统一提示词链消费的快照项字段契约。"""
     return SnapshotItem.from_payload(item).to_dict()
+
+
+def _normalize_macro_data_item(item: dict | MacroDataItem | None) -> dict:
+    """统一提示词链消费的结构化宏观数据条目契约。"""
+    return MacroDataItem.from_payload(item).to_dict()
 
 AI_BRIEF_SYSTEM_PROMPT = (
     "你是一位拥有 15 年经验的「贵金属与外汇资深量化交易教练」。\n"
@@ -345,7 +351,7 @@ def _build_item_lines(snapshot: dict) -> str:
 
 def _build_macro_data_lines(snapshot: dict) -> str:
     """Format WorldBank macro data items for the AI prompt."""
-    items = list(snapshot.get("macro_data_items", []) or [])
+    items = [_normalize_macro_data_item(item) for item in list(snapshot.get("macro_data_items", []) or [])]
     if not items:
         summary = str(snapshot.get("macro_data_summary_text", "") or "").strip()
         return summary or "暂未配置结构化宏观数据源。"
