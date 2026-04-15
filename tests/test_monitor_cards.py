@@ -5,7 +5,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from external_feed_models import MacroDataItem
-from monitor_cards import build_macro_data_status_card
+from monitor_cards import build_macro_data_status_card, build_spread_focus_cards
 
 
 def test_build_macro_data_status_card_accepts_macro_data_item_objects():
@@ -27,3 +27,18 @@ def test_build_macro_data_status_card_accepts_macro_data_item_objects():
     assert cards[1]["title"] == "美国10年期实际利率"
     assert "当前值 1.85" in cards[1]["detail"]
     assert "对贵金属偏多" in cards[1]["detail"]
+
+
+def test_build_spread_focus_cards_uses_normalized_quote_status_code():
+    cards = build_spread_focus_cards(
+        [
+            {
+                "symbol": "EURUSD",
+                "has_live_quote": False,
+                "status_text": "经纪商自定义暂停报价",
+                "quote_status_code": "",
+            }
+        ]
+    )
+
+    assert cards[0]["title"] == "EURUSD 暂无活跃报价"

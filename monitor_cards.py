@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 from external_feed_models import MacroDataItem
+from quote_models import SnapshotItem
 from signal_enums import QuoteStatus
 
 
-def _is_inactive_quote_item(item: dict) -> bool:
-    status_code = str(item.get("quote_status_code", "") or "").strip().lower()
-    if status_code in {
+def _normalize_snapshot_item(item: dict | SnapshotItem | None) -> dict:
+    """统一卡片层消费的快照项字段契约。"""
+    return SnapshotItem.from_payload(item).to_dict()
+
+
+def _is_inactive_quote_item(item: dict | SnapshotItem | None) -> bool:
+    normalized = _normalize_snapshot_item(item)
+    status_code = str(normalized.get("quote_status_code", "") or "").strip().lower()
+    return status_code in {
         QuoteStatus.INACTIVE,
         QuoteStatus.UNKNOWN_SYMBOL,
         QuoteStatus.NOT_SELECTED,
         QuoteStatus.ERROR,
-    }:
-        return True
-    status_text = str(item.get("status_text", "") or "").strip()
-    return "休市" in status_text or "暂无" in status_text
+    }
 
 
 def _normalize_macro_data_item(item: dict | MacroDataItem | None) -> dict:
