@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from external_feed_models import EventFeedItem, MacroDataItem, MacroNewsItem
 from monitor_rules import build_portfolio_trade_grade
 from quote_models import SnapshotItem
 
@@ -11,6 +12,21 @@ def _normalize_text(value: object) -> str:
 def _normalize_snapshot_item(item: dict | SnapshotItem | None) -> dict:
     """统一外部信号修正链消费的快照项字段契约。"""
     return SnapshotItem.from_payload(item).to_dict()
+
+
+def _normalize_event_feed_item(item: dict | EventFeedItem | None) -> dict:
+    """统一外部事件条目字段契约。"""
+    return EventFeedItem.from_payload(item).to_dict()
+
+
+def _normalize_macro_data_item(item: dict | MacroDataItem | None) -> dict:
+    """统一结构化宏观数据条目字段契约。"""
+    return MacroDataItem.from_payload(item).to_dict()
+
+
+def _normalize_macro_news_item(item: dict | MacroNewsItem | None) -> dict:
+    """统一外部资讯条目字段契约。"""
+    return MacroNewsItem.from_payload(item).to_dict()
 
 
 def _normalize_importance(value: object) -> str:
@@ -68,7 +84,8 @@ def _resolve_signal_bias(item: dict) -> str:
 
 def _pick_event_result_item(symbol: str, snapshot: dict) -> dict | None:
     candidates = []
-    for item in list(snapshot.get("event_feed_items", []) or []):
+    for raw_item in list(snapshot.get("event_feed_items", []) or []):
+        item = _normalize_event_feed_item(raw_item)
         bias = _normalize_text(item.get("result_bias", "")).lower()
         if bias not in {"bullish", "bearish"}:
             continue
@@ -76,7 +93,7 @@ def _pick_event_result_item(symbol: str, snapshot: dict) -> dict | None:
             continue
         if not _symbol_matches(symbol, item.get("symbols", [])):
             continue
-        candidates.append(dict(item))
+        candidates.append(item)
     if not candidates:
         return None
     candidates.sort(
@@ -92,13 +109,14 @@ def _pick_event_result_item(symbol: str, snapshot: dict) -> dict | None:
 
 def _pick_macro_data_item(symbol: str, snapshot: dict) -> dict | None:
     candidates = []
-    for item in list(snapshot.get("macro_data_items", []) or []):
+    for raw_item in list(snapshot.get("macro_data_items", []) or []):
+        item = _normalize_macro_data_item(raw_item)
         direction = _normalize_text(item.get("direction", "")).lower()
         if direction not in {"bullish", "bearish"}:
             continue
         if not _symbol_matches(symbol, item.get("symbols", [])):
             continue
-        candidates.append(dict(item))
+        candidates.append(item)
     if not candidates:
         return None
     candidates.sort(
@@ -115,14 +133,15 @@ def _pick_macro_data_item(symbol: str, snapshot: dict) -> dict | None:
 def _pick_macro_news_item(symbol: str, snapshot: dict) -> dict | None:
     target_symbol = _normalize_text(symbol).upper()
     candidates = []
-    for item in list(snapshot.get("macro_news_items", []) or []):
+    for raw_item in list(snapshot.get("macro_news_items", []) or []):
+        item = _normalize_macro_news_item(raw_item)
         bias_by_symbol = dict(item.get("bias_by_symbol", {}) or {})
         bias = _normalize_text(bias_by_symbol.get(target_symbol, "")).lower()
         if bias not in {"bullish", "bearish"}:
             continue
         if not _symbol_matches(target_symbol, item.get("symbols", [])):
             continue
-        candidates.append(dict(item))
+        candidates.append(item)
     if not candidates:
         return None
     candidates.sort(
