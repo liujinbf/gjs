@@ -128,8 +128,8 @@ def save_backtest_results(data: dict) -> None:
 def evaluate_signal(signal_meta: dict, start_time: datetime, now_time: datetime) -> str:
     """
     用 M5 K 线评估 AI 信号胜败。
-    N-004 修复：同棒内 SL/TP 均被触及时，比较各自距入场价的距离，
-    距离更近的先触发（而非硬编码止损优先），消除约 5~10% 的胜率低估偏差。
+    DEFECT-101 修复：同棒内 SL/TP 均被触及时，统一按最悲观原则记为 loss。
+    这样不会因为 K 线内部路径未知而高估胜率，适合作为常驻实盘机器人的保守回测口径。
     Returns: 'win', 'loss', or 'pending'
     """
     if not HAS_MT5:
@@ -168,16 +168,7 @@ def evaluate_signal(signal_meta: dict, start_time: datetime, now_time: datetime)
             tp_hit = low <= tp
 
         if sl_hit and tp_hit:
-            # N-004 修复：同棒内两端均触及 → 比较距入场价的距离，近者先触发
-            if entry > 0:
-                dist_sl = abs(entry - sl)
-                dist_tp = abs(tp - entry)
-                return "loss" if dist_sl <= dist_tp else "win"
-            else:
-                # DEFECT-002 修复延伸：入场价未知时按 RR 比保守估算
-                # SL 和 TP 距中点的距离比较，距中点近者先触发
-                mid = (sl + tp) / 2.0
-                return "loss" if abs(sl - mid) <= abs(tp - mid) else "win"
+            return "loss"
 
         elif sl_hit:
             return "loss"

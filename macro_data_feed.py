@@ -478,11 +478,10 @@ def _load_yfinance_item(spec: dict, env: dict | None = None) -> dict:
     indicators = res.get("indicators", {}).get("quote", [{}])[0]
     closes = list(indicators.get("close", []) or [])
 
-    # 过滤掉 None 值
     valid_data = []
-    for i in range(len(timestamps)):
-        if i < len(closes) and closes[i] is not None:
-            valid_data.append((timestamps[i], closes[i]))
+    for ts, close in zip(timestamps, closes):
+        if close is not None:
+            valid_data.append((ts, close))
 
     if not valid_data:
         raise RuntimeError(f"Yahoo Finance 未返回 {symbol} 的有效收盘价")
@@ -663,6 +662,13 @@ def load_macro_data_feed(
         }
 
     cached = _read_cache(cache_path)
+    cached_item_lookup = {}
+    if _normalize_text(cached.get("spec_text", "")) == _normalize_text(clean_spec_source):
+        for cached_item in list(cached.get("items", []) or []):
+            item = _normalize_macro_data_item(cached_item)
+            key = (_normalize_text(item.get("source", "")).lower(), _normalize_text(item.get("name", "")))
+            if all(key):
+                cached_item_lookup[key] = item
     if bool(cache_only):
         if _normalize_text(cached.get("spec_text", "")) == clean_spec_source and _parse_cache_time(cached.get("fetched_at")) is not None:
             fetched_at = _parse_cache_time(cached.get("fetched_at"))
@@ -737,7 +743,14 @@ def load_macro_data_feed(
                 continue
             items.append(item)
         except Exception as exc:  # noqa: BLE001
-            errors.append(f"{_normalize_text(spec.get('name', provider or 'unknown'))}: {_normalize_text(exc)}")
+            spec_name = _normalize_text(spec.get("name", provider or "unknown"))
+            source_key = "alpha vantage" if provider == "alphavantage" else ""
+            cached_item = cached_item_lookup.get((source_key, spec_name)) if source_key else None
+            if cached_item:
+                items.append(cached_item)
+                errors.append(f"{spec_name}: {_normalize_text(exc)}，已回退到缓存值")
+                continue
+            errors.append(f"{spec_name}: {_normalize_text(exc)}")
 
     ranked_items = sorted(
         items,

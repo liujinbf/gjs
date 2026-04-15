@@ -18,6 +18,14 @@ def test_is_live_tick_rejects_stale_tick():
     assert mt5_gateway._is_live_tick(tick, now_ts=1_400, max_age_sec=180) is False
 
 
+def test_estimate_broker_utc_offset_supports_half_hour_alignment():
+    offset = mt5_gateway._estimate_broker_utc_offset(
+        tick_time=1_000_000 + 19_800,
+        now_ts=1_000_000,
+    )
+    assert offset == 19_800.0
+
+
 def test_is_connection_alive_uses_terminal_info(monkeypatch):
     class FakeMt5:
         @staticmethod

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+RISK_REWARD_EPSILON = 1e-5
+
 
 def _format_price(value: float, point: float = 0.0) -> str:
     decimals = 2
@@ -189,7 +191,7 @@ def analyze_risk_reward(row: dict) -> dict:
 
     risk = abs(current_price - stop_price)
     reward = abs(target_price - current_price)
-    if min(risk, reward) <= 0:
+    if risk < RISK_REWARD_EPSILON or reward < RISK_REWARD_EPSILON:
         return build_empty_risk_reward_context()
     if entry_zone_low <= 0 or entry_zone_high <= 0:
         return build_empty_risk_reward_context()

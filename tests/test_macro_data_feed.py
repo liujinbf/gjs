@@ -285,6 +285,117 @@ def test_load_macro_data_feed_alphavantage_adapter(monkeypatch, tmp_path):
     assert nfp_item["direction"] == "bearish"
 
 
+def test_load_macro_data_feed_alphavantage_falls_back_to_cached_item_on_rate_limit(monkeypatch, tmp_path):
+    spec_inline = """
+[
+  {
+    "provider": "alphavantage",
+    "name": "美国核心 CPI（月频）",
+    "function": "CPI",
+    "interval": "monthly",
+    "api_key_env": "ALPHAVANTAGE_API_KEY",
+    "symbols": ["XAUUSD"],
+    "importance": "high",
+    "bias_mode": "higher_bearish"
+  }
+]
+"""
+    cache_file = tmp_path / "av_cache.json"
+    _write_cache(
+        cache_file,
+        {
+            "spec_text": spec_inline.strip(),
+            "fetched_at": "2026-04-13T17:00:00",
+            "fetched_at_text": "2026-04-13 17:00:00",
+            "summary_text": "结构化宏观数据：近一轮高相关数据包括 美国核心 CPI（月频） 312.3（较前值 +1.2，偏空）。",
+            "items": [
+                {
+                    "name": "美国核心 CPI（月频）",
+                    "source": "Alpha Vantage",
+                    "published_at": "2026-03-01",
+                    "latest_value": 312.3,
+                    "previous_value": 311.1,
+                    "value_text": "312.3",
+                    "delta_text": "较前值 +1.2",
+                    "importance": "high",
+                    "symbols": ["XAUUSD"],
+                    "bias_mode": "higher_bearish",
+                    "direction": "bearish",
+                    "bias_text": "XAUUSD 在该指标上通常呈现“数值上行偏空、数值回落偏多”。",
+                }
+            ],
+        },
+    )
+
+    def fake_fetch(url, payload=None, headers=None, timeout=10):
+        return {"Note": "Thank you for using Alpha Vantage! Our standard API rate limit is 25 requests per day."}
+
+    monkeypatch.setattr("macro_data_feed._fetch_json", fake_fetch)
+
+    result = load_macro_data_feed(
+        enabled=True,
+        spec_source=spec_inline,
+        refresh_min=0,
+        symbols=["XAUUSD"],
+        now=datetime(2026, 4, 14, 18, 0, 0),
+        cache_file=cache_file,
+        env={"ALPHAVANTAGE_API_KEY": "demo-key"},
+    )
+
+    assert result["status"] == "fresh"
+    assert result["item_count"] == 1
+    assert result["items"][0]["source"] == "Alpha Vantage"
+    assert "已回退到缓存值" in result["error_text"]
+
+
+def test_load_macro_data_feed_yfinance_uses_zip_to_ignore_misaligned_trailing_timestamps(monkeypatch, tmp_path):
+    spec_inline = """
+[
+  {
+    "provider": "yfinance",
+    "name": "美元指数 (DXY)",
+    "symbol": "DX-Y.NYB",
+    "symbols": ["XAUUSD"],
+    "importance": "high",
+    "bias_mode": "higher_bearish"
+  }
+]
+"""
+
+    def fake_fetch(url, payload=None, headers=None, timeout=10):
+        return {
+            "chart": {
+                "result": [
+                    {
+                        "timestamp": [1713052800, 1713139200, 1713225600],
+                        "indicators": {
+                            "quote": [
+                                {
+                                    "close": [104.2, 104.5],
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        }
+
+    monkeypatch.setattr("macro_data_feed._fetch_json", fake_fetch)
+
+    result = load_macro_data_feed(
+        enabled=True,
+        spec_source=spec_inline,
+        refresh_min=60,
+        symbols=["XAUUSD"],
+        now=datetime(2026, 4, 13, 18, 0, 0),
+        cache_file=tmp_path / "yf_zip_cache.json",
+    )
+
+    assert result["status"] == "fresh"
+    assert result["item_count"] == 1
+    assert result["items"][0]["latest_value"] == 104.5
+
+
 def test_official_json_file_is_valid_and_has_new_providers():
     """官方 JSON 数据源文件格式验证：确保 yfinance 和 alphavantage 条目已正确加入。"""
     import json

@@ -46,7 +46,7 @@ AUTO_RECONNECT_MIN_INTERVAL_SEC = 15  # 至少 15 秒才允许再次主动重连
 # （UTC）直接相减会产生数小时时差。通过第一个有效 tick 自动校准时差，
 # 消除之前 delta > 3600 的脆弱 hardfix。
 _broker_utc_offset_sec: float | None = None   # 经纪商 UTC 偏移（秒），None 表示未校准
-_BROKER_OFFSET_SNAP_HOUR = 3600.0             # 将估算值对齐到最近整小时（±30min 精度）
+_BROKER_OFFSET_SNAP_HOUR = 1800.0             # 将估算值对齐到最近 30 分钟，兼容半小时偏移的服务器时区
 
 INTRADAY_CONTEXT_SPECS = [
     ("m5",  "TIMEFRAME_M5",  288, "近24小时"),   # 288 M5 bars = 24h
@@ -99,7 +99,7 @@ def resolve_mt5_terminal_path(refresh: bool = False) -> str:
 def _estimate_broker_utc_offset(tick_time: int, now_ts: float) -> float:
     """根据首个有效 tick 估算经纪商服务器相对于 UTC 的时差（秒）。
 
-    策略：raw_delta = tick.time - now_utc，将其对齐到最近整小时（-14h ~ +14h），
+    策略：raw_delta = tick.time - now_utc，将其对齐到最近 30 分钟（-14h ~ +14h），
     用于后续将 tick.time 转换为近似 UTC 时间戳进行新鲜度判断。
 
     Args:
@@ -110,7 +110,7 @@ def _estimate_broker_utc_offset(tick_time: int, now_ts: float) -> float:
         经纪商时差估算值（秒），例如 EET GMT+3 → 10800.0
     """
     raw = float(tick_time) - now_ts
-    # 对齐到最近整小时，消除网络延迟和轻微时钟漂移的干扰
+    # 对齐到最近 30 分钟，兼容 UTC+5:30 这类非整点服务器偏移
     snapped = round(raw / _BROKER_OFFSET_SNAP_HOUR) * _BROKER_OFFSET_SNAP_HOUR
     # 限制在合理范围内：UTC-14 ~ UTC+14
     return max(-50400.0, min(50400.0, snapped))
