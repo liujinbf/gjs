@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from quote_models import SnapshotItem
 from sim_signal_bridge import build_rule_sim_signal, build_rule_sim_signal_decision
 
 
@@ -195,3 +196,39 @@ def test_build_rule_sim_signal_blocks_short_when_price_is_near_lower_side():
 
     assert signal is None
     assert "下沿追空" in reason
+
+
+def test_build_rule_sim_signal_accepts_snapshot_item_objects():
+    signal = build_rule_sim_signal(
+        {
+            "items": [
+                SnapshotItem(
+                    symbol="XAUUSD",
+                    latest_price=4759.82,
+                    bid=4759.74,
+                    ask=4759.91,
+                    spread_points=17.0,
+                    has_live_quote=True,
+                    trade_grade="可轻仓试仓",
+                    trade_grade_source="structure",
+                    quote_status_code="live",
+                    signal_side="long",
+                    extra={
+                        "risk_reward_ready": True,
+                        "risk_reward_ratio": 2.4,
+                        "risk_reward_stop_price": 4748.0,
+                        "risk_reward_target_price": 4788.0,
+                        "risk_reward_target_price_2": 4810.0,
+                        "risk_reward_entry_zone_low": 4750.0,
+                        "risk_reward_entry_zone_high": 4765.0,
+                        "atr14": 18.0,
+                        "risk_reward_atr": 18.0,
+                    },
+                )
+            ]
+        }
+    )
+
+    assert signal is not None
+    assert signal["symbol"] == "XAUUSD"
+    assert signal["action"] == "long"

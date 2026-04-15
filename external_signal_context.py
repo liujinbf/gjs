@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from monitor_rules import build_portfolio_trade_grade
+from quote_models import SnapshotItem
 
 
 def _normalize_text(value: object) -> str:
     return " ".join(str(value or "").replace("\n", " ").split()).strip()
+
+
+def _normalize_snapshot_item(item: dict | SnapshotItem | None) -> dict:
+    """统一外部信号修正链消费的快照项字段契约。"""
+    return SnapshotItem.from_payload(item).to_dict()
 
 
 def _normalize_importance(value: object) -> str:
@@ -181,7 +187,7 @@ def apply_external_signal_context(snapshot: dict, event_context: dict | None = N
     items = []
     conflict_notes = []
     alignment_notes = []
-    for raw_item in list(payload.get("items", []) or []):
+    for raw_item in [_normalize_snapshot_item(item) for item in list(payload.get("items", []) or [])]:
         item = dict(raw_item or {})
         symbol = _normalize_text(item.get("symbol", "")).upper()
         signal_bias = _resolve_signal_bias(item)

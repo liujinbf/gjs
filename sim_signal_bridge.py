@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from quote_models import SnapshotItem
 from signal_protocol import normalize_signal_meta, validate_signal_meta
 
 BASE_RULE_SIM_RR = 1.6
@@ -9,6 +10,11 @@ MODEL_CONFIRM_PROBABILITY = 0.68
 
 def _normalize_text(value: object) -> str:
     return " ".join(str(value or "").replace("\n", " ").split()).strip()
+
+
+def _normalize_snapshot_item(item: dict | SnapshotItem | None) -> dict:
+    """统一模拟试仓桥接链消费的快照项字段契约。"""
+    return SnapshotItem.from_payload(item).to_dict()
 
 
 def _pick_entry_price(item: dict, action: str) -> float:
@@ -147,7 +153,7 @@ def build_rule_sim_signal_decision(snapshot: dict) -> tuple[dict | None, str]:
     actionable_candidates: list[tuple[float, dict]] = []
     blocked_reasons: list[str] = []
 
-    for item in [dict(item or {}) for item in list((snapshot or {}).get("items", []) or [])]:
+    for item in [_normalize_snapshot_item(item) for item in list((snapshot or {}).get("items", []) or [])]:
         eligible, reason, action = _evaluate_item_for_sim(item)
         symbol = _normalize_text(item.get("symbol", "")).upper()
         if not symbol:
