@@ -592,8 +592,8 @@ def test_build_markdown_includes_trade_grade_and_next_review():
         }
     )
     assert "品种：XAUUSD" in markdown
-    assert "当前价格：4,759.82" in markdown
-    assert "报价：Bid 4,759.74 | Ask 4,759.91 | 点差 17点" in markdown
+    assert "价格：4,759.82" in markdown
+    assert "盘口：Bid 4,759.74 / Ask 4,759.91 · 点差 17点" in markdown
     assert "结论：**当前不宜出手**" in markdown
     assert "**先看这个**" in markdown
     assert "复核：等点差恢复正常后再复核。" in markdown
@@ -652,15 +652,18 @@ def test_build_markdown_includes_risk_reward_action_levels():
             "entry_invalidation_text": "若价格重新跌回 4748.00 下方，当前多头结构可视为失效。",
         }
     )
-    assert "当前价格：4,759.82" in markdown
-    assert "报价：Bid 4,759.74 | Ask 4,759.91 | 点差 17点" in markdown
+    assert "价格：4,759.82" in markdown
+    assert "盘口：Bid 4,759.74 / Ask 4,759.91 · 点差 17点" in markdown
     assert "**决策速览**" in markdown
     assert "环境：趋势扩张" in markdown
     assert "模型：参考胜率 74%（中等信心），与当前结构基本一致" in markdown
     assert "外部：宏观数据：美国10年期实际利率 当前值 1.85，较前值 -0.06，背景偏多" in markdown
+    assert "**执行卡片**" in markdown
+    assert "观察 观察进场区间 4760.00 - 4770.00" in markdown
+    assert "止损 4,748.00" in markdown
+    assert "目标 4,788.00 / 4,810.00" in markdown
+    assert "盈亏比 1:2.40" in markdown
     assert "**执行参数**" in markdown
-    assert "盈亏比：1:2.40" in markdown
-    assert "模型参考：74%（中等信心）" in markdown
     assert "止损：4,748.00" in markdown
     assert "目标1：4,788.00" in markdown
     assert "目标2：4,810.00" in markdown

@@ -44,6 +44,42 @@ def _format_spread_points(value: float) -> str:
     return f"{spread:.1f}点"
 
 
+def _build_execution_card_line(entry: dict, price_point: float) -> str:
+    parts: list[str] = []
+    risk_reward_ratio = entry.get("risk_reward_ratio")
+    entry_zone_text = _normalize_text(entry.get("entry_zone_text", ""))
+    stop_loss_price = entry.get("stop_loss_price")
+    take_profit_1 = entry.get("take_profit_1")
+    take_profit_2 = entry.get("take_profit_2")
+
+    if entry_zone_text:
+        parts.append(f"观察 {_clip_text(entry_zone_text, 28)}")
+    if stop_loss_price:
+        try:
+            parts.append(f"止损 {_format_price(float(stop_loss_price), price_point)}")
+        except (TypeError, ValueError):
+            pass
+    target_parts = []
+    if take_profit_1:
+        try:
+            target_parts.append(_format_price(float(take_profit_1), price_point))
+        except (TypeError, ValueError):
+            pass
+    if take_profit_2:
+        try:
+            target_parts.append(_format_price(float(take_profit_2), price_point))
+        except (TypeError, ValueError):
+            pass
+    if target_parts:
+        parts.append(f"目标 {' / '.join(target_parts)}")
+    if risk_reward_ratio:
+        try:
+            parts.append(f"盈亏比 1:{float(risk_reward_ratio):.2f}")
+        except (TypeError, ValueError):
+            pass
+    return "；".join(parts[:4])
+
+
 def _build_structure_decision_lines(entry: dict) -> list[str]:
     lines: list[str] = []
     regime_text = _normalize_text(entry.get("regime_text", ""))
@@ -141,7 +177,7 @@ def _build_markdown(entry: dict) -> str:
         headline_lines.append(f"- 品种：{symbol}")
     if latest_price:
         try:
-            price_line = f"- 当前价格：{_format_price(float(latest_price), price_point)}"
+            price_line = f"- 价格：{_format_price(float(latest_price), price_point)}"
             if change_pct is not None:
                 sign = "+" if float(change_pct) >= 0 else ""
                 price_line += f"（24h涨跌 {sign}{change_pct}%）"
@@ -160,7 +196,7 @@ def _build_markdown(entry: dict) -> str:
         except (TypeError, ValueError):
             quote_parts = []
         if quote_parts:
-            headline_lines.append(f"- 报价：{' | '.join(quote_parts)}")
+            headline_lines.append(f"- 盘口：{' / '.join(quote_parts[:2])}" + (f" · {quote_parts[2]}" if len(quote_parts) > 2 else ""))
     lines.extend(headline_lines)
 
     category_key = category.lower()
@@ -175,22 +211,12 @@ def _build_markdown(entry: dict) -> str:
 
     if category_key == "structure":
         _append_block(lines, "决策速览", _build_structure_decision_lines(entry))
+        execution_card_line = _build_execution_card_line(entry, price_point)
+        if execution_card_line:
+            _append_block(lines, "执行卡片", [f"- {execution_card_line}"])
 
     action_lines = []
     if category_key == "structure":
-        if risk_reward_ratio:
-            try:
-                action_lines.append(f"- 盈亏比：1:{float(risk_reward_ratio):.2f}")
-            except (TypeError, ValueError):
-                pass
-        if model_ready and model_win_probability is not None:
-            try:
-                model_line = f"- 模型参考：{float(model_win_probability) * 100:.0f}%"
-                if model_confidence_text:
-                    model_line += f"（{model_confidence_text}）"
-                action_lines.append(model_line)
-            except (TypeError, ValueError):
-                pass
         if entry_zone_text:
             action_lines.append(f"- 观察区间：{_clip_text(entry_zone_text, 64)}")
         if stop_loss_price:
