@@ -983,12 +983,20 @@ def test_snapshot_item_exports_core_fields():
         multi_timeframe_alignment_text="多周期同向",
         multi_timeframe_bias="bullish",
         multi_timeframe_bias_text="偏多",
+        intraday_context_text="近1小时偏多",
+        multi_timeframe_context_text="多周期同向偏多",
+        key_level_context_text="上破高位",
+        key_level_state="breakout_above",
+        key_level_state_text="上破高位",
         breakout_direction="bullish",
+        breakout_context_text="上破已确认",
         breakout_state="confirmed_above",
         breakout_state_text="上破已确认",
+        retest_context_text="回踩已确认",
         retest_state="confirmed_support",
         retest_state_text="回踩已确认",
         risk_reward_ready=True,
+        risk_reward_context_text="盈亏比优秀",
         risk_reward_state="good",
         risk_reward_state_text="盈亏比优秀",
         risk_reward_ratio=1.8,
@@ -997,15 +1005,26 @@ def test_snapshot_item_exports_core_fields():
         risk_reward_target_price_2=4810.0,
         risk_reward_entry_zone_low=4750.0,
         risk_reward_entry_zone_high=4765.0,
+        risk_reward_entry_zone_text="观察区间 4750-4765",
+        risk_reward_position_text="轻仓试仓",
+        risk_reward_invalidation_text="跌破 4748 失效",
         risk_reward_atr=18.0,
         atr14=18.0,
         atr14_h4=42.0,
+        event_mode_text="事件前高敏",
+        event_active_name="美国 CPI",
+        event_active_time_text="2026-04-15 20:30",
+        event_scope_text="影响 XAUUSD",
+        event_applies=True,
+        tech_summary="技术面偏多",
+        tech_summary_h4="H4 偏多",
+        h4_context_text="H4 维持上行",
         model_ready=True,
         model_win_probability=0.74,
         model_confidence_text="中等信心",
         model_note="本地模型参考胜率约 74%。",
         snapshot_id=88,
-        extra={"intraday_context_text": "近1小时偏多"},
+        extra={"intraday_volatility": "elevated"},
     ).to_dict()
 
     assert item["symbol"] == "XAUUSD"
@@ -1015,9 +1034,14 @@ def test_snapshot_item_exports_core_fields():
     assert item["alert_state_text"] == "结构候选"
     assert item["regime_text"] == "趋势扩张"
     assert item["intraday_bias"] == "bullish"
+    assert item["intraday_context_text"] == "近1小时偏多"
     assert item["multi_timeframe_alignment"] == "aligned"
+    assert item["key_level_context_text"] == "上破高位"
     assert item["risk_reward_ratio"] == 1.8
+    assert item["risk_reward_entry_zone_text"] == "观察区间 4750-4765"
     assert item["atr14"] == 18.0
+    assert item["event_mode_text"] == "事件前高敏"
+    assert item["tech_summary_h4"] == "H4 偏多"
     assert item["model_win_probability"] == 0.74
     assert item["snapshot_id"] == 88
 
@@ -1029,11 +1053,17 @@ def test_snapshot_item_from_payload_normalizes_high_frequency_fields():
             "event_importance_text": "高影响",
             "macro_focus": "关注黄金与美元方向。",
             "intraday_bias": "bullish",
+            "intraday_context_text": "近1小时偏多",
             "multi_timeframe_alignment": "aligned",
+            "key_level_context_text": "上破高位",
             "risk_reward_ready": 1,
+            "risk_reward_context_text": "盈亏比优秀",
             "risk_reward_ratio": "1.8",
             "risk_reward_stop_price": "4748.0",
+            "risk_reward_entry_zone_text": "观察区间 4750-4765",
             "atr14": "18.0",
+            "event_mode_text": "事件前高敏",
+            "tech_summary_h4": "H4 偏多",
             "model_ready": 1,
             "model_win_probability": "0.74",
             "snapshot_id": "88",
@@ -1044,11 +1074,17 @@ def test_snapshot_item_from_payload_normalizes_high_frequency_fields():
     assert item["event_importance_text"] == "高影响"
     assert item["macro_focus"] == "关注黄金与美元方向。"
     assert item["intraday_bias"] == "bullish"
+    assert item["intraday_context_text"] == "近1小时偏多"
     assert item["multi_timeframe_alignment"] == "aligned"
+    assert item["key_level_context_text"] == "上破高位"
     assert item["risk_reward_ready"] is True
+    assert item["risk_reward_context_text"] == "盈亏比优秀"
     assert item["risk_reward_ratio"] == 1.8
     assert item["risk_reward_stop_price"] == 4748.0
+    assert item["risk_reward_entry_zone_text"] == "观察区间 4750-4765"
     assert item["atr14"] == 18.0
+    assert item["event_mode_text"] == "事件前高敏"
+    assert item["tech_summary_h4"] == "H4 偏多"
     assert item["model_ready"] is True
     assert item["model_win_probability"] == 0.74
     assert item["snapshot_id"] == 88

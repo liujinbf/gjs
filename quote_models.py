@@ -171,12 +171,20 @@ class SnapshotItem:
     multi_timeframe_alignment_text: str = ""
     multi_timeframe_bias: str = ""
     multi_timeframe_bias_text: str = ""
+    intraday_context_text: str = ""
+    multi_timeframe_context_text: str = ""
+    key_level_context_text: str = ""
+    key_level_state: str = ""
+    key_level_state_text: str = ""
     breakout_direction: str = ""
+    breakout_context_text: str = ""
     breakout_state: str = ""
     breakout_state_text: str = ""
+    retest_context_text: str = ""
     retest_state: str = ""
     retest_state_text: str = ""
     risk_reward_ready: bool = False
+    risk_reward_context_text: str = ""
     risk_reward_state: str = ""
     risk_reward_state_text: str = ""
     risk_reward_ratio: float = 0.0
@@ -185,9 +193,20 @@ class SnapshotItem:
     risk_reward_target_price_2: float = 0.0
     risk_reward_entry_zone_low: float = 0.0
     risk_reward_entry_zone_high: float = 0.0
+    risk_reward_entry_zone_text: str = ""
+    risk_reward_position_text: str = ""
+    risk_reward_invalidation_text: str = ""
     risk_reward_atr: float = 0.0
     atr14: float = 0.0
     atr14_h4: float = 0.0
+    event_mode_text: str = ""
+    event_active_name: str = ""
+    event_active_time_text: str = ""
+    event_scope_text: str = ""
+    event_applies: bool = False
+    tech_summary: str = ""
+    tech_summary_h4: str = ""
+    h4_context_text: str = ""
     model_ready: bool = False
     model_win_probability: float = 0.0
     model_confidence_text: str = ""
@@ -238,12 +257,20 @@ class SnapshotItem:
             "multi_timeframe_alignment_text",
             "multi_timeframe_bias",
             "multi_timeframe_bias_text",
+            "intraday_context_text",
+            "multi_timeframe_context_text",
+            "key_level_context_text",
+            "key_level_state",
+            "key_level_state_text",
             "breakout_direction",
+            "breakout_context_text",
             "breakout_state",
             "breakout_state_text",
+            "retest_context_text",
             "retest_state",
             "retest_state_text",
             "risk_reward_ready",
+            "risk_reward_context_text",
             "risk_reward_state",
             "risk_reward_state_text",
             "risk_reward_ratio",
@@ -252,9 +279,20 @@ class SnapshotItem:
             "risk_reward_target_price_2",
             "risk_reward_entry_zone_low",
             "risk_reward_entry_zone_high",
+            "risk_reward_entry_zone_text",
+            "risk_reward_position_text",
+            "risk_reward_invalidation_text",
             "risk_reward_atr",
             "atr14",
             "atr14_h4",
+            "event_mode_text",
+            "event_active_name",
+            "event_active_time_text",
+            "event_scope_text",
+            "event_applies",
+            "tech_summary",
+            "tech_summary_h4",
+            "h4_context_text",
             "model_ready",
             "model_win_probability",
             "model_confidence_text",
@@ -304,12 +342,20 @@ class SnapshotItem:
             multi_timeframe_alignment_text=_safe_text(source.get("multi_timeframe_alignment_text", "")),
             multi_timeframe_bias=_safe_text(source.get("multi_timeframe_bias", "")),
             multi_timeframe_bias_text=_safe_text(source.get("multi_timeframe_bias_text", "")),
+            intraday_context_text=_safe_text(source.get("intraday_context_text", "")),
+            multi_timeframe_context_text=_safe_text(source.get("multi_timeframe_context_text", "")),
+            key_level_context_text=_safe_text(source.get("key_level_context_text", "")),
+            key_level_state=_safe_text(source.get("key_level_state", "")),
+            key_level_state_text=_safe_text(source.get("key_level_state_text", "")),
             breakout_direction=_safe_text(source.get("breakout_direction", "")),
+            breakout_context_text=_safe_text(source.get("breakout_context_text", "")),
             breakout_state=_safe_text(source.get("breakout_state", "")),
             breakout_state_text=_safe_text(source.get("breakout_state_text", "")),
+            retest_context_text=_safe_text(source.get("retest_context_text", "")),
             retest_state=_safe_text(source.get("retest_state", "")),
             retest_state_text=_safe_text(source.get("retest_state_text", "")),
             risk_reward_ready=bool(source.get("risk_reward_ready", False)),
+            risk_reward_context_text=_safe_text(source.get("risk_reward_context_text", "")),
             risk_reward_state=_safe_text(source.get("risk_reward_state", "")),
             risk_reward_state_text=_safe_text(source.get("risk_reward_state_text", "")),
             risk_reward_ratio=_safe_float(source.get("risk_reward_ratio", 0.0)),
@@ -318,9 +364,20 @@ class SnapshotItem:
             risk_reward_target_price_2=_safe_float(source.get("risk_reward_target_price_2", 0.0)),
             risk_reward_entry_zone_low=_safe_float(source.get("risk_reward_entry_zone_low", 0.0)),
             risk_reward_entry_zone_high=_safe_float(source.get("risk_reward_entry_zone_high", 0.0)),
+            risk_reward_entry_zone_text=_safe_text(source.get("risk_reward_entry_zone_text", "")),
+            risk_reward_position_text=_safe_text(source.get("risk_reward_position_text", "")),
+            risk_reward_invalidation_text=_safe_text(source.get("risk_reward_invalidation_text", "")),
             risk_reward_atr=_safe_float(source.get("risk_reward_atr", 0.0)),
             atr14=_safe_float(source.get("atr14", 0.0)),
             atr14_h4=_safe_float(source.get("atr14_h4", 0.0)),
+            event_mode_text=_safe_text(source.get("event_mode_text", "")),
+            event_active_name=_safe_text(source.get("event_active_name", "")),
+            event_active_time_text=_safe_text(source.get("event_active_time_text", "")),
+            event_scope_text=_safe_text(source.get("event_scope_text", "")),
+            event_applies=bool(source.get("event_applies", False)),
+            tech_summary=_safe_text(source.get("tech_summary", "")),
+            tech_summary_h4=_safe_text(source.get("tech_summary_h4", "")),
+            h4_context_text=_safe_text(source.get("h4_context_text", "")),
             model_ready=bool(source.get("model_ready", False)),
             model_win_probability=_safe_float(source.get("model_win_probability", 0.0)),
             model_confidence_text=_safe_text(source.get("model_confidence_text", "")),
@@ -368,12 +425,20 @@ class SnapshotItem:
             "multi_timeframe_alignment_text": self.multi_timeframe_alignment_text,
             "multi_timeframe_bias": self.multi_timeframe_bias,
             "multi_timeframe_bias_text": self.multi_timeframe_bias_text,
+            "intraday_context_text": self.intraday_context_text,
+            "multi_timeframe_context_text": self.multi_timeframe_context_text,
+            "key_level_context_text": self.key_level_context_text,
+            "key_level_state": self.key_level_state,
+            "key_level_state_text": self.key_level_state_text,
             "breakout_direction": self.breakout_direction,
+            "breakout_context_text": self.breakout_context_text,
             "breakout_state": self.breakout_state,
             "breakout_state_text": self.breakout_state_text,
+            "retest_context_text": self.retest_context_text,
             "retest_state": self.retest_state,
             "retest_state_text": self.retest_state_text,
             "risk_reward_ready": self.risk_reward_ready,
+            "risk_reward_context_text": self.risk_reward_context_text,
             "risk_reward_state": self.risk_reward_state,
             "risk_reward_state_text": self.risk_reward_state_text,
             "risk_reward_ratio": self.risk_reward_ratio,
@@ -382,9 +447,20 @@ class SnapshotItem:
             "risk_reward_target_price_2": self.risk_reward_target_price_2,
             "risk_reward_entry_zone_low": self.risk_reward_entry_zone_low,
             "risk_reward_entry_zone_high": self.risk_reward_entry_zone_high,
+            "risk_reward_entry_zone_text": self.risk_reward_entry_zone_text,
+            "risk_reward_position_text": self.risk_reward_position_text,
+            "risk_reward_invalidation_text": self.risk_reward_invalidation_text,
             "risk_reward_atr": self.risk_reward_atr,
             "atr14": self.atr14,
             "atr14_h4": self.atr14_h4,
+            "event_mode_text": self.event_mode_text,
+            "event_active_name": self.event_active_name,
+            "event_active_time_text": self.event_active_time_text,
+            "event_scope_text": self.event_scope_text,
+            "event_applies": self.event_applies,
+            "tech_summary": self.tech_summary,
+            "tech_summary_h4": self.tech_summary_h4,
+            "h4_context_text": self.h4_context_text,
             "model_ready": self.model_ready,
             "model_win_probability": self.model_win_probability,
             "model_confidence_text": self.model_confidence_text,
