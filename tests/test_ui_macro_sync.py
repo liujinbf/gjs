@@ -145,6 +145,42 @@ def test_load_external_feeds_records_sync_metrics(monkeypatch):
     assert "macro_news" in sync_meta["slow_feed_keys"]
 
 
+def test_load_external_feeds_can_force_single_feed_into_cache_backoff(monkeypatch):
+    config = _build_test_config()
+    captured = {"macro_news_cache_only": None}
+
+    monkeypatch.setattr(
+        ui,
+        "load_event_feed",
+        lambda **kwargs: {"status": "fresh", "status_text": "外部事件源已同步：1 条。"},
+    )
+    monkeypatch.setattr(
+        ui,
+        "load_macro_news_feed",
+        lambda **kwargs: captured.__setitem__("macro_news_cache_only", kwargs.get("cache_only")) or {
+            "status": "cache",
+            "status_text": "外部资讯流缓存生效：1 条。",
+        },
+    )
+    monkeypatch.setattr(
+        ui,
+        "load_macro_data_feed",
+        lambda **kwargs: {"status": "fresh", "status_text": "结构化宏观数据已同步：2 条。"},
+    )
+
+    result = ui._load_external_feeds(
+        config,
+        ["XAUUSD"],
+        cache_only=False,
+        force_cache_keys={"macro_news"},
+    )
+
+    assert captured["macro_news_cache_only"] is True
+    assert result["macro_news"]["status"] == "backoff_cache"
+    assert result["macro_news"]["backoff_applied"] is True
+    assert result["_sync_meta"]["feed_metrics"]["macro_news"]["used_backoff"] is True
+
+
 def test_macro_sync_ready_logs_perf_and_repeated_degradation(monkeypatch):
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(ui, "get_runtime_config", lambda: _build_test_config())
@@ -176,6 +212,50 @@ def test_macro_sync_ready_logs_perf_and_repeated_degradation(monkeypatch):
 
         assert any("宏观同步耗时" in line for line in called["logs"])
         assert any("资讯流 已连续 3 轮处于降级状态" in line for line in called["logs"])
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_trigger_macro_sync_uses_backoff_keys_unless_forced(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, "get_runtime_config", lambda: _build_test_config())
+    monkeypatch.setattr(ui.MetalMonitorWindow, "refresh_snapshot", lambda self: None)
+
+    captured = {"force_cache_keys": None, "start_count": 0}
+
+    class _FakeSignal:
+        def connect(self, _slot):
+            return None
+
+    class _FakeWorker:
+        def __init__(self, symbols, force_cache_keys=None, parent=None):
+            captured["force_cache_keys"] = set(force_cache_keys or set())
+            self.result_ready = _FakeSignal()
+            self.error_signal = _FakeSignal()
+
+        def isRunning(self):
+            return False
+
+        def start(self):
+            captured["start_count"] += 1
+
+        def wait(self, _timeout=0):
+            return True
+
+    monkeypatch.setattr(ui, "MacroSyncWorker", _FakeWorker)
+
+    window = ui.MetalMonitorWindow()
+    try:
+        window._macro_source_backoff_until["macro_news"] = ui.time.time() + 120
+        window._trigger_macro_sync()
+        assert captured["force_cache_keys"] == {"macro_news"}
+        assert captured["start_count"] == 1
+
+        window._macro_worker = None
+        window._trigger_macro_sync(force=True)
+        assert captured["force_cache_keys"] == set()
+        assert captured["start_count"] == 2
     finally:
         window.close()
         app.processEvents()

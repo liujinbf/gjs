@@ -38,6 +38,8 @@ SNAPSHOT_TASK_QUEUE: queue.Queue = queue.Queue(maxsize=100)
 MACRO_SYNC_INTERVAL_MS = 15 * 60 * 1000
 MACRO_SYNC_SLOW_THRESHOLD_MS = 3000
 MACRO_SYNC_DEGRADED_STATUSES = {"error", "stale_cache", "cache_missing"}
+MACRO_SYNC_BACKOFF_BASE_SEC = 15 * 60
+MACRO_SYNC_BACKOFF_MAX_SEC = 2 * 60 * 60
 
 
 def _normalize_snapshot_item(item: dict | SnapshotItem | None) -> dict:
@@ -89,41 +91,48 @@ def _queue_stop_task() -> None:
                 return
 
 
-def _load_external_feeds(runtime_config, symbols: list[str], cache_only: bool) -> dict:
+def _load_external_feeds(
+    runtime_config,
+    symbols: list[str],
+    cache_only: bool,
+    force_cache_keys: set[str] | None = None,
+) -> dict:
     started_at = time.perf_counter()
     bundle = {}
     sync_meta = {
         "cache_only": bool(cache_only),
         "feed_metrics": {},
     }
+    forced_keys = {str(key or "").strip() for key in set(force_cache_keys or set()) if str(key or "").strip()}
     feed_loaders = {
-        "event_feed": lambda: load_event_feed(
+        "event_feed": lambda feed_cache_only: load_event_feed(
             enabled=bool(getattr(runtime_config, "event_feed_enabled", False)) if runtime_config else False,
             source=str(getattr(runtime_config, "event_feed_url", "") or "") if runtime_config else "",
             refresh_min=int(getattr(runtime_config, "event_feed_refresh_min", 60) or 60) if runtime_config else 60,
-            cache_only=cache_only,
+            cache_only=feed_cache_only,
         ),
-        "macro_news": lambda: load_macro_news_feed(
+        "macro_news": lambda feed_cache_only: load_macro_news_feed(
             enabled=bool(getattr(runtime_config, "macro_news_feed_enabled", False)) if runtime_config else False,
             source_text=str(getattr(runtime_config, "macro_news_feed_urls", "") or "") if runtime_config else "",
             refresh_min=int(getattr(runtime_config, "macro_news_feed_refresh_min", 30) or 30) if runtime_config else 30,
             symbols=symbols,
-            cache_only=cache_only,
+            cache_only=feed_cache_only,
         ),
-        "macro_data": lambda: load_macro_data_feed(
+        "macro_data": lambda feed_cache_only: load_macro_data_feed(
             enabled=bool(getattr(runtime_config, "macro_data_feed_enabled", False)) if runtime_config else False,
             spec_source=str(getattr(runtime_config, "macro_data_feed_specs", "") or "") if runtime_config else "",
             refresh_min=int(getattr(runtime_config, "macro_data_feed_refresh_min", 60) or 60) if runtime_config else 60,
             symbols=symbols,
-            cache_only=cache_only,
+            cache_only=feed_cache_only,
             env=dict(os.environ),  # 透传环境变量：ALPHAVANTAGE_API_KEY / FRED_API_KEY / BLS_API_KEY
         ),
     }
 
     for key, loader in feed_loaders.items():
+        feed_cache_only = bool(cache_only or key in forced_keys)
         feed_started = time.perf_counter()
         try:
-            item = dict(loader() or {})
+            item = dict(loader(feed_cache_only) or {})
         except Exception as exc:  # noqa: BLE001
             item = {
                 "status": "error",
@@ -132,6 +141,16 @@ def _load_external_feeds(runtime_config, symbols: list[str], cache_only: bool) -
                 "items": [],
                 "summary_text": "",
             }
+        if key in forced_keys and not cache_only:
+            original_status = str(item.get("status", "") or "").strip().lower()
+            original_status_text = str(item.get("status_text", "") or "").strip()
+            item["status"] = "backoff_cache"
+            if original_status_text:
+                item["status_text"] = f"已进入退避窗口，本轮跳过外网拉取，{original_status_text}"
+            else:
+                item["status_text"] = "已进入退避窗口，本轮跳过外网拉取。"
+            item["backoff_applied"] = True
+            item["backoff_from_status"] = original_status
         elapsed_ms = int((time.perf_counter() - feed_started) * 1000)
         status = str(item.get("status", "") or "").strip().lower()
         status_text = str(item.get("status_text", "") or "").strip()
@@ -141,6 +160,7 @@ def _load_external_feeds(runtime_config, symbols: list[str], cache_only: bool) -
             "status_text": status_text,
             "is_slow": elapsed_ms >= MACRO_SYNC_SLOW_THRESHOLD_MS,
             "is_degraded": _is_degraded_feed_status(status, status_text),
+            "used_backoff": key in forced_keys and not cache_only,
         }
         bundle[key] = item
 
@@ -204,14 +224,22 @@ class MacroSyncWorker(QThread):
     result_ready = Signal(dict)
     error_signal = Signal(str)
 
-    def __init__(self, symbols: list[str], parent=None):
+    def __init__(self, symbols: list[str], force_cache_keys: set[str] | None = None, parent=None):
         super().__init__(parent)
         self.symbols = list(symbols or [])
+        self.force_cache_keys = {str(key or "").strip() for key in set(force_cache_keys or set()) if str(key or "").strip()}
 
     def run(self):
         try:
             runtime_config = getattr(self.parent(), "_config", None)
-            self.result_ready.emit(_load_external_feeds(runtime_config, self.symbols, cache_only=False))
+            self.result_ready.emit(
+                _load_external_feeds(
+                    runtime_config,
+                    self.symbols,
+                    cache_only=False,
+                    force_cache_keys=self.force_cache_keys,
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             self.error_signal.emit(str(exc))
 
@@ -484,6 +512,11 @@ class MetalMonitorWindow(QMainWindow):
             "macro_news": 0,
             "macro_data": 0,
         }
+        self._macro_source_backoff_until = {
+            "event_feed": 0.0,
+            "macro_news": 0.0,
+            "macro_data": 0.0,
+        }
         self._build_ui()
         self._start_background_task_worker()
         # 炸弹三修复：保留 _timer 对象（供 closeEvent/toggle_polling 使用），
@@ -713,11 +746,20 @@ class MetalMonitorWindow(QMainWindow):
         self._snapshot_task_worker.error_signal.connect(self._on_background_task_error)
         self._snapshot_task_worker.start()
 
-    def _trigger_macro_sync(self):
+    def _compute_macro_sync_force_cache_keys(self) -> set[str]:
+        now_ts = time.time()
+        return {
+            key
+            for key, until_ts in dict(self._macro_source_backoff_until or {}).items()
+            if float(until_ts or 0.0) > now_ts
+        }
+
+    def _trigger_macro_sync(self, force: bool = False):
         """3.4 修复：触发宏观数据后台刷新，不影响 MT5 报价线程。"""
         if self._macro_worker and self._macro_worker.isRunning():
             return  # 上一次还没跑完，跳过
-        self._macro_worker = MacroSyncWorker(self._config.symbols, self)
+        force_cache_keys = set() if force else self._compute_macro_sync_force_cache_keys()
+        self._macro_worker = MacroSyncWorker(self._config.symbols, force_cache_keys=force_cache_keys, parent=self)
         self._macro_worker.result_ready.connect(self._on_macro_sync_ready)
         self._macro_worker.error_signal.connect(self._on_macro_sync_error)
         self._macro_worker.start()
@@ -753,10 +795,18 @@ class MetalMonitorWindow(QMainWindow):
             if is_degraded:
                 self._macro_source_degraded_counts[result_key] = int(self._macro_source_degraded_counts.get(result_key, 0) or 0) + 1
                 degrade_count = int(self._macro_source_degraded_counts.get(result_key, 0) or 0)
+                backoff_rounds = max(0, degrade_count - 1)
+                if backoff_rounds > 0:
+                    backoff_sec = min(MACRO_SYNC_BACKOFF_MAX_SEC, MACRO_SYNC_BACKOFF_BASE_SEC * (2 ** (backoff_rounds - 1)))
+                    self._macro_source_backoff_until[result_key] = max(
+                        float(self._macro_source_backoff_until.get(result_key, 0.0) or 0.0),
+                        time.time() + float(backoff_sec),
+                    )
                 if degrade_count >= 3:
                     self._append_log(f"[宏观同步] {label} 已连续 {degrade_count} 轮处于降级状态，当前建议继续依赖缓存并关注外部源稳定性。")
             else:
                 self._macro_source_degraded_counts[result_key] = 0
+                self._macro_source_backoff_until[result_key] = 0.0
         digest = " | ".join(status_parts)
         if digest and digest != self._last_macro_sync_status_digest:
             self._append_log(f"[宏观同步] {digest}")
@@ -913,7 +963,7 @@ class MetalMonitorWindow(QMainWindow):
             # 自动研判间隔变化时重置上次触发时间，立即应用新设置
             self._last_ai_auto_time = None
             self._update_notify_status()
-            self._trigger_macro_sync()
+            self._trigger_macro_sync(force=True)
             self.refresh_snapshot()
 
     def refresh_snapshot(self):
