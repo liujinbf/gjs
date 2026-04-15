@@ -8,6 +8,7 @@ sys.path.insert(0, str(ROOT))
 
 import event_feed
 from event_feed import _write_cache, apply_event_feed_to_snapshot, build_schedule_text_from_payload, build_structured_event_items, load_event_feed, merge_event_schedule_texts
+from external_feed_models import EventFeedItem
 
 
 def test_build_schedule_text_from_payload_supports_nested_events():
@@ -177,3 +178,31 @@ def test_event_feed_cache_write_is_atomic(tmp_path):
     assert cache_file.exists()
     assert not cache_file.with_suffix(".json.tmp").exists()
     assert event_feed._read_cache(cache_file)["item_count"] == 3
+
+
+def test_apply_event_feed_to_snapshot_accepts_event_feed_item_objects():
+    snapshot = {
+        "summary_text": "当前共观察 2 个品种。",
+        "market_text": "先看美元方向。",
+    }
+    result = apply_event_feed_to_snapshot(
+        snapshot,
+        {
+            "items": [
+                EventFeedItem(
+                    time_text="2026-04-15 20:30",
+                    name="美国 CPI",
+                    importance="high",
+                    symbols=["XAUUSD"],
+                    has_result=True,
+                    result_bias="bearish",
+                    result_summary_text="美国 CPI：实际 3.4%，预期 3.2%，前值 3.1%，结果解读 偏空",
+                )
+            ],
+            "result_item_count": 1,
+            "result_summary_text": "事件结果：美国 CPI：实际 3.4%，预期 3.2%，前值 3.1%，结果解读 偏空。",
+        },
+    )
+
+    assert result["event_feed_items"][0]["name"] == "美国 CPI"
+    assert result["event_feed_items"][0]["result_bias"] == "bearish"

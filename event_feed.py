@@ -7,9 +7,15 @@ from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 from event_schedule import normalize_event_importance, normalize_event_schedule_text, parse_event_schedules, parse_event_symbols
+from external_feed_models import EventFeedItem
 
 PROJECT_DIR = Path(__file__).resolve().parent
 EVENT_FEED_CACHE_FILE = PROJECT_DIR / ".runtime" / "event_feed_cache.json"
+
+
+def _normalize_event_item_payload(item: dict | EventFeedItem | None) -> dict:
+    """统一事件源条目字段契约。"""
+    return EventFeedItem.from_payload(item).to_dict()
 
 
 def merge_event_schedule_texts(*parts: str) -> str:
@@ -158,7 +164,7 @@ def load_event_feed(
 
 
 def build_schedule_text_from_payload(payload: object, items: list[dict] | None = None) -> str:
-    source_items = list(items or build_structured_event_items(payload))
+    source_items = [_normalize_event_item_payload(item) for item in list(items or build_structured_event_items(payload))]
     lines = []
     for normalized in source_items:
         if not normalized:
@@ -178,7 +184,7 @@ def build_structured_event_items(payload: object) -> list[dict]:
     for item in _extract_event_items(payload):
         normalized = _normalize_event_item(item)
         if normalized:
-            result.append(normalized)
+            result.append(_normalize_event_item_payload(normalized))
     return result
 
 
@@ -220,22 +226,22 @@ def _normalize_event_item(item: object) -> dict | None:
     previous = _coerce_metric_value(item.get("previous", item.get("prior", item.get("previous_value"))))
     better_when = _normalize_better_when(item.get("better_when", item.get("bias_mode", item.get("interpretation", ""))))
     result_bias = _resolve_event_result_bias(actual, forecast, previous, better_when)
-    return {
-        "time_text": event_time.strftime("%Y-%m-%d %H:%M"),
-        "name": name,
-        "importance": importance,
-        "symbols": symbols,
-        "actual": actual,
-        "forecast": forecast,
-        "previous": previous,
-        "unit": str(item.get("unit", "") or "").strip(),
-        "country": str(item.get("country", item.get("region", "")) or "").strip(),
-        "source": str(item.get("source", "") or "").strip(),
-        "better_when": better_when,
-        "has_result": any(value is not None for value in (actual, forecast, previous)),
-        "result_bias": result_bias,
-        "result_summary_text": _build_event_result_text(name, actual, forecast, previous, str(item.get("unit", "") or "").strip(), result_bias),
-    }
+    return EventFeedItem(
+        time_text=event_time.strftime("%Y-%m-%d %H:%M"),
+        name=name,
+        importance=importance,
+        symbols=symbols,
+        actual=actual,
+        forecast=forecast,
+        previous=previous,
+        unit=str(item.get("unit", "") or "").strip(),
+        country=str(item.get("country", item.get("region", "")) or "").strip(),
+        source=str(item.get("source", "") or "").strip(),
+        better_when=better_when,
+        has_result=any(value is not None for value in (actual, forecast, previous)),
+        result_bias=result_bias,
+        result_summary_text=_build_event_result_text(name, actual, forecast, previous, str(item.get("unit", "") or "").strip(), result_bias),
+    ).to_dict()
 
 
 # Forex Factory currency -> affected symbols mapping
@@ -370,7 +376,7 @@ def _build_event_result_text(
 
 
 def build_event_result_summary(items: list[dict]) -> str:
-    result_items = [item for item in list(items or []) if bool(item.get("has_result"))]
+    result_items = [_normalize_event_item_payload(item) for item in list(items or []) if bool(_normalize_event_item_payload(item).get("has_result"))]
     if not result_items:
         return ""
     prioritized = sorted(
@@ -390,7 +396,7 @@ def build_event_result_summary(items: list[dict]) -> str:
 def apply_event_feed_to_snapshot(snapshot: dict, feed_result: dict) -> dict:
     payload = dict(snapshot or {})
     result = dict(feed_result or {})
-    items = list(result.get("items", []) or [])
+    items = [_normalize_event_item_payload(item) for item in list(result.get("items", []) or [])]
     result_summary_text = str(result.get("result_summary_text", "") or "").strip()
     payload["event_feed_items"] = items
     payload["event_result_item_count"] = int(result.get("result_item_count", 0) or 0)

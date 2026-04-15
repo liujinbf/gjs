@@ -7,6 +7,7 @@ sys.path.insert(0, str(ROOT))
 
 import macro_data_feed
 from macro_data_feed import _write_cache, apply_macro_data_to_snapshot, load_macro_data_feed
+from external_feed_models import MacroDataItem
 
 
 def test_load_macro_data_feed_supports_fred_and_bls_specs(monkeypatch, tmp_path):
@@ -315,3 +316,36 @@ def test_macro_data_cache_write_is_atomic(tmp_path):
     assert cache_file.exists()
     assert not cache_file.with_suffix(".json.tmp").exists()
     assert macro_data_feed._read_cache(cache_file)["status"] == "fresh"
+
+
+def test_apply_macro_data_to_snapshot_accepts_macro_data_item_objects():
+    snapshot = {
+        "summary_text": "当前共观察 2 个品种。",
+        "market_text": "先看美元方向。",
+    }
+    result = apply_macro_data_to_snapshot(
+        snapshot,
+        {
+            "status_text": "结构化宏观数据已同步：1 条。",
+            "summary_text": "结构化宏观数据：近一轮高相关数据包括 美国10年期实际利率 1.85（较前值 -0.06，偏多）。",
+            "items": [
+                MacroDataItem(
+                    name="美国10年期实际利率",
+                    source="FRED",
+                    published_at="2026-04-10",
+                    latest_value=1.85,
+                    previous_value=1.91,
+                    value_text="1.85",
+                    delta_text="较前值 -0.06",
+                    importance="high",
+                    symbols=["XAUUSD"],
+                    bias_mode="higher_bearish",
+                    direction="bullish",
+                    bias_text="XAUUSD 在该指标上通常呈现“数值上行偏空、数值回落偏多”。",
+                )
+            ],
+        },
+    )
+
+    assert result["macro_data_items"][0]["name"] == "美国10年期实际利率"
+    assert result["macro_data_items"][0]["direction"] == "bullish"

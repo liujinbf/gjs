@@ -10,8 +10,14 @@ from urllib.parse import urlparse
 from urllib.request import urlopen, Request
 
 from app_config import PROJECT_DIR
+from external_feed_models import MacroNewsItem
 
 MACRO_NEWS_CACHE_FILE = PROJECT_DIR / ".runtime" / "macro_news_feed_cache.json"
+
+
+def _normalize_macro_news_item(item: dict | MacroNewsItem | None) -> dict:
+    """统一外部资讯条目字段契约。"""
+    return MacroNewsItem.from_payload(item).to_dict()
 
 GLOBAL_SYMBOLS = {"XAUUSD", "XAGUSD", "EURUSD", "USDJPY"}
 HIGH_IMPORTANCE_KEYWORDS = {
@@ -362,22 +368,23 @@ def _parse_feed_items(xml_text: str, source_url: str, watch_symbols: list[str] |
         importance = _infer_importance(title, summary)
         bias_by_symbol, bias_summary_text = _build_bias_summary_text(symbols, title, summary, _normalize_text(item.get("source", "")) or source_name)
         normalized.append(
-            {
-                "title": title,
-                "summary": summary,
-                "published_at": published_at,
-                "link": _normalize_text(item.get("link", "")),
-                "source": _normalize_text(item.get("source", "")) or source_name,
-                "importance": importance,
-                "symbols": symbols,
-                "bias_by_symbol": bias_by_symbol,
-                "bias_summary_text": bias_summary_text,
-            }
+            MacroNewsItem(
+                title=title,
+                summary=summary,
+                published_at=published_at,
+                link=_normalize_text(item.get("link", "")),
+                source=_normalize_text(item.get("source", "")) or source_name,
+                importance=importance,
+                symbols=symbols,
+                bias_by_symbol=bias_by_symbol,
+                bias_summary_text=bias_summary_text,
+            ).to_dict()
         )
     return normalized
 
 
 def _relevance_score(item: dict, watch_symbols: list[str] | None = None) -> int:
+    item = _normalize_macro_news_item(item)
     score = 0
     importance = _normalize_text(item.get("importance", "")).lower()
     if importance == "high":
@@ -399,7 +406,7 @@ def _format_digest(items: list[dict]) -> str:
     if not items:
         return "外部资讯流暂无高相关更新。"
     highlights = []
-    for item in items[:3]:
+    for item in [_normalize_macro_news_item(item) for item in items[:3]]:
         title = _normalize_text(item.get("title", ""))
         source = _normalize_text(item.get("source", ""))
         bias_summary_text = _normalize_text(item.get("bias_summary_text", ""))
@@ -565,7 +572,7 @@ def load_macro_news_feed(
 def apply_macro_news_to_snapshot(snapshot: dict, feed_result: dict) -> dict:
     payload = dict(snapshot or {})
     result = dict(feed_result or {})
-    items = list(result.get("items", []) or [])
+    items = [_normalize_macro_news_item(item) for item in list(result.get("items", []) or [])]
     summary_text = _normalize_text(result.get("summary_text", ""))
     payload["macro_news_status_text"] = _normalize_text(result.get("status_text", ""))
     payload["macro_news_summary_text"] = summary_text

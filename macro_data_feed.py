@@ -9,8 +9,14 @@ from pathlib import Path
 from urllib import error, parse, request
 
 from app_config import PROJECT_DIR
+from external_feed_models import MacroDataItem
 
 MACRO_DATA_CACHE_FILE = PROJECT_DIR / ".runtime" / "macro_data_feed_cache.json"
+
+
+def _normalize_macro_data_item(item: dict | MacroDataItem | None) -> dict:
+    """统一结构化宏观数据条目字段契约。"""
+    return MacroDataItem.from_payload(item).to_dict()
 
 
 def _normalize_text(value: object) -> str:
@@ -250,20 +256,20 @@ def _build_item(
     else:
         sign = "+" if delta > 0 else ""
         delta_text = f"较前值 {sign}{_format_number(delta)}"
-    return {
-        "name": _normalize_text(spec.get("name", "")) or "未命名宏观数据",
-        "source": _normalize_text(source) or "外部宏观数据源",
-        "published_at": _normalize_text(published_at),
-        "latest_value": latest_value,
-        "previous_value": previous_value,
-        "value_text": latest_value_text,
-        "delta_text": delta_text,
-        "importance": _normalize_text(spec.get("importance", "medium")).lower() or "medium",
-        "symbols": symbols,
-        "bias_mode": _normalize_text(spec.get("bias_mode", "neutral")).lower() or "neutral",
-        "direction": direction,
-        "bias_text": _bias_text(str(spec.get("bias_mode", "neutral")), delta, symbols),
-    }
+    return MacroDataItem(
+        name=_normalize_text(spec.get("name", "")) or "未命名宏观数据",
+        source=_normalize_text(source) or "外部宏观数据源",
+        published_at=_normalize_text(published_at),
+        latest_value=latest_value,
+        previous_value=previous_value,
+        value_text=latest_value_text,
+        delta_text=delta_text,
+        importance=_normalize_text(spec.get("importance", "medium")).lower() or "medium",
+        symbols=symbols,
+        bias_mode=_normalize_text(spec.get("bias_mode", "neutral")).lower() or "neutral",
+        direction=direction,
+        bias_text=_bias_text(str(spec.get("bias_mode", "neutral")), delta, symbols),
+    ).to_dict()
 
 
 def _load_fred_item(spec: dict, env: dict | None = None) -> dict:
@@ -587,6 +593,7 @@ PROVIDER_LOADERS = {
 
 
 def _score_item(item: dict, watch_symbols: list[str] | None = None) -> int:
+    item = _normalize_macro_data_item(item)
     score = 0
     importance = _normalize_text(item.get("importance", "")).lower()
     if importance == "high":
@@ -610,7 +617,7 @@ def _build_digest(items: list[dict]) -> str:
     if not items:
         return "结构化宏观数据层当前暂无高相关更新。"
     parts = []
-    for item in items[:3]:
+    for item in [_normalize_macro_data_item(item) for item in items[:3]]:
         direction = _normalize_text(item.get("direction", "")).lower()
         direction_text = "偏多" if direction == "bullish" else ("偏空" if direction == "bearish" else "中性")
         parts.append(
@@ -724,7 +731,7 @@ def load_macro_data_feed(
             errors.append(f"{provider or 'unknown'}: 暂不支持")
             continue
         try:
-            item = loader(spec, env=env_map)
+            item = _normalize_macro_data_item(loader(spec, env=env_map))
             item_symbols = {str(symbol or "").strip().upper() for symbol in list(item.get("symbols", []) or []) if str(symbol or "").strip()}
             if watch_symbols and item_symbols and not item_symbols.intersection(set(watch_symbols)):
                 continue
@@ -790,7 +797,7 @@ def load_macro_data_feed(
 def apply_macro_data_to_snapshot(snapshot: dict, feed_result: dict) -> dict:
     payload = dict(snapshot or {})
     result = dict(feed_result or {})
-    items = list(result.get("items", []) or [])
+    items = [_normalize_macro_data_item(item) for item in list(result.get("items", []) or [])]
     summary_text = _normalize_text(result.get("summary_text", ""))
     payload["macro_data_status_text"] = _normalize_text(result.get("status_text", ""))
     payload["macro_data_summary_text"] = summary_text

@@ -7,6 +7,7 @@ sys.path.insert(0, str(ROOT))
 
 import macro_news_feed
 from macro_news_feed import _write_cache, apply_macro_news_to_snapshot, load_macro_news_feed
+from external_feed_models import MacroNewsItem
 
 
 def test_load_macro_news_feed_reads_local_rss_and_filters_by_symbols(tmp_path):
@@ -153,3 +154,33 @@ def test_macro_news_cache_write_is_atomic(tmp_path):
     assert cache_file.exists()
     assert not cache_file.with_suffix(".json.tmp").exists()
     assert macro_news_feed._read_cache(cache_file)["status"] == "fresh"
+
+
+def test_apply_macro_news_to_snapshot_accepts_macro_news_item_objects():
+    snapshot = {
+        "summary_text": "当前共观察 2 个品种。",
+        "market_text": "先看美元方向。",
+    }
+    result = apply_macro_news_to_snapshot(
+        snapshot,
+        {
+            "status_text": "外部资讯流已同步：1 条高相关更新。",
+            "summary_text": "外部资讯流：近一轮抓到 1 条高相关更新，最新包括 ECB：ECB policy decision keeps rates unchanged。",
+            "items": [
+                MacroNewsItem(
+                    title="ECB policy decision keeps rates unchanged",
+                    summary="Lagarde says euro area inflation remains in focus.",
+                    published_at="2026-04-13 17:30:00",
+                    link="https://example.com/ecb-1",
+                    source="ECB",
+                    importance="high",
+                    symbols=["EURUSD"],
+                    bias_by_symbol={"EURUSD": "bullish"},
+                    bias_summary_text="EURUSD 偏多",
+                )
+            ],
+        },
+    )
+
+    assert result["macro_news_items"][0]["title"] == "ECB policy decision keeps rates unchanged"
+    assert result["macro_news_items"][0]["bias_by_symbol"]["EURUSD"] == "bullish"
