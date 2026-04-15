@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from app_config import PROJECT_DIR
+from quote_models import SnapshotItem
 
 RUNTIME_DIR = PROJECT_DIR / ".runtime"
 HISTORY_FILE = RUNTIME_DIR / "alert_history.jsonl"
@@ -102,6 +103,11 @@ def _snapshot_event_meta(snapshot: dict) -> dict:
         "event_scope_text": str(snapshot.get("event_active_scope_text", "") or "").strip(),
         "event_note": "",
     }
+
+
+def _normalize_snapshot_item(item: dict | SnapshotItem | None) -> dict:
+    """统一提醒留痕链使用的快照项字段契约。"""
+    return SnapshotItem.from_payload(item).to_dict()
 
 
 def _item_event_meta(item: dict, fallback: dict | None = None) -> dict:
@@ -601,9 +607,10 @@ def build_snapshot_history_entries(snapshot: dict, history_file: Path | None = N
 
     occurred_at = str(snapshot.get("last_refresh_text", "") or "").strip()
     entries = []
+    normalized_items = [_normalize_snapshot_item(item) for item in list(snapshot.get("items", []) or [])]
     items_by_symbol = {
         str(item.get("symbol", "") or "").strip().upper(): item
-        for item in list(snapshot.get("items", []) or [])
+        for item in normalized_items
         if str(item.get("symbol", "") or "").strip()
     }
 

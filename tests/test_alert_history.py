@@ -13,6 +13,7 @@ from alert_history import (
     summarize_effectiveness,
     summarize_recent_history,
 )
+from quote_models import SnapshotItem
 
 
 def test_build_snapshot_history_entries_collects_spread_macro_and_session_items():
@@ -545,3 +546,53 @@ def test_summarize_effectiveness_marks_spread_alert_waiting_and_stale():
     assert stats["waiting_count"] == 1
     assert stats["stale_count"] == 1
     shutil.rmtree(history_dir)
+
+
+def test_build_snapshot_history_entries_accepts_snapshot_item_objects():
+    snapshot = {
+        "last_refresh_text": "2026-04-12 12:00:00",
+        "trade_grade": "可轻仓试仓",
+        "trade_grade_detail": "结构相对干净，可继续观察。",
+        "trade_next_review": "10 分钟后复核。",
+        "runtime_status_cards": [],
+        "spread_focus_cards": [],
+        "items": [
+            SnapshotItem(
+                symbol="XAUUSD",
+                latest_price=4764.0,
+                spread_points=17.0,
+                point=0.01,
+                has_live_quote=True,
+                status_text="实时报价",
+                execution_note="测试执行建议",
+                trade_grade="可轻仓试仓",
+                trade_grade_source="structure",
+                trade_grade_detail="结构相对干净，可继续观察。",
+                trade_next_review="10 分钟后复核。",
+                alert_state_text="结构候选",
+                alert_state_detail="当前执行面相对干净。",
+                alert_state_tone="success",
+                alert_state_rank=2,
+                tone="success",
+                signal_side="long",
+                signal_side_text="【↑ 多头参考】",
+                extra={
+                    "risk_reward_ready": True,
+                    "risk_reward_state": "favorable",
+                    "risk_reward_ratio": 2.1,
+                    "risk_reward_stop_price": 4748.0,
+                    "risk_reward_target_price": 4788.0,
+                    "risk_reward_target_price_2": 4810.0,
+                    "risk_reward_entry_zone_low": 4760.0,
+                    "risk_reward_entry_zone_high": 4770.0,
+                    "risk_reward_entry_zone_text": "观察进场区间 4760.00 - 4770.00，若价格直接远离该区间，就不建议追。",
+                },
+            )
+        ],
+        "alert_text": "",
+    }
+
+    entries = build_snapshot_history_entries(snapshot)
+    structure_entry = next(item for item in entries if item["category"] == "structure")
+    assert structure_entry["title"] == "XAUUSD 进入观察区间（中段）"
+    assert structure_entry["trade_grade_source"] == "structure"

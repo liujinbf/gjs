@@ -164,6 +164,78 @@ class SnapshotItem:
     signal_side_text: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any] | "SnapshotItem" | None) -> "SnapshotItem":
+        if isinstance(payload, cls):
+            return payload
+        source = dict(payload or {})
+        known_keys = {
+            "symbol",
+            "latest_price",
+            "spread_points",
+            "point",
+            "has_live_quote",
+            "bid",
+            "ask",
+            "tick_time",
+            "latest_text",
+            "quote_text",
+            "status_text",
+            "quote_status_code",
+            "execution_note",
+            "trade_grade",
+            "trade_grade_detail",
+            "trade_next_review",
+            "trade_grade_source",
+            "alert_state_text",
+            "alert_state_detail",
+            "alert_state_tone",
+            "alert_state_rank",
+            "regime_tag",
+            "regime_text",
+            "regime_reason",
+            "regime_rank",
+            "tone",
+            "signal_side",
+            "signal_side_text",
+        }
+        quote_status_source = {
+            "quote_status_code": source.get("quote_status_code", ""),
+            "has_live_quote": source.get("has_live_quote", False),
+            "status": source.get("status_text", source.get("status", "")),
+        }
+        return cls(
+            symbol=_safe_text(source.get("symbol", "")).upper(),
+            latest_price=_safe_float(source.get("latest_price", 0.0)),
+            spread_points=_safe_float(source.get("spread_points", 0.0)),
+            point=_safe_float(source.get("point", 0.0)),
+            has_live_quote=bool(source.get("has_live_quote", False)),
+            bid=_safe_float(source.get("bid", 0.0)),
+            ask=_safe_float(source.get("ask", 0.0)),
+            tick_time=_safe_int(source.get("tick_time", 0)),
+            latest_text=_safe_text(source.get("latest_text", "--"), "--"),
+            quote_text=_safe_text(source.get("quote_text", "")),
+            status_text=_safe_text(source.get("status_text", source.get("status", ""))),
+            quote_status_code=_infer_quote_status_code(quote_status_source),
+            execution_note=_safe_text(source.get("execution_note", "")),
+            trade_grade=_safe_text(source.get("trade_grade", "")),
+            trade_grade_detail=_safe_text(source.get("trade_grade_detail", "")),
+            trade_next_review=_safe_text(source.get("trade_next_review", "")),
+            trade_grade_source=_safe_text(source.get("trade_grade_source", "")),
+            alert_state_text=_safe_text(source.get("alert_state_text", "")),
+            alert_state_detail=_safe_text(source.get("alert_state_detail", "")),
+            alert_state_tone=_safe_text(source.get("alert_state_tone", "")),
+            alert_state_rank=_safe_int(source.get("alert_state_rank", 0)),
+            regime_tag=_safe_text(source.get("regime_tag", "")),
+            regime_text=_safe_text(source.get("regime_text", "")),
+            regime_reason=_safe_text(source.get("regime_reason", "")),
+            regime_rank=_safe_int(source.get("regime_rank", 0)),
+            tone=_safe_text(source.get("tone", "")),
+            signal_side=_safe_text(source.get("signal_side", "")),
+            signal_side_text=_safe_text(source.get("signal_side_text", "")),
+            extra={key: value for key, value in source.items() if key not in known_keys},
+        )
+
     def to_dict(self) -> dict[str, Any]:
         payload = {
             "symbol": self.symbol,
