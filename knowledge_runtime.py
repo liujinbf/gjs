@@ -12,7 +12,7 @@ from runtime_utils import parse_time as _parse_time_impl
 
 from knowledge_base import KNOWLEDGE_DB_FILE, open_knowledge_connection
 from quote_models import QuoteRow
-from signal_enums import TradeGrade
+from signal_enums import AlertTone, SignalSide, TradeGrade
 
 
 def _connect(db_path: Path | str | None = None) -> sqlite3.Connection:
@@ -50,7 +50,7 @@ def _get_direction_threshold_pct(symbol: str) -> float:
 def _infer_signal_side(item: dict) -> str:
     trade_grade = _normalize_text(item.get("trade_grade", ""))
     if trade_grade != TradeGrade.LIGHT_POSITION:
-        return "neutral"
+        return SignalSide.NEUTRAL.value
 
     long_score = 0
     short_score = 0
@@ -81,10 +81,10 @@ def _infer_signal_side(item: dict) -> str:
             short_score += 1
 
     if long_score > short_score:
-        return "long"
+        return SignalSide.LONG.value
     if short_score > long_score:
-        return "short"
-    return "neutral"
+        return SignalSide.SHORT.value
+    return SignalSide.NEUTRAL.value
 
 
 def _build_feature_payload(snapshot: dict, item: dict) -> dict:
@@ -180,7 +180,7 @@ def record_snapshot(snapshot: dict, db_path: Path | str | None = None) -> dict:
                     float(item.get("latest_price", 0.0) or 0.0),
                     float(item.get("spread_points", 0.0) or 0.0),
                     1 if bool(item.get("has_live_quote", False)) else 0,
-                    _normalize_text(item.get("tone", "")) or "neutral",
+                    _normalize_text(item.get("tone", "")) or AlertTone.NEUTRAL.value,
                     _normalize_text(item.get("trade_grade", "")),
                     _normalize_text(item.get("trade_grade_source", "")),
                     _normalize_text(item.get("alert_state_text", "")),
@@ -229,7 +229,7 @@ def _compute_directional_metrics(base_price: float, future_price: float, max_pri
             "mae_pct": 0.0,
         }
 
-    if side == "short":
+    if side == SignalSide.SHORT.value:
         directional_change = (base_price - future_price) / base_price * 100.0
         mfe_pct = (base_price - min_price) / base_price * 100.0
         mae_pct = (max_price - base_price) / base_price * 100.0
@@ -246,7 +246,7 @@ def _compute_directional_metrics(base_price: float, future_price: float, max_pri
 
 
 def _label_outcome(symbol: str, side: str, trade_grade: str, directional_change: float, mfe_pct: float, mae_pct: float) -> tuple[str, str]:
-    if trade_grade != TradeGrade.LIGHT_POSITION or side not in {"long", "short"}:
+    if trade_grade != TradeGrade.LIGHT_POSITION or side not in {SignalSide.LONG.value, SignalSide.SHORT.value}:
         return "observe", "neutral"
 
     threshold = _get_direction_threshold_pct(symbol)
@@ -322,11 +322,11 @@ def backfill_snapshot_outcomes(
                     future_price=future_price,
                     max_price=max_price,
                     min_price=min_price,
-                    side=str(row["signal_side"] or "neutral"),
+                    side=str(row["signal_side"] or SignalSide.NEUTRAL.value),
                 )
                 outcome_label, signal_quality = _label_outcome(
                     symbol=str(row["symbol"]),
-                    side=str(row["signal_side"] or "neutral"),
+                    side=str(row["signal_side"] or SignalSide.NEUTRAL.value),
                     trade_grade=str(row["trade_grade"] or ""),
                     directional_change=float(metrics["price_change_pct"]),
                     mfe_pct=float(metrics["mfe_pct"]),

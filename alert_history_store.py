@@ -51,7 +51,7 @@ def _build_entry(
     """
     clean_title = _normalize_text(title)
     clean_detail = _normalize_text(detail)
-    clean_tone = str(tone or "neutral").strip() or "neutral"
+    clean_tone = str(tone or AlertTone.NEUTRAL.value).strip() or AlertTone.NEUTRAL.value
     extra_dict = extra or {}
 
     # 价格桶：价格变动超过 10 个点位即视为新状态（金/银/汇率通用，按绝对值取整即可）
@@ -304,7 +304,7 @@ def _build_spread_recovery_entries(
     result = []
     lookback = timedelta(hours=max(1, int(lookback_hours)))
     for symbol, item in items_by_symbol.items():
-        if str(item.get("tone", "") or "").strip().lower() != AlertTone.SUCCESS:
+        if str(item.get("tone", "") or "").strip().lower() != AlertTone.SUCCESS.value:
             continue
         if not bool(item.get("has_live_quote", False)):
             continue
@@ -333,7 +333,7 @@ def _build_spread_recovery_entries(
                 "recovery",
                 f"{symbol} 点差已恢复",
                 detail,
-                "success",
+                AlertTone.SUCCESS.value,
                 occurred_at,
                 extra={
                     "symbol": symbol,
@@ -363,7 +363,7 @@ def _build_structure_entries(
             continue
         if _normalize_text(item.get("trade_grade_source", "")) not in {"structure", "setup"}:
             continue
-        if str(item.get("tone", "") or "").strip().lower() != AlertTone.SUCCESS:
+        if str(item.get("tone", "") or "").strip().lower() != AlertTone.SUCCESS.value:
             continue
         if not bool(item.get("risk_reward_ready", False)):
             continue
@@ -412,7 +412,7 @@ def _build_structure_entries(
                 "structure",
                 f"{symbol} {str(entry_zone_meta.get('title_suffix', '结构候选') or '结构候选')}",
                 detail,
-                "success",
+                AlertTone.SUCCESS.value,
                 occurred_at,
                 extra=entry_meta,
                 sig_extra=[
@@ -456,9 +456,9 @@ def _build_external_source_entries(snapshot: dict, trade_meta: dict, snapshot_ev
             continue
         tone = ""
         if "拉取失败" in detail:
-            tone = "warning"
+            tone = AlertTone.WARNING.value
         elif any(keyword in detail for keyword in ("继续使用", "尚未配置", "未解析", "规格为空")):
-            tone = "accent"
+            tone = AlertTone.ACCENT.value
         if not tone:
             continue
         entries.append(
@@ -581,7 +581,7 @@ def _build_macro_entry(
         "macro",
         title,
         detail,
-        "warning" if "高影响" in event_importance_text or event_result_summary_text else "accent",
+        AlertTone.WARNING.value if "高影响" in event_importance_text or event_result_summary_text else AlertTone.ACCENT.value,
         str(snapshot.get("last_refresh_text", "") or "").strip(),
         extra={
             **representative_trade_meta,
@@ -620,8 +620,8 @@ def build_snapshot_history_entries(snapshot: dict, history_file: Path | None = N
     snapshot_event_meta = _snapshot_event_meta(snapshot)
     if runtime_cards:
         primary = runtime_cards[0]
-        tone = str(primary.get("tone", "neutral") or "neutral")
-        if tone in {"negative", "warning"}:
+        tone = str(primary.get("tone", AlertTone.NEUTRAL.value) or AlertTone.NEUTRAL.value)
+        if tone in {AlertTone.NEGATIVE.value, AlertTone.WARNING.value}:
             entries.append(
                 _build_entry(
                     "mt5",
@@ -642,7 +642,7 @@ def build_snapshot_history_entries(snapshot: dict, history_file: Path | None = N
                     "session",
                     title,
                     secondary.get("detail", ""),
-                    secondary.get("tone", "neutral"),
+                    secondary.get("tone", AlertTone.NEUTRAL.value),
                     occurred_at,
                     extra={**trade_meta, **snapshot_event_meta},
                 )
@@ -659,7 +659,7 @@ def build_snapshot_history_entries(snapshot: dict, history_file: Path | None = N
                 "spread",
                 title,
                 card.get("detail", ""),
-                card.get("tone", "neutral"),
+                card.get("tone", AlertTone.NEUTRAL.value),
                 occurred_at,
                 extra={
                     "symbol": symbol,

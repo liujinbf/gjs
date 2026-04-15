@@ -14,7 +14,7 @@ from pathlib import Path
 
 from knowledge_base import KNOWLEDGE_DB_FILE, open_knowledge_connection
 from quote_models import SnapshotItem
-from signal_enums import AlertTone, TradeGrade
+from signal_enums import AlertTone, SignalSide, TradeGrade
 
 MODEL_NAME = "naive-edge-v1"
 MIN_TRAIN_SAMPLES = 20
@@ -73,8 +73,8 @@ def _extract_row_features(row: sqlite3.Row) -> dict[str, str]:
         "regime_tag": _normalize_text(row["regime_tag"]).lower() or "unknown",
         "trade_grade": _normalize_text(row["trade_grade"]) or "unknown",
         "trade_grade_source": _normalize_text(row["trade_grade_source"]) or "unknown",
-        "signal_side": _normalize_text(row["signal_side"]).lower() or "neutral",
-        "tone": _normalize_text(row["tone"]).lower() or "neutral",
+        "signal_side": _normalize_text(row["signal_side"]).lower() or SignalSide.NEUTRAL.value,
+        "tone": _normalize_text(row["tone"]).lower() or AlertTone.NEUTRAL.value,
         "event_importance": _normalize_text(row["event_importance_text"]) or "none",
         "alert_state": _normalize_text(row["alert_state_text"]) or "none",
         "risk_reward_state": _normalize_text(payload.get("risk_reward_state_text", "")) or "unknown",
@@ -100,8 +100,8 @@ def _extract_item_features(snapshot: dict, item: dict) -> dict[str, str]:
         "regime_tag": _normalize_text(item.get("regime_tag", "") or snapshot.get("regime_tag", "")).lower() or "unknown",
         "trade_grade": _normalize_text(item.get("trade_grade", "")) or "unknown",
         "trade_grade_source": _normalize_text(item.get("trade_grade_source", "")) or "unknown",
-        "signal_side": _normalize_text(item.get("signal_side", "")).lower() or "neutral",
-        "tone": _normalize_text(item.get("tone", "")).lower() or "neutral",
+        "signal_side": _normalize_text(item.get("signal_side", "")).lower() or SignalSide.NEUTRAL.value,
+        "tone": _normalize_text(item.get("tone", "")).lower() or AlertTone.NEUTRAL.value,
         "event_importance": _normalize_text(item.get("event_importance_text", "")) or "none",
         "alert_state": _normalize_text(item.get("alert_state_text", "")) or "none",
         "risk_reward_state": _normalize_text(item.get("risk_reward_state_text", "")) or "unknown",
@@ -426,7 +426,7 @@ def apply_model_probability_context(snapshot: dict) -> dict:
 
         from monitor_rules import build_portfolio_trade_grade
 
-        connected = str(payload.get("status_tone", "") or "").strip().lower() == "success"
+        connected = str(payload.get("status_tone", "") or "").strip().lower() == AlertTone.SUCCESS.value
         portfolio_grade = build_portfolio_trade_grade(
             items,
             connected,
