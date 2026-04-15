@@ -14,7 +14,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication
 
 from quote_models import SnapshotItem
-from ui_panels import WatchListTable
+from ui_panels import SimTradingPanel, WatchListTable
 
 
 def _build_snapshot(snapshot_time: str = "2026-04-13 10:00:00") -> dict:
@@ -194,4 +194,74 @@ def test_watch_list_displays_normalized_quote_status_text():
         assert widget.table.item(0, 3).text() == "活跃报价"
     finally:
         widget.close()
+        app.processEvents()
+
+
+def test_sim_trading_panel_displays_risk_reward_columns(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+
+    class _FakeSimEngine:
+        db_file = "C:/not-used.sqlite"
+
+        @staticmethod
+        def get_account(user_id: str = "system"):
+            return {
+                "equity": 99093.73,
+                "total_profit": 0.0,
+                "used_margin": 2453.67,
+                "win_count": 0,
+                "loss_count": 0,
+            }
+
+        @staticmethod
+        def get_open_positions(user_id: str = "system"):
+            return [
+                {
+                    "symbol": "XAUUSD",
+                    "action": "long",
+                    "quantity": 0.51,
+                    "entry_price": 4811.12,
+                    "stop_loss": 4771.91,
+                    "take_profit": 4874.19,
+                    "take_profit_2": 4905.73,
+                    "floating_pnl": -906.27,
+                }
+            ]
+
+        @staticmethod
+        def _calculate_margin_and_pnl(symbol, lots, entry_price, current_price, is_long, usdjpy_rate=150.0):
+            contract_size = 100.0
+            price_diff = (current_price - entry_price) if is_long else (entry_price - current_price)
+            return 0.0, price_diff * lots * contract_size
+
+    class _FakeConn:
+        row_factory = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, _sql):
+            class _Rows:
+                @staticmethod
+                def fetchall():
+                    return []
+            return _Rows()
+
+    monkeypatch.setattr("mt5_sim_trading.SIM_ENGINE", _FakeSimEngine)
+    monkeypatch.setattr("sqlite3.connect", lambda *_args, **_kwargs: _FakeConn())
+
+    panel = SimTradingPanel()
+    try:
+        panel.update_data()
+
+        assert panel.tbl_positions.columnCount() == 10
+        assert panel.tbl_positions.item(0, 6).text().startswith("$")
+        assert "T1" in panel.tbl_positions.item(0, 7).text()
+        assert "R" in panel.tbl_positions.item(0, 8).text()
+        assert panel.tbl_positions.item(0, 9).text() == "-$906.27"
+    finally:
+        panel.close()
         app.processEvents()

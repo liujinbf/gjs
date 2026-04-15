@@ -533,8 +533,11 @@ class SimTradingPanel(QWidget):
         lbl_active = QLabel("🟢 正在持仓 (Open Positions)")
         lbl_active.setStyleSheet("font-weight: 800; font-size: 13px; color: #1e293b;")
         left_layout.addWidget(lbl_active)
-        self.tbl_positions = QTableWidget(0, 7)
-        self.tbl_positions.setHorizontalHeaderLabels(["标的", "方向", "手数", "入场价", "止损价", "止盈价", "浮动盈亏"])
+        self.tbl_positions = QTableWidget(0, 10)
+        self.tbl_positions.setHorizontalHeaderLabels([
+            "标的", "方向", "手数", "入场价", "止损价", "止盈价",
+            "风险金额", "目标盈利", "盈亏比", "浮动盈亏"
+        ])
         self.tbl_positions.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.tbl_positions.setEditTriggers(QTableWidget.NoEditTriggers)
         self.tbl_positions.setAlternatingRowColors(True)
@@ -567,6 +570,57 @@ class SimTradingPanel(QWidget):
         card.setStyleSheet(style.STYLE_METRIC_CARD)
         return card
 
+    def _format_money(self, value: float) -> str:
+        amount = float(value or 0.0)
+        return f"${amount:,.2f}"
+
+    def _format_price(self, value: float) -> str:
+        return f"{float(value or 0.0):.2f}"
+
+    def _build_position_risk_metrics(self, sim_engine, pos: dict) -> dict:
+        symbol = str(pos.get("symbol", "") or "").strip().upper()
+        action = str(pos.get("action", "") or "").strip().lower()
+        is_long = action == "long"
+        quantity = float(pos.get("quantity", 0.0) or 0.0)
+        entry_price = float(pos.get("entry_price", 0.0) or 0.0)
+        stop_loss = float(pos.get("stop_loss", 0.0) or 0.0)
+        take_profit = float(pos.get("take_profit", 0.0) or 0.0)
+        take_profit_2 = float(pos.get("take_profit_2", 0.0) or 0.0)
+
+        if not symbol or quantity <= 0 or min(entry_price, stop_loss, take_profit) <= 0:
+            return {
+                "risk_text": "--",
+                "reward_text": "--",
+                "ratio_text": "--",
+            }
+
+        _, risk_pnl = sim_engine._calculate_margin_and_pnl(symbol, quantity, entry_price, stop_loss, is_long)
+        _, reward_pnl_1 = sim_engine._calculate_margin_and_pnl(symbol, quantity, entry_price, take_profit, is_long)
+        reward_pnl_2 = 0.0
+        if take_profit_2 > 0:
+            _, reward_pnl_2 = sim_engine._calculate_margin_and_pnl(symbol, quantity, entry_price, take_profit_2, is_long)
+
+        risk_amount = abs(float(risk_pnl or 0.0))
+        reward_amount_1 = abs(float(reward_pnl_1 or 0.0))
+        reward_amount_2 = abs(float(reward_pnl_2 or 0.0))
+        if risk_amount <= 0:
+            ratio_text = "--"
+        elif reward_amount_2 > 0:
+            ratio_text = f"{reward_amount_1 / risk_amount:.2f}R / {reward_amount_2 / risk_amount:.2f}R"
+        else:
+            ratio_text = f"{reward_amount_1 / risk_amount:.2f}R"
+
+        if reward_amount_2 > 0:
+            reward_text = f"T1 {self._format_money(reward_amount_1)} / T2 {self._format_money(reward_amount_2)}"
+        else:
+            reward_text = self._format_money(reward_amount_1)
+
+        return {
+            "risk_text": self._format_money(risk_amount),
+            "reward_text": reward_text,
+            "ratio_text": ratio_text,
+        }
+
     def update_data(self):
         """拉取 SIM_ENGINE 渲染表格"""
         from mt5_sim_trading import SIM_ENGINE
@@ -597,20 +651,24 @@ class SimTradingPanel(QWidget):
             pnl = float(pos["floating_pnl"])
             pnl_str = f"+${pnl:,.2f}" if pnl > 0 else f"-${abs(pnl):,.2f}"
             c_pnl = QColor("#e6ffe6") if pnl > 0 else (QColor("#ffe6e6") if pnl < 0 else QColor("#ffffff"))
+            metrics = self._build_position_risk_metrics(SIM_ENGINE, pos)
 
             items = [
                 pos["symbol"],
                 "做多" if pos["action"] == "long" else "做空",
                 f"{float(pos['quantity']):.2f}",
-                f"{float(pos['entry_price']):.2f}",
-                f"{float(pos['stop_loss']):.2f}",
-                f"{float(pos['take_profit']):.2f}",
+                self._format_price(float(pos["entry_price"])),
+                self._format_price(float(pos["stop_loss"])),
+                self._format_price(float(pos["take_profit"])),
+                metrics["risk_text"],
+                metrics["reward_text"],
+                metrics["ratio_text"],
                 pnl_str
             ]
             for col, val in enumerate(items):
                 cell = QTableWidgetItem(val)
                 cell.setTextAlignment(Qt.AlignCenter)
-                if col == 6:  # 给盈亏上色
+                if col == 9:  # 给盈亏上色
                     cell.setBackground(c_pnl)
                 self.tbl_positions.setItem(i, col, cell)
 
