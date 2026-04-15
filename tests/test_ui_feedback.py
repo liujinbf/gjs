@@ -258,6 +258,8 @@ def test_sim_trading_panel_displays_risk_reward_columns(monkeypatch):
         panel.update_data()
 
         assert panel.tbl_positions.columnCount() == 10
+        assert "$1,999.71" in panel.lbl_total_risk.text()
+        assert "1.61R" in panel.lbl_avg_rr.text()
         assert panel.tbl_positions.item(0, 6).text().startswith("$")
         assert "T1" in panel.tbl_positions.item(0, 7).text()
         assert "R" in panel.tbl_positions.item(0, 8).text()

@@ -517,10 +517,14 @@ class SimTradingPanel(QWidget):
         self.lbl_profit = self._build_card("累计盈亏 (Profit)", "$0.00", color="#475569")
         self.lbl_margin = self._build_card("已用保证金 (Margin)", "$0.00")
         self.lbl_win_rate = self._build_card("历史胜率 (Win Rate)", "--%")
+        self.lbl_total_risk = self._build_card("总风险暴露 (Risk)", "$0.00", color="#dc2626")
+        self.lbl_avg_rr = self._build_card("平均盈亏比 (Avg R)", "--", color="#7c3aed")
         top_bar.addWidget(self.lbl_equity)
         top_bar.addWidget(self.lbl_profit)
         top_bar.addWidget(self.lbl_margin)
         top_bar.addWidget(self.lbl_win_rate)
+        top_bar.addWidget(self.lbl_total_risk)
+        top_bar.addWidget(self.lbl_avg_rr)
         layout.addLayout(top_bar)
 
         # 2. 中部表格区分两列
@@ -619,6 +623,32 @@ class SimTradingPanel(QWidget):
             "risk_text": self._format_money(risk_amount),
             "reward_text": reward_text,
             "ratio_text": ratio_text,
+            "risk_amount": risk_amount,
+            "reward_amount_1": reward_amount_1,
+            "reward_amount_2": reward_amount_2,
+        }
+
+    def _build_portfolio_risk_summary(self, sim_engine, positions: list[dict]) -> dict:
+        total_risk = 0.0
+        ratio_values = []
+        for pos in list(positions or []):
+            metrics = self._build_position_risk_metrics(sim_engine, pos)
+            total_risk += float(metrics.get("risk_amount", 0.0) or 0.0)
+            ratio_text = str(metrics.get("ratio_text", "") or "").strip()
+            if not ratio_text or ratio_text == "--":
+                continue
+            first_ratio_text = ratio_text.split("/")[0].strip().replace("R", "").strip()
+            try:
+                ratio_values.append(float(first_ratio_text))
+            except ValueError:
+                continue
+        if ratio_values:
+            avg_rr_text = f"{sum(ratio_values) / len(ratio_values):.2f}R"
+        else:
+            avg_rr_text = "--"
+        return {
+            "total_risk_text": self._format_money(total_risk),
+            "avg_rr_text": avg_rr_text,
         }
 
     def update_data(self):
@@ -645,6 +675,15 @@ class SimTradingPanel(QWidget):
 
         # 持仓表
         pos_list = SIM_ENGINE.get_open_positions()
+        portfolio_summary = self._build_portfolio_risk_summary(SIM_ENGINE, pos_list)
+        self.lbl_total_risk.setText(
+            f"<div style='font-size:12px;color:#64748b;'>总风险暴露 (Risk)</div>"
+            f"<div style='font-size:18px;font-weight:800;color:#dc2626;'>{portfolio_summary['total_risk_text']}</div>"
+        )
+        self.lbl_avg_rr.setText(
+            f"<div style='font-size:12px;color:#64748b;'>平均盈亏比 (Avg R)</div>"
+            f"<div style='font-size:18px;font-weight:800;color:#7c3aed;'>{portfolio_summary['avg_rr_text']}</div>"
+        )
         self.tbl_positions.setRowCount(0)
         for i, pos in enumerate(pos_list):
             self.tbl_positions.insertRow(i)
