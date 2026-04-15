@@ -31,6 +31,7 @@ from notification_state import (
     _update_last_result,
     _write_state,
 )
+from signal_enums import AlertTone
 
 
 _DND_ALLOWED_CATEGORIES = {"mt5", "source"}
@@ -310,7 +311,7 @@ def send_test_notification(config: MetalMonitorConfig, state_file: Path | None =
         "category": "test",
         "title": "贵金属监控推送测试",
         "detail": "这是一条测试消息。若你收到此提醒，说明独立项目的消息推送链已经打通。",
-        "tone": "accent",
+        "tone": AlertTone.ACCENT.value,
         "signature": f"test::{datetime.now().strftime('%Y%m%d%H%M%S')}",
     }
     messages = []

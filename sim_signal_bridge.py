@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from quote_models import SnapshotItem
+from signal_enums import TradeGrade
 from signal_protocol import normalize_signal_meta, validate_signal_meta
 
 BASE_RULE_SIM_RR = 1.6
@@ -99,7 +100,7 @@ def _resolve_entry_zone_position(item: dict, action: str) -> tuple[str, str]:
 def _evaluate_item_for_sim(item: dict) -> tuple[bool, str, str]:
     if not bool(item.get("has_live_quote", False)):
         return False, "当前不是实时报价。", "neutral"
-    if _normalize_text(item.get("trade_grade", "")) != "可轻仓试仓":
+    if _normalize_text(item.get("trade_grade", "")) != TradeGrade.LIGHT_POSITION:
         return False, "当前还没到可轻仓试仓级别。", "neutral"
     if _normalize_text(item.get("trade_grade_source", "")) not in {"structure", "setup"}:
         return False, "当前候选并非结构型入场信号。", "neutral"

@@ -7,6 +7,7 @@ from datetime import datetime
 
 from app_config import MetalMonitorConfig
 from quote_models import SnapshotItem
+from signal_enums import AlertTone
 
 
 def _normalize_text(value: str) -> str:
@@ -333,7 +334,7 @@ def _build_ai_brief_entry(result: dict, snapshot: dict, config: MetalMonitorConf
         "category": "ai",
         "title": title,
         "detail": content or "模型未返回有效结论。",
-        "tone": "accent",
+        "tone": AlertTone.ACCENT.value,
         "signature": f"ai::{title}::{occurred_at}",
         "markdown_body": "\n".join(markdown_lines),
     }
@@ -399,6 +400,6 @@ def _build_learning_report_entry(report: dict) -> dict:
         "category": "learning",
         "title": "知识库学习摘要",
         "detail": summary_text or "当前暂无可推送的学习结论。",
-        "tone": "accent",
+        "tone": AlertTone.ACCENT.value,
         "markdown_body": "\n".join(markdown_lines),
     }
