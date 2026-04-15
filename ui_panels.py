@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QTextEdit, QTabWidget, QVBoxLayout, QWidget, QHeaderView
 )
 from quote_models import SnapshotItem
+from signal_enums import QuoteStatus
 import style
 from alert_history import (
     read_recent_history, summarize_effectiveness, summarize_recent_history
@@ -17,6 +18,23 @@ from ai_history import (
 def _normalize_snapshot_item(item: dict | SnapshotItem | None) -> dict:
     """统一前台面板消费的快照项字段契约。"""
     return SnapshotItem.from_payload(item).to_dict()
+
+
+def _format_quote_status_text(item: dict | SnapshotItem | None) -> str:
+    """统一前台表格展示的报价状态语义。"""
+    normalized = _normalize_snapshot_item(item)
+    status_code = str(normalized.get("quote_status_code", "") or "").strip().lower()
+    if status_code == QuoteStatus.LIVE:
+        return "活跃报价"
+    if status_code == QuoteStatus.INACTIVE:
+        return "非活跃报价"
+    if status_code == QuoteStatus.UNKNOWN_SYMBOL:
+        return "未识别品种"
+    if status_code == QuoteStatus.NOT_SELECTED:
+        return "未加入市场报价"
+    if status_code == QuoteStatus.ERROR:
+        return "报价拉取异常"
+    return str(normalized.get("status_text", "--") or "--").strip()
 
 
 # ─────────────────────────────────────────────
@@ -396,7 +414,7 @@ class WatchListTable(QFrame):
                 item.get("symbol", "--"),
                 item.get("latest_text", "--"),
                 item.get("quote_text", "--"),
-                item.get("status_text", "--"),
+                _format_quote_status_text(item),
                 item.get("macro_focus", "--"),
                 alert_cell,
                 exec_display,

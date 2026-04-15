@@ -165,3 +165,33 @@ def test_watch_list_accepts_snapshot_item_objects(monkeypatch):
     finally:
         widget.close()
         app.processEvents()
+
+
+def test_watch_list_displays_normalized_quote_status_text():
+    app = QApplication.instance() or QApplication([])
+
+    snapshot = {
+        "last_refresh_text": "2026-04-13 10:00:00",
+        "items": [
+            {
+                "symbol": "EURUSD",
+                "snapshot_id": 56,
+                "latest_text": "1.17270",
+                "quote_text": "Bid 1.17260 / Ask 1.17270 / 点差 10点",
+                "status_text": "经纪商自定义实时状态",
+                "quote_status_code": "live",
+                "macro_focus": "关注美元方向。",
+                "alert_state_text": "报价正常观察",
+                "execution_note": "等待结构更清楚。",
+                "tone": "neutral",
+            }
+        ],
+    }
+
+    widget = WatchListTable()
+    try:
+        widget.update_from_snapshot(snapshot)
+        assert widget.table.item(0, 3).text() == "活跃报价"
+    finally:
+        widget.close()
+        app.processEvents()
