@@ -12,6 +12,7 @@ from runtime_utils import parse_time as _parse_time_impl
 
 from knowledge_base import KNOWLEDGE_DB_FILE, open_knowledge_connection
 from quote_models import QuoteRow
+from signal_enums import TradeGrade
 
 
 def _connect(db_path: Path | str | None = None) -> sqlite3.Connection:
@@ -48,7 +49,7 @@ def _get_direction_threshold_pct(symbol: str) -> float:
 
 def _infer_signal_side(item: dict) -> str:
     trade_grade = _normalize_text(item.get("trade_grade", ""))
-    if trade_grade != "可轻仓试仓":
+    if trade_grade != TradeGrade.LIGHT_POSITION:
         return "neutral"
 
     long_score = 0
@@ -245,7 +246,7 @@ def _compute_directional_metrics(base_price: float, future_price: float, max_pri
 
 
 def _label_outcome(symbol: str, side: str, trade_grade: str, directional_change: float, mfe_pct: float, mae_pct: float) -> tuple[str, str]:
-    if trade_grade != "可轻仓试仓" or side not in {"long", "short"}:
+    if trade_grade != TradeGrade.LIGHT_POSITION or side not in {"long", "short"}:
         return "observe", "neutral"
 
     threshold = _get_direction_threshold_pct(symbol)

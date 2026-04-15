@@ -9,6 +9,7 @@ from pathlib import Path
 
 from app_config import PROJECT_DIR
 from quote_models import SnapshotItem
+from signal_enums import AlertTone, TradeGrade
 
 RUNTIME_DIR = PROJECT_DIR / ".runtime"
 HISTORY_FILE = RUNTIME_DIR / "alert_history.jsonl"
@@ -251,13 +252,13 @@ def _pick_representative_item(items_by_symbol: dict[str, dict]) -> dict:
 
     def _trade_rank(item: dict) -> int:
         grade = _normalize_text(item.get("trade_grade", ""))
-        if grade == "可轻仓试仓":
+        if grade == TradeGrade.LIGHT_POSITION:
             return 4
-        if grade == "当前不宜出手":
+        if grade == TradeGrade.NO_TRADE:
             return 3
-        if grade == "等待事件落地":
+        if grade == TradeGrade.WAIT_EVENT:
             return 2
-        if grade == "只适合观察":
+        if grade == TradeGrade.OBSERVE_ONLY:
             return 1
         return 0
 
@@ -303,7 +304,7 @@ def _build_spread_recovery_entries(
     result = []
     lookback = timedelta(hours=max(1, int(lookback_hours)))
     for symbol, item in items_by_symbol.items():
-        if str(item.get("tone", "") or "").strip().lower() != "success":
+        if str(item.get("tone", "") or "").strip().lower() != AlertTone.SUCCESS:
             continue
         if not bool(item.get("has_live_quote", False)):
             continue
@@ -358,11 +359,11 @@ def _build_structure_entries(
     for symbol, item in items_by_symbol.items():
         if not bool(item.get("has_live_quote", False)):
             continue
-        if _normalize_text(item.get("trade_grade", "")) != "可轻仓试仓":
+        if _normalize_text(item.get("trade_grade", "")) != TradeGrade.LIGHT_POSITION:
             continue
         if _normalize_text(item.get("trade_grade_source", "")) not in {"structure", "setup"}:
             continue
-        if str(item.get("tone", "") or "").strip().lower() != "success":
+        if str(item.get("tone", "") or "").strip().lower() != AlertTone.SUCCESS:
             continue
         if not bool(item.get("risk_reward_ready", False)):
             continue
@@ -561,7 +562,7 @@ def _build_macro_entry(
             or representative_extra.get("symbol", "")
             or event_scope_text
         )
-        if representative_grade == "只适合观察" and not representative_has_event:
+        if representative_grade == TradeGrade.OBSERVE_ONLY and not representative_has_event:
             return None
 
     detail_parts = [alert_text]

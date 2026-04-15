@@ -3,6 +3,7 @@ from __future__ import annotations
 from external_feed_models import EventFeedItem, MacroDataItem, MacroNewsItem
 from monitor_rules import build_portfolio_trade_grade
 from quote_models import SnapshotItem
+from signal_enums import AlertTone, TradeGrade
 
 
 def _normalize_text(value: object) -> str:
@@ -257,8 +258,8 @@ def apply_external_signal_context(snapshot: dict, event_context: dict | None = N
             item["execution_note"] = " ".join(part for part in (execution_note, item["external_bias_note"]) if part)
 
         grade = _normalize_text(item.get("trade_grade", ""))
-        if grade == "可轻仓试仓" and strongest_conflict_rank >= 2:
-            item["trade_grade"] = "只适合观察"
+        if grade == TradeGrade.LIGHT_POSITION and strongest_conflict_rank >= 2:
+            item["trade_grade"] = TradeGrade.OBSERVE_ONLY.value
             item["trade_grade_source"] = "macro"
             item["trade_grade_detail"] = (
                 "外部宏观结果与当前结构方向相反，先别逆着最新数据硬做，等价格重新消化后再判断。"
@@ -268,10 +269,10 @@ def apply_external_signal_context(snapshot: dict, event_context: dict | None = N
             item["trade_next_review"] = "建议等 10-15 分钟，确认价格对结果的消化方向后再复核。"
             item["alert_state_text"] = "宏观结果冲突"
             item["alert_state_detail"] = item["trade_grade_detail"]
-            item["alert_state_tone"] = "warning" if strongest_conflict_rank >= 3 else "accent"
+            item["alert_state_tone"] = AlertTone.WARNING.value if strongest_conflict_rank >= 3 else AlertTone.ACCENT.value
             item["alert_state_rank"] = max(int(item.get("alert_state_rank", 0) or 0), 4)
             conflict_notes.append(f"{symbol} 外部结果与结构冲突，已降级为观察。")
-        elif grade == "可轻仓试仓" and strongest_alignment_note:
+        elif grade == TradeGrade.LIGHT_POSITION and strongest_alignment_note:
             detail = _normalize_text(item.get("trade_grade_detail", ""))
             if strongest_alignment_note not in detail:
                 item["trade_grade_detail"] = f"{detail} 同时，{strongest_alignment_note}。".strip()

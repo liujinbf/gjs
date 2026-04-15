@@ -14,6 +14,7 @@ from pathlib import Path
 
 from knowledge_base import KNOWLEDGE_DB_FILE, open_knowledge_connection
 from quote_models import SnapshotItem
+from signal_enums import AlertTone, TradeGrade
 
 MODEL_NAME = "naive-edge-v1"
 MIN_TRAIN_SAMPLES = 20
@@ -391,8 +392,8 @@ def apply_model_probability_context(snapshot: dict) -> dict:
         grade = _normalize_text(item.get("trade_grade", ""))
         symbol = _normalize_text(item.get("symbol", "")).upper()
 
-        if model_ready and grade == "可轻仓试仓" and probability < LOW_PROBABILITY_BLOCK:
-            item["trade_grade"] = "只适合观察"
+        if model_ready and grade == TradeGrade.LIGHT_POSITION and probability < LOW_PROBABILITY_BLOCK:
+            item["trade_grade"] = TradeGrade.OBSERVE_ONLY.value
             item["trade_grade_source"] = "model"
             detail = _normalize_text(item.get("trade_grade_detail", ""))
             item["trade_grade_detail"] = (
@@ -402,10 +403,10 @@ def apply_model_probability_context(snapshot: dict) -> dict:
             item["trade_next_review"] = "建议等下一轮结构确认或模型胜率回到更健康区间后再复核。"
             item["alert_state_text"] = "模型概率偏低"
             item["alert_state_detail"] = item["trade_grade_detail"]
-            item["alert_state_tone"] = "accent"
+            item["alert_state_tone"] = AlertTone.ACCENT.value
             item["alert_state_rank"] = max(int(item.get("alert_state_rank", 0) or 0), 3)
             model_notes.append(f"{symbol} 模型参考胜率约 {probability * 100:.0f}%，已从候选机会降级为观察。")
-        elif model_ready and grade == "可轻仓试仓" and probability >= HIGH_PROBABILITY_CONFIRM:
+        elif model_ready and grade == TradeGrade.LIGHT_POSITION and probability >= HIGH_PROBABILITY_CONFIRM:
             detail = _normalize_text(item.get("trade_grade_detail", ""))
             item["trade_grade_detail"] = (
                 f"{detail} 本地模型参考胜率约 {probability * 100:.0f}%，"
