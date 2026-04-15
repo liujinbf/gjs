@@ -282,6 +282,7 @@ def build_snapshot_from_rows(
                 "latest_text": format_quote_price(latest_price, point) if has_live_quote and latest_price > 0 else "--",
                 "quote_text": build_quote_structure_text(row),
                 "status_text": str(row.get("status", "暂无快照") or "暂无快照"),
+                "quote_status_code": str(row.get("quote_status_code", "") or "").strip().lower(),
                 "macro_focus": build_symbol_macro_focus(symbol),
                 "intraday_context_text": str(row.get("intraday_context_text", "") or "").strip(),
                 "intraday_bias": str(row.get("intraday_bias", "") or "").strip(),

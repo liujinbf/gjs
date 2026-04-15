@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 
+def _is_inactive_quote_item(item: dict) -> bool:
+    status_code = str(item.get("quote_status_code", "") or "").strip().lower()
+    if status_code in {"inactive", "unknown_symbol", "not_selected", "error"}:
+        return True
+    status_text = str(item.get("status_text", "") or "").strip()
+    return "休市" in status_text or "暂无" in status_text
+
+
 def build_spread_focus_cards(items: list[dict]) -> list[dict]:
     cards = []
     for item in items:
         tone = str(item.get("tone", "neutral") or "neutral")
         symbol = str(item.get("symbol", "--") or "--")
-        status_text = str(item.get("status_text", "") or "").strip()
         if tone == "warning":
             cards.append(
                 {
@@ -23,7 +30,7 @@ def build_spread_focus_cards(items: list[dict]) -> list[dict]:
                     "tone": "accent",
                 }
             )
-        elif "休市" in status_text:
+        elif _is_inactive_quote_item(item):
             cards.append(
                 {
                     "title": f"{symbol} 暂无活跃报价",
@@ -215,11 +222,10 @@ def build_runtime_status_cards(
 
     inactive_symbols = []
     for item in items:
-        status_text = str(item.get("status_text", "") or "").strip()
         symbol = str(item.get("symbol", "") or "").strip()
         if not symbol:
             continue
-        if "休市" in status_text or "暂无" in status_text:
+        if _is_inactive_quote_item(item):
             inactive_symbols.append(symbol)
 
     if not connected:

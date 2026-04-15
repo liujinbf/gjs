@@ -433,6 +433,7 @@ def test_build_snapshot_from_rows_keeps_all_symbols():
                 "spread_points": 17,
                 "point": 0.01,
                 "status": "实时报价",
+                "quote_status_code": "live",
                 "has_live_quote": True,
             }
         ],
@@ -444,6 +445,7 @@ def test_build_snapshot_from_rows_keeps_all_symbols():
     assert len(snapshot["items"]) == 2
     assert snapshot["items"][0]["symbol"] == "XAUUSD"
     assert snapshot["items"][1]["symbol"] == "XAGUSD"
+    assert snapshot["items"][0]["quote_status_code"] == "live"
     assert snapshot["spread_focus_cards"]
     assert snapshot["event_window_cards"]
     assert snapshot["alert_status_cards"]
@@ -558,6 +560,7 @@ def test_build_snapshot_from_rows_adds_connected_runtime_status_cards():
                 "spread_points": 17,
                 "point": 0.01,
                 "status": "实时报价",
+                "quote_status_code": "live",
                 "has_live_quote": True,
             },
             {
@@ -567,7 +570,8 @@ def test_build_snapshot_from_rows_adds_connected_runtime_status_cards():
                 "ask": 1.17280,
                 "spread_points": 21,
                 "point": 0.00001,
-                "status": "休市或暂无实时报价",
+                "status": "经纪商返回静态报价",
+                "quote_status_code": "inactive",
                 "has_live_quote": False,
             },
         ],
