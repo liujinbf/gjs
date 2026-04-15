@@ -292,18 +292,19 @@ def test_pick_notify_entries_prioritizes_structure_inside_entry_zone():
         {
             "occurred_at": "2026-04-12 10:20:00",
             "category": "structure",
-            "title": "XAUUSD 接近观察区间",
+            "title": "XAUUSD 进入观察区间（下沿）",
             "detail": "已进入观察区间，可重点盯执行。",
             "tone": "success",
             "signature": "structure-zone-1",
             "symbol": "XAUUSD",
             "risk_reward_ratio": 1.8,
             "structure_entry_stage": "inside_zone",
+            "entry_zone_side_text": "下沿",
         }
     ]
     picked = notification.pick_notify_entries(entries, _build_config(), state_file=state_file)
     assert len(picked) == 1
-    assert picked[0]["title"] == "XAUUSD 接近观察区间"
+    assert picked[0]["title"] == "XAUUSD 进入观察区间（下沿）"
     shutil.rmtree(state_dir)
 
 
@@ -673,6 +674,7 @@ def test_build_markdown_includes_risk_reward_action_levels():
             "stop_loss_price": 4748.0,
             "take_profit_1": 4788.0,
             "take_profit_2": 4810.0,
+            "entry_zone_side_text": "下沿",
             "entry_zone_text": "观察进场区间 4760.00 - 4770.00，若价格直接远离该区间，就不建议追。",
             "position_plan_text": "可轻仓试仓，优先分两段止盈，第一目标落袋后再看延续。",
             "entry_invalidation_text": "若价格重新跌回 4748.00 下方，当前多头结构可视为失效。",
@@ -685,7 +687,7 @@ def test_build_markdown_includes_risk_reward_action_levels():
     assert "模型：参考胜率 74%（中等信心），与当前结构基本一致" in markdown
     assert "外部：宏观数据：美国10年期实际利率 当前值 1.85，较前值 -0.06，背景偏多" in markdown
     assert "**执行卡片**" in markdown
-    assert "观察 观察进场区间 4760.00 - 4770.00" in markdown
+    assert "观察下沿 观察进场区间 4760.00 - 4770.0" in markdown
     assert "止损 4,748.00" in markdown
     assert "目标 4,788.00 / 4,810.00" in markdown
     assert "盈亏比 1:2.40" in markdown

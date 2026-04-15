@@ -191,33 +191,50 @@ def _classify_entry_zone_stage(item: dict) -> dict[str, str | float]:
         return {}
 
     zone_width = max(zone_high - zone_low, point or 0.0)
+    zone_progress = (latest_price - zone_low) / zone_width if zone_width > 0 else 0.5
+    zone_side = "middle"
+    zone_side_text = "中段"
+    if zone_progress <= 0.33:
+        zone_side = "lower"
+        zone_side_text = "下沿"
+    elif zone_progress >= 0.67:
+        zone_side = "upper"
+        zone_side_text = "上沿"
     tolerance = max(zone_width * 0.35, point * 30 if point > 0 else 0.0)
     if zone_low <= latest_price <= zone_high:
         return {
             "stage": "inside_zone",
-            "title_suffix": "接近观察区间",
+            "title_suffix": f"进入观察区间（{zone_side_text}）",
             "distance": 0.0,
-            "distance_text": "价格已进入观察区间",
+            "distance_text": f"价格已进入观察区间{zone_side_text}",
+            "zone_side": zone_side,
+            "zone_side_text": zone_side_text,
         }
 
     distance = min(abs(latest_price - zone_low), abs(latest_price - zone_high))
     if distance <= tolerance:
         distance_points = distance / point if point > 0 else 0.0
+        near_side = "lower" if abs(latest_price - zone_low) <= abs(latest_price - zone_high) else "upper"
+        near_side_text = "下沿" if near_side == "lower" else "上沿"
         if point > 0:
-            distance_text = f"距离观察区间约 {distance_points:.0f} 点"
+            distance_text = f"距离观察区间{near_side_text}约 {distance_points:.0f} 点"
         else:
-            distance_text = f"距离观察区间约 {distance:.2f}"
+            distance_text = f"距离观察区间{near_side_text}约 {distance:.2f}"
         return {
             "stage": "near_zone",
-            "title_suffix": "靠近观察区间",
+            "title_suffix": f"靠近观察区间（{near_side_text}）",
             "distance": float(distance),
             "distance_text": distance_text,
+            "zone_side": near_side,
+            "zone_side_text": near_side_text,
         }
     return {
         "stage": "candidate",
         "title_suffix": "结构候选",
         "distance": float(distance),
         "distance_text": "价格仍未靠近观察区间",
+        "zone_side": zone_side,
+        "zone_side_text": zone_side_text,
     }
 
 
@@ -380,6 +397,8 @@ def _build_structure_entries(
             "structure_entry_stage": stage,
             "entry_zone_distance": float(entry_zone_meta.get("distance", 0.0) or 0.0),
             "entry_zone_distance_text": _normalize_text(entry_zone_meta.get("distance_text", "")),
+            "entry_zone_side": str(entry_zone_meta.get("zone_side", "") or "").strip(),
+            "entry_zone_side_text": _normalize_text(entry_zone_meta.get("zone_side_text", "")),
         }
         result.append(
             _build_entry(

@@ -48,12 +48,14 @@ def _build_execution_card_line(entry: dict, price_point: float) -> str:
     parts: list[str] = []
     risk_reward_ratio = entry.get("risk_reward_ratio")
     entry_zone_text = _normalize_text(entry.get("entry_zone_text", ""))
+    entry_zone_side_text = _normalize_text(entry.get("entry_zone_side_text", ""))
     stop_loss_price = entry.get("stop_loss_price")
     take_profit_1 = entry.get("take_profit_1")
     take_profit_2 = entry.get("take_profit_2")
 
     if entry_zone_text:
-        parts.append(f"观察 {_clip_text(entry_zone_text, 28)}")
+        zone_label = f"观察{entry_zone_side_text}" if entry_zone_side_text else "观察"
+        parts.append(f"{zone_label} {_clip_text(entry_zone_text, 24)}")
     if stop_loss_price:
         try:
             parts.append(f"止损 {_format_price(float(stop_loss_price), price_point)}")
