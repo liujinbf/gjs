@@ -11,6 +11,7 @@ from pathlib import Path
 from runtime_utils import parse_time as _parse_time_impl
 
 from knowledge_base import KNOWLEDGE_DB_FILE, open_knowledge_connection
+from quote_models import QuoteRow
 
 
 def _connect(db_path: Path | str | None = None) -> sqlite3.Connection:
@@ -24,6 +25,11 @@ def _now_text(now: datetime | None = None) -> str:
 
 def _normalize_text(value: object) -> str:
     return " ".join(str(value or "").replace("\n", " ").split()).strip()
+
+
+def _normalize_snapshot_item(item: dict | QuoteRow | None) -> dict:
+    """将快照项中的报价核心字段先归一化，再保留其余分析字段。"""
+    return QuoteRow.from_payload(item).to_dict()
 
 
 # P-004 修复（DEFECT-004）：委托给公共 runtime_utils.parse_time，消除第4个重复定义。
@@ -145,7 +151,7 @@ def record_snapshot(snapshot: dict, db_path: Path | str | None = None) -> dict:
     if not snapshot_time:
         snapshot_time = _now_text()
 
-    items = list((snapshot or {}).get("items", []) or [])
+    items = [_normalize_snapshot_item(item) for item in list((snapshot or {}).get("items", []) or [])]
     inserted_count = 0
     inserted_snapshot_ids = []
     snapshot_bindings = {}
