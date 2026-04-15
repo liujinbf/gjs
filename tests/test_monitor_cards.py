@@ -5,7 +5,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from external_feed_models import MacroDataItem
-from monitor_cards import build_macro_data_status_card, build_spread_focus_cards
+from monitor_cards import build_macro_data_status_card, build_runtime_status_cards, build_spread_focus_cards
+from signal_enums import AlertTone
 
 
 def test_build_macro_data_status_card_accepts_macro_data_item_objects():
@@ -42,3 +43,25 @@ def test_build_spread_focus_cards_uses_normalized_quote_status_code():
     )
 
     assert cards[0]["title"] == "EURUSD 暂无活跃报价"
+
+
+def test_build_runtime_status_cards_uses_enum_tones_for_connection_states():
+    disconnected = build_runtime_status_cards(
+        connected=False,
+        connection_message="MT5 未启动。",
+        items=[],
+        watch_count=2,
+        live_count=0,
+        inactive_count=0,
+    )
+    connected = build_runtime_status_cards(
+        connected=True,
+        connection_message="MT5 已连接。",
+        items=[{"symbol": "XAUUSD", "quote_status_code": "live", "has_live_quote": True}],
+        watch_count=1,
+        live_count=1,
+        inactive_count=0,
+    )
+
+    assert disconnected[0]["tone"] == AlertTone.NEGATIVE.value
+    assert connected[0]["tone"] == AlertTone.SUCCESS.value

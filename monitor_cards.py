@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from external_feed_models import MacroDataItem
 from quote_models import SnapshotItem
-from signal_enums import QuoteStatus
+from signal_enums import AlertTone, EventMode, QuoteStatus
 
 
 def _normalize_snapshot_item(item: dict | SnapshotItem | None) -> dict:
@@ -29,22 +29,22 @@ def _normalize_macro_data_item(item: dict | MacroDataItem | None) -> dict:
 def build_spread_focus_cards(items: list[dict]) -> list[dict]:
     cards = []
     for item in items:
-        tone = str(item.get("tone", "neutral") or "neutral")
+        tone = str(item.get("tone", AlertTone.NEUTRAL.value) or AlertTone.NEUTRAL.value)
         symbol = str(item.get("symbol", "--") or "--")
-        if tone == "warning":
+        if tone == AlertTone.WARNING.value:
             cards.append(
                 {
                     "title": f"{symbol} 点差高警戒",
                     "detail": str(item.get("execution_note", "") or "当前点差明显放大，先暂停追单。").strip(),
-                    "tone": "warning",
+                    "tone": AlertTone.WARNING.value,
                 }
             )
-        elif tone == "accent":
+        elif tone == AlertTone.ACCENT.value:
             cards.append(
                 {
                     "title": f"{symbol} 点差偏宽",
                     "detail": str(item.get("execution_note", "") or "当前点差偏宽，先等报价回落。").strip(),
-                    "tone": "accent",
+                    "tone": AlertTone.ACCENT.value,
                 }
             )
         elif _is_inactive_quote_item(item):
@@ -52,7 +52,7 @@ def build_spread_focus_cards(items: list[dict]) -> list[dict]:
                 {
                     "title": f"{symbol} 暂无活跃报价",
                     "detail": "当前品种休市或流动性不足，先以观察为主，不做临场追单判断。",
-                    "tone": "neutral",
+                    "tone": AlertTone.NEUTRAL.value,
                 }
             )
 
@@ -61,7 +61,7 @@ def build_spread_focus_cards(items: list[dict]) -> list[dict]:
             {
                 "title": "点差状态稳定",
                 "detail": "当前观察池没有出现明显的点差异常，可继续盯关键位、美元方向和事件窗口。",
-                "tone": "success",
+                "tone": AlertTone.SUCCESS.value,
             }
         )
     return cards[:3]
@@ -76,10 +76,10 @@ def build_event_window_cards(symbols: list[str], event_context: dict | None = No
     next_event_name = str(context.get("next_event_name", "") or "").strip()
     next_event_time_text = str(context.get("next_event_time_text", "") or "").strip()
     feed_status_text = str(context.get("feed_status_text", "") or "").strip()
-    context_mode = str(context.get("mode", "normal") or "normal").strip().lower()
+    context_mode = str(context.get("mode", EventMode.NORMAL.value) or EventMode.NORMAL.value).strip().lower()
     should_show_context_card = (
         bool(context.get("auto_enabled"))
-        or context_mode != "normal"
+        or context_mode != EventMode.NORMAL.value
         or bool(str(context.get("active_event_name", "") or "").strip())
     )
     if should_show_context_card and (context_mode_text or context_reason):
@@ -94,7 +94,15 @@ def build_event_window_cards(symbols: list[str], event_context: dict | None = No
             {
                 "title": f"纪律模式：{context_mode_text or '正常观察'}{f'（{context_source_text}）' if context_source_text else ''}",
                 "detail": " ".join(detail_parts).strip() or "当前暂无额外事件纪律说明。",
-                "tone": "warning" if context_mode == "pre_event" else ("accent" if context_mode == "post_event" else "neutral"),
+                "tone": (
+                    AlertTone.WARNING.value
+                    if context_mode == EventMode.PRE_EVENT.value
+                    else (
+                        AlertTone.ACCENT.value
+                        if context_mode == EventMode.POST_EVENT.value
+                        else AlertTone.NEUTRAL.value
+                    )
+                ),
             }
         )
 
@@ -104,7 +112,7 @@ def build_event_window_cards(symbols: list[str], event_context: dict | None = No
             {
                 "title": "黄金 / 白银事件窗口",
                 "detail": "重点盯非农、CPI、联储讲话与美元指数。事件前后先看点差，再看突破是否站稳。",
-                "tone": "warning",
+                "tone": AlertTone.WARNING.value,
             }
         )
     if "EURUSD" in normalized:
@@ -112,7 +120,7 @@ def build_event_window_cards(symbols: list[str], event_context: dict | None = No
             {
                 "title": "EURUSD 观察重点",
                 "detail": "先看联储和欧央行口径差，再看美元强弱。消息前后第一脚波动容易是假突破。",
-                "tone": "accent",
+                "tone": AlertTone.ACCENT.value,
             }
         )
     if "USDJPY" in normalized:
@@ -120,7 +128,7 @@ def build_event_window_cards(symbols: list[str], event_context: dict | None = No
             {
                 "title": "USDJPY 观察重点",
                 "detail": "先盯日央行表态、美债收益率和美元方向。急拉急杀后优先等二次确认。",
-                "tone": "accent",
+                "tone": AlertTone.ACCENT.value,
             }
         )
 
@@ -129,7 +137,7 @@ def build_event_window_cards(symbols: list[str], event_context: dict | None = No
             {
                 "title": "事件窗口提醒",
                 "detail": "当前面板展示的是结构性提醒，不是实时经济日历；实战时仍要结合当日事件表确认。",
-                "tone": "neutral",
+                "tone": AlertTone.NEUTRAL.value,
             }
         )
     else:
@@ -137,7 +145,7 @@ def build_event_window_cards(symbols: list[str], event_context: dict | None = No
             {
                 "title": "使用说明",
                 "detail": "当前面板给的是结构性提醒，不等同于实时经济日历。真正动手前，仍要复核当日数据时间。",
-                "tone": "neutral",
+                "tone": AlertTone.NEUTRAL.value,
             }
         )
     return cards[:3]
@@ -171,9 +179,9 @@ def build_alert_status_cards(items: list[dict], transitions: list[dict] | None =
                     "title": "最近30分钟状态迁移",
                     "detail": "；".join(detail_parts),
                     "tone": (
-                        "warning"
+                        AlertTone.WARNING.value
                         if any(any(marker in str(item.get("to_state", "") or "") for marker in warning_states) for item in timeline[:3])
-                        else "accent"
+                        else AlertTone.ACCENT.value
                     ),
                 }
             )
@@ -194,7 +202,7 @@ def build_alert_status_cards(items: list[dict], transitions: list[dict] | None =
             {
                 "title": f"{symbol} {title}",
                 "detail": detail,
-                "tone": str(item.get("alert_state_tone", "neutral") or "neutral").strip(),
+                "tone": str(item.get("alert_state_tone", AlertTone.NEUTRAL.value) or AlertTone.NEUTRAL.value).strip(),
             }
         )
 
@@ -203,7 +211,7 @@ def build_alert_status_cards(items: list[dict], transitions: list[dict] | None =
             {
                 "title": "提醒状态稳定",
                 "detail": "当前观察池没有处于异常进行中或恢复跟踪中的品种，可继续看结构和事件窗口。",
-                "tone": "success",
+                "tone": AlertTone.SUCCESS.value,
             }
         )
     return cards[:3]
@@ -225,7 +233,7 @@ def build_runtime_status_cards(
                 f"{status_detail or '当前可以正常读取 MT5 本地报价。'} "
                 f"观察池共 {watch_count} 个品种，当前 {live_count} 个有活跃报价。"
             ).strip(),
-            "tone": "success",
+            "tone": AlertTone.SUCCESS.value,
         }
     else:
         first_card = {
@@ -234,7 +242,7 @@ def build_runtime_status_cards(
                 f"{status_detail or '当前无法连接 MT5 终端。'} "
                 "先确认客户端已启动、账号已登录、路径和服务器配置正确。"
             ).strip(),
-            "tone": "negative",
+            "tone": AlertTone.NEGATIVE.value,
         }
 
     inactive_symbols = []
@@ -249,13 +257,13 @@ def build_runtime_status_cards(
         second_card = {
             "title": "等待连接后再判断时段",
             "detail": "终端恢复后，系统会继续区分休市、流动性偏弱和点差异常，不会把静态报价误判成可执行机会。",
-            "tone": "neutral",
+            "tone": AlertTone.NEUTRAL.value,
         }
     elif inactive_count >= watch_count > 0:
         second_card = {
             "title": "当前观察池暂无活跃报价",
             "detail": "观察池内品种当前都处于休市或流动性不足阶段，更适合等待下一个活跃时段，不要拿静态报价做临场判断。",
-            "tone": "warning",
+            "tone": AlertTone.WARNING.value,
         }
     elif inactive_symbols:
         second_card = {
@@ -264,13 +272,13 @@ def build_runtime_status_cards(
                 f"{'、'.join(inactive_symbols)} 当前休市或流动性不足。"
                 "先盯有活跃报价的品种，事件窗口前后也别拿静态报价追单。"
             ),
-            "tone": "accent",
+            "tone": AlertTone.ACCENT.value,
         }
     else:
         second_card = {
             "title": "市场活跃度正常",
             "detail": "当前观察池都有活跃报价，可继续盯点差、美元方向和事件窗口，再结合关键位做观察。",
-            "tone": "success",
+            "tone": AlertTone.SUCCESS.value,
         }
 
     return [first_card, second_card]
@@ -289,17 +297,17 @@ def build_macro_data_status_card(
             {
                 "title": "宏观数据层",
                 "detail": status or "结构化宏观数据层未开启，可在设置中配置 FRED/BLS 等数据源规格。",
-                "tone": "neutral",
+                "tone": AlertTone.NEUTRAL.value,
             }
         ]
 
     # 根据状态词判断首卡样式
     if "拉取失败" in status or "error" in status.lower():
-        tone = "warning"
+        tone = AlertTone.WARNING.value
     elif "缓存" in status or "stale" in status.lower():
-        tone = "accent"
+        tone = AlertTone.ACCENT.value
     else:
-        tone = "success"
+        tone = AlertTone.SUCCESS.value
 
     cards = [{"title": "宏观数据同步状态", "detail": status, "tone": tone}]
 
@@ -313,7 +321,7 @@ def build_macro_data_status_card(
         if not name:
             continue
         detail = f"当前值 {value_text}，{delta_text}。{bias_text}"
-        item_tone = "accent" if direction in {"bullish", "bearish"} else "neutral"
+        item_tone = AlertTone.ACCENT.value if direction in {"bullish", "bearish"} else AlertTone.NEUTRAL.value
         cards.append({"title": name, "detail": detail.strip(), "tone": item_tone})
 
     return cards[:3]
