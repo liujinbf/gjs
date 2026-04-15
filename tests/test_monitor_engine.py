@@ -13,7 +13,7 @@ from monitor_engine import (
     build_snapshot_from_rows,
     build_trade_grade,
 )
-from quote_models import QuoteRow
+from quote_models import QuoteRow, SnapshotItem
 
 
 def test_build_symbol_macro_focus_for_gold():
@@ -942,3 +942,43 @@ def test_build_snapshot_from_rows_accepts_quote_row_objects():
     assert item["symbol"] == "XAUUSD"
     assert item["quote_status_code"] == "live"
     assert item["latest_text"] != "--"
+
+
+def test_snapshot_item_exports_core_fields():
+    item = SnapshotItem(
+        symbol="XAUUSD",
+        latest_price=4759.82,
+        spread_points=17.0,
+        point=0.01,
+        has_live_quote=True,
+        bid=4759.74,
+        ask=4759.91,
+        tick_time=1000,
+        latest_text="4,759.82",
+        quote_text="Bid 4759.74 / Ask 4759.91 · 点差 17点",
+        status_text="实时报价",
+        quote_status_code="live",
+        execution_note="测试执行建议",
+        trade_grade="可轻仓试仓",
+        trade_grade_detail="结构干净",
+        trade_next_review="15 分钟后复核",
+        trade_grade_source="structure",
+        alert_state_text="结构候选",
+        alert_state_detail="当前执行面相对干净",
+        alert_state_tone="success",
+        alert_state_rank=2,
+        regime_tag="trend_expansion",
+        regime_text="趋势扩张",
+        regime_reason="多周期同向偏多",
+        regime_rank=5,
+        tone="success",
+        signal_side="long",
+        signal_side_text="【↑ 多头参考】",
+        extra={"intraday_bias": "bullish"},
+    ).to_dict()
+
+    assert item["symbol"] == "XAUUSD"
+    assert item["trade_grade_source"] == "structure"
+    assert item["alert_state_text"] == "结构候选"
+    assert item["regime_text"] == "趋势扩张"
+    assert item["intraday_bias"] == "bullish"

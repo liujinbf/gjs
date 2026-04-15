@@ -123,3 +123,77 @@ class QuoteRow:
         }
         payload.update(dict(self.extra))
         return payload
+
+
+@dataclass(slots=True)
+class SnapshotItem:
+    """监控快照单项的轻量模型。
+
+    说明：
+    - 先收口最常跨模块流转的字段，减少 monitor_engine 里巨型 dict 的核心噪音。
+    - 技术分析与解释性长尾字段先放在 extra，后续再逐步迁移。
+    """
+
+    symbol: str
+    latest_price: float = 0.0
+    spread_points: float = 0.0
+    point: float = 0.0
+    has_live_quote: bool = False
+    bid: float = 0.0
+    ask: float = 0.0
+    tick_time: int = 0
+    latest_text: str = "--"
+    quote_text: str = ""
+    status_text: str = ""
+    quote_status_code: str = QuoteStatus.ERROR.value
+    execution_note: str = ""
+    trade_grade: str = ""
+    trade_grade_detail: str = ""
+    trade_next_review: str = ""
+    trade_grade_source: str = ""
+    alert_state_text: str = ""
+    alert_state_detail: str = ""
+    alert_state_tone: str = ""
+    alert_state_rank: int = 0
+    regime_tag: str = ""
+    regime_text: str = ""
+    regime_reason: str = ""
+    regime_rank: int = 0
+    tone: str = ""
+    signal_side: str = ""
+    signal_side_text: str = ""
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = {
+            "symbol": self.symbol,
+            "latest_price": self.latest_price,
+            "spread_points": self.spread_points,
+            "point": self.point,
+            "has_live_quote": self.has_live_quote,
+            "bid": self.bid,
+            "ask": self.ask,
+            "tick_time": self.tick_time,
+            "latest_text": self.latest_text,
+            "quote_text": self.quote_text,
+            "status_text": self.status_text,
+            "quote_status_code": self.quote_status_code,
+            "execution_note": self.execution_note,
+            "trade_grade": self.trade_grade,
+            "trade_grade_detail": self.trade_grade_detail,
+            "trade_next_review": self.trade_next_review,
+            "trade_grade_source": self.trade_grade_source,
+            "alert_state_text": self.alert_state_text,
+            "alert_state_detail": self.alert_state_detail,
+            "alert_state_tone": self.alert_state_tone,
+            "alert_state_rank": self.alert_state_rank,
+            "regime_tag": self.regime_tag,
+            "regime_text": self.regime_text,
+            "regime_reason": self.regime_reason,
+            "regime_rank": self.regime_rank,
+            "tone": self.tone,
+            "signal_side": self.signal_side,
+            "signal_side_text": self.signal_side_text,
+        }
+        payload.update(dict(self.extra))
+        return payload
