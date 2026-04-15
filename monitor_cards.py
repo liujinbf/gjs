@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from external_feed_models import MacroDataItem
 from signal_enums import QuoteStatus
 
 
@@ -14,6 +15,11 @@ def _is_inactive_quote_item(item: dict) -> bool:
         return True
     status_text = str(item.get("status_text", "") or "").strip()
     return "休市" in status_text or "暂无" in status_text
+
+
+def _normalize_macro_data_item(item: dict | MacroDataItem | None) -> dict:
+    """统一卡片层消费的结构化宏观数据条目契约。"""
+    return MacroDataItem.from_payload(item).to_dict()
 
 
 def build_spread_focus_cards(items: list[dict]) -> list[dict]:
@@ -268,10 +274,10 @@ def build_runtime_status_cards(
 
 def build_macro_data_status_card(
     macro_data_status_text: str,
-    macro_data_items: list[dict] | None = None,
+    macro_data_items: list[dict | MacroDataItem] | None = None,
 ) -> list[dict]:
     """生成宏观数据刷新状态卡片，展示 FRED/BLS/Treasury 数据同步结果。"""
-    items = list(macro_data_items or [])
+    items = [_normalize_macro_data_item(item) for item in list(macro_data_items or [])]
     status = str(macro_data_status_text or "").strip()
 
     if not status or "未开启" in status or "未配置" in status:
