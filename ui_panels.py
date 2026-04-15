@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QTextEdit, QTabWidget, QVBoxLayout, QWidget, QHeaderView
 )
 from quote_models import SnapshotItem
-from signal_enums import QuoteStatus
+from signal_enums import AlertTone, QuoteStatus
 import style
 from alert_history import (
     read_recent_history, summarize_effectiveness, summarize_recent_history
@@ -163,11 +163,14 @@ class InsightPanel(QWidget):
         tone_styles = style.PANEL_STYLE_MAP
         safe = list(cards or [])
         while len(safe) < len(labels):
-            safe.append({"title": "暂无", "detail": "", "tone": "neutral"})
+            safe.append({"title": "暂无", "detail": "", "tone": AlertTone.NEUTRAL.value})
         for lbl, card in zip(labels, safe):
             title  = str(card.get("title", "") or "").strip()
             detail = str(card.get("detail", "") or "").strip()
-            tone   = str(card.get("tone", "neutral") or "neutral").strip()
+            tone   = str(
+                card.get("tone", AlertTone.NEUTRAL.value)
+                or AlertTone.NEUTRAL.value
+            ).strip()
             if detail:
                 lbl.setText(f"<b>{title}</b><br><small style='color:#64748b;'>{detail}</small>")
                 lbl.setTextFormat(Qt.RichText)
@@ -181,9 +184,9 @@ class InsightPanel(QWidget):
     def update_from_snapshot(self, snapshot: dict):
         rc = list(snapshot.get("runtime_status_cards", []) or [])
         self._fill([self.runtime_status_label],
-                   [rc[0]] if rc else [{"title": "等待刷新", "detail": "", "tone": "neutral"}])
+                   [rc[0]] if rc else [{"title": "等待刷新", "detail": "", "tone": AlertTone.NEUTRAL.value}])
         self._fill([self.session_status_label],
-                   [rc[1]] if len(rc) > 1 else [{"title": "等待刷新", "detail": "", "tone": "neutral"}])
+                   [rc[1]] if len(rc) > 1 else [{"title": "等待刷新", "detail": "", "tone": AlertTone.NEUTRAL.value}])
         self._fill(self.spread_focus_labels, snapshot.get("spread_focus_cards", []))
         self._fill(self.event_window_labels, snapshot.get("event_window_cards", []))
         self._fill(self.alert_status_labels, snapshot.get("alert_status_cards", []))
@@ -422,7 +425,10 @@ class WatchListTable(QFrame):
             for col_index, value in enumerate(values):
                 cell = QTableWidgetItem(str(value or "--"))
                 cell.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                bg_str = tone_bg.get(str(item.get("tone", "neutral") or "neutral"), "#f8fafc")
+                bg_str = tone_bg.get(
+                    str(item.get("tone", AlertTone.NEUTRAL.value) or AlertTone.NEUTRAL.value),
+                    "#f8fafc",
+                )
                 cell.setBackground(QColor(bg_str))
                 self.table.setItem(row_index, col_index, cell)
         self._row_feedback_targets = [

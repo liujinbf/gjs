@@ -29,6 +29,7 @@ from mt5_gateway import shutdown_connection
 from notification import get_notification_status, send_ai_brief_notification, send_learning_report_notification, send_notifications
 from quote_models import SnapshotItem
 from settings_dialog import MetalSettingsDialog
+from signal_enums import AlertTone, TradeGrade
 from sim_signal_bridge import build_rule_sim_signal_decision
 from ui_panels import DashboardMetricsPanel, InsightPanel, LeftTabPanel, WatchListTable
 
@@ -849,7 +850,10 @@ class MetalMonitorWindow(QMainWindow):
         snapshot = annotate_snapshot_with_model(snapshot)
         snapshot = apply_model_probability_context(snapshot)
         self._last_snapshot = dict(snapshot or {})
-        self._set_status_badge(snapshot.get("status_badge", "MT5 未连接"), snapshot.get("status_tone", "negative"))
+        self._set_status_badge(
+            snapshot.get("status_badge", "MT5 未连接"),
+            snapshot.get("status_tone", AlertTone.NEGATIVE.value),
+        )
         self.lbl_status_hint.setText(snapshot.get("status_hint", ""))
         self._update_notify_status(snapshot)
 
@@ -870,7 +874,7 @@ class MetalMonitorWindow(QMainWindow):
         self._append_log(
             f"[{snapshot.get('last_refresh_text', '--')}] "
             f"{snapshot.get('event_risk_mode_text', '正常观察')}（{snapshot.get('event_risk_mode_source_text', '手动模式')}） | "
-            f"{snapshot.get('trade_grade', '只适合观察')} | "
+            f"{snapshot.get('trade_grade', TradeGrade.OBSERVE_ONLY.value)} | "
             f"{snapshot.get('live_digest', '暂无有效报价')}"
         )
         self._enqueue_snapshot_side_effects(snapshot)
@@ -889,7 +893,7 @@ class MetalMonitorWindow(QMainWindow):
     def _on_snapshot_error(self, message: str):
         self._worker = None
         self.btn_refresh.setEnabled(True)
-        self._set_status_badge("刷新失败", "negative")
+        self._set_status_badge("刷新失败", AlertTone.NEGATIVE.value)
         self.lbl_status_hint.setText(str(message or "读取监控快照失败。"))
         self._append_log(f"[错误] {message}")
         # M-004 修复：移除锁屏模态框，改为只写日志，避免卡住轮询
@@ -1084,21 +1088,29 @@ class MetalMonitorWindow(QMainWindow):
         self._append_log(f"[AI自动研判失败] {error_text}")
 
     def _update_trade_grade(self, snapshot: dict):
-        grade = str(snapshot.get("trade_grade", "只适合观察") or "只适合观察").strip()
+        grade = str(
+            snapshot.get("trade_grade", TradeGrade.OBSERVE_ONLY.value)
+            or TradeGrade.OBSERVE_ONLY.value
+        ).strip()
         detail = str(
             snapshot.get("trade_grade_detail", "先完成一轮快照刷新，再评估当前执行环境。")
             or "先完成一轮快照刷新，再评估当前执行环境。"
         ).strip()
         next_review = str(snapshot.get("trade_next_review", "下一轮轮询后再看。") or "下一轮轮询后再看。").strip()
-        tone = str(snapshot.get("trade_grade_tone", "neutral") or "neutral").strip()
+        tone = str(
+            snapshot.get("trade_grade_tone", AlertTone.NEUTRAL.value)
+            or AlertTone.NEUTRAL.value
+        ).strip()
         tone_styles = {
-            "success": "background:#ecfdf5;border:1px solid #bbf7d0;border-radius:12px;padding:10px;color:#166534;font-size:12px;line-height:1.6;font-weight:700;",
-            "warning": "background:#fff7ed;border:1px solid #fdba74;border-radius:12px;padding:10px;color:#9a3412;font-size:12px;line-height:1.6;font-weight:700;",
-            "accent": "background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:10px;color:#1d4ed8;font-size:12px;line-height:1.6;font-weight:700;",
-            "neutral": style.STYLE_PANEL_NEUTRAL_BOLD,
+            AlertTone.SUCCESS.value: "background:#ecfdf5;border:1px solid #bbf7d0;border-radius:12px;padding:10px;color:#166534;font-size:12px;line-height:1.6;font-weight:700;",
+            AlertTone.WARNING.value: "background:#fff7ed;border:1px solid #fdba74;border-radius:12px;padding:10px;color:#9a3412;font-size:12px;line-height:1.6;font-weight:700;",
+            AlertTone.ACCENT.value: "background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:10px;color:#1d4ed8;font-size:12px;line-height:1.6;font-weight:700;",
+            AlertTone.NEUTRAL.value: style.STYLE_PANEL_NEUTRAL_BOLD,
         }
         self.lbl_trade_grade.setText(f"出手分级：{grade}\n原因：{detail}\n下一次复核：{next_review}")
-        self.lbl_trade_grade.setStyleSheet(tone_styles.get(tone, tone_styles["neutral"]))
+        self.lbl_trade_grade.setStyleSheet(
+            tone_styles.get(tone, tone_styles[AlertTone.NEUTRAL.value])
+        )
 
     def closeEvent(self, event):
         if hasattr(self, "_timer"):
