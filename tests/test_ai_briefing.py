@@ -42,7 +42,8 @@ def test_build_snapshot_prompt_contains_symbols_and_alerts():
                 "symbol": "XAUUSD",
                 "latest_text": "4759.82",
                 "quote_text": "Bid 4759.74 | Ask 4759.91 | 点差 17点",
-                "status_text": "实时报价",
+                "status_text": "经纪商返回实时字符串",
+                "quote_status_code": "live",
                 "regime_text": "趋势扩张",
                 "macro_focus": "重点看非农、CPI 和联储。",
                 "execution_note": "点差稳定，可继续观察。",
@@ -87,6 +88,8 @@ def test_build_snapshot_prompt_contains_symbols_and_alerts():
     assert "本地概率模型" in prompt
     assert "本地模型平均参考胜率约 71%" in prompt
     assert "参考胜率 74%" in prompt
+    assert "报价状态 活跃报价" in prompt
+    assert "经纪商返回实时字符串" not in prompt
 
 
 def test_full_prompt_assets_are_independent():

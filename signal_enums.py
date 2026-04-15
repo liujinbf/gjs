@@ -71,6 +71,15 @@ class SignalSide(str, Enum):
     NEUTRAL = "neutral"
 
 
+class QuoteStatus(str, Enum):
+    """报价状态码枚举。对应 quote_status_code 字段。"""
+    LIVE = "live"
+    INACTIVE = "inactive"
+    UNKNOWN_SYMBOL = "unknown_symbol"
+    NOT_SELECTED = "not_selected"
+    ERROR = "error"
+
+
 class AlertStateText(str, Enum):
     """Alert 状态显示文本枚举。对应 alert_state_text 字段。"""
     MARKET_CLOSED    = "休市 / 暂无报价"

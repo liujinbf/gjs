@@ -7,8 +7,25 @@
 3. 保持"硬核数据 + 大白话"双轨风格，既专业又易读
 """
 
+from signal_enums import QuoteStatus
+
 PROMPT_VERSION = "metal-monitor-v2.2"
 ADVISOR_PROMPT_VERSION = "metal-monitor-advisor-v2.2"
+
+
+def _format_quote_status_text(item: dict) -> str:
+    status_code = str(item.get("quote_status_code", "") or "").strip().lower()
+    if status_code == QuoteStatus.LIVE:
+        return "活跃报价"
+    if status_code == QuoteStatus.INACTIVE:
+        return "非活跃报价"
+    if status_code == QuoteStatus.UNKNOWN_SYMBOL:
+        return "未识别品种"
+    if status_code == QuoteStatus.NOT_SELECTED:
+        return "未加入市场报价"
+    if status_code == QuoteStatus.ERROR:
+        return "报价拉取异常"
+    return str(item.get("status_text", "--") or "--").strip()
 
 AI_BRIEF_SYSTEM_PROMPT = (
     "你是一位拥有 15 年经验的「贵金属与外汇资深量化交易教练」。\n"
@@ -262,7 +279,7 @@ def _build_item_lines(snapshot: dict) -> str:
         symbol = str(item.get("symbol", "--") or "--").strip()
         latest_text = str(item.get("latest_text", "--") or "--").strip()
         quote_text = str(item.get("quote_text", "--") or "--").strip()
-        status_text = str(item.get("status_text", "--") or "--").strip()
+        status_text = _format_quote_status_text(item)
         macro_focus = str(item.get("macro_focus", "--") or "--").strip()
         execution_note = str(item.get("execution_note", "--") or "--").strip()
         tech_summary = str(item.get("tech_summary", "") or "").strip()

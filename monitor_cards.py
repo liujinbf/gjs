@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+from signal_enums import QuoteStatus
+
 
 def _is_inactive_quote_item(item: dict) -> bool:
     status_code = str(item.get("quote_status_code", "") or "").strip().lower()
-    if status_code in {"inactive", "unknown_symbol", "not_selected", "error"}:
+    if status_code in {
+        QuoteStatus.INACTIVE,
+        QuoteStatus.UNKNOWN_SYMBOL,
+        QuoteStatus.NOT_SELECTED,
+        QuoteStatus.ERROR,
+    }:
         return True
     status_text = str(item.get("status_text", "") or "").strip()
     return "休市" in status_text or "暂无" in status_text
