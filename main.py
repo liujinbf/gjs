@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app_config import load_project_env
+from notification_worker import ensure_worker_started
 from ui import MetalMonitorWindow
 
 # 运行时日志文件，与现有 error_log.txt 共用
@@ -105,9 +106,21 @@ def main() -> int:
     import style
     app.setStyleSheet(style.GLOBAL_APP_STYLE)
 
+    # 启动后台推送队列（在窗口创建前就绪，避免首次推送竞态）
+    ensure_worker_started()
+
     window = MetalMonitorWindow()
     window.show()
-    return app.exec()
+    exit_code = app.exec()
+
+    # 程序退出后优雅停机，等待推送队列清空（最多 5 秒）
+    from notification_worker import get_notification_worker
+    worker = get_notification_worker()
+    if worker.is_alive():
+        logging.info("⏳ 等待推送队列清空...")
+        worker.stop(timeout=5)
+
+    return exit_code
 
 
 if __name__ == "__main__":

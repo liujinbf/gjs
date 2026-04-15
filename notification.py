@@ -1,14 +1,27 @@
 """
 消息推送：支持钉钉 Webhook 与 PushPlus。
+
+网络 I/O 架构说明
+-----------------
+所有对外的 HTTP 推送（send_dingtalk / send_pushplus）均通过
+NotificationWorker 后台线程执行，调用方（MonitorWorker / AiBriefWorker）
+不再被网络延迟或 time.sleep 阻塞。
+
+冷却状态（notify_state）仍然在调用方线程同步写入（乐观写入），
+保证下一个刷新周期的去重判断立即生效，无需等待 HTTP 请求完成。
 """
 from __future__ import annotations
 
 import json
 import hashlib
-import time  # 炸弹四修复：推送限流需要 time.sleep
+import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib import error, request
+
+from notification_worker import get_notification_worker
+
+logger = logging.getLogger(__name__)
 
 from app_config import MetalMonitorConfig
 from notification_payloads import _build_ai_brief_entry, _build_learning_report_entry, _build_markdown, _normalize_text
@@ -229,6 +242,11 @@ def send_pushplus(entry: dict, token: str) -> tuple[bool, str]:
 
 
 def send_notifications(entries: list[dict], config: MetalMonitorConfig, state_file: Path | None = None) -> dict:
+    """筛选、聚合并异步投递推送任务。
+
+    冷却/去重状态在本函数内同步写入（乐观写入），HTTP 发送由
+    NotificationWorker 后台线程执行，调用方不会被网络 I/O 阻塞。
+    """
     pending = _aggregate_notify_entries(pick_notify_entries(entries, config, state_file=state_file))
     if not pending:
         return {"sent_count": 0, "sent_channel_count": 0, "messages": [], "errors": []}
@@ -239,6 +257,8 @@ def send_notifications(entries: list[dict], config: MetalMonitorConfig, state_fi
     messages = []
     errors = []
     channels = _configured_channels(config)
+    worker = get_notification_worker()
+
     for entry in pending:
         entry_title = _normalize_text(entry.get("title", "提醒"))
         signature = str(entry.get("signature", "") or "").strip()
@@ -272,33 +292,58 @@ def send_notifications(entries: list[dict], config: MetalMonitorConfig, state_fi
                 notify_mode = "aggregate"
 
             send_entry = _build_send_entry(entry, total_count, notify_mode)
-            if channel_key == "dingtalk":
-                ok, detail = send_dingtalk(send_entry, channel_value)
-            else:
-                ok, detail = send_pushplus(send_entry, channel_value)
-            time.sleep(0.35)  # 炸弹四修复：错峰推送，避免并发 Burst 触发 API 429
 
-            if ok:
-                if signature:
-                    state[_build_channel_state_key(channel_key, signature)] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                _mark_group_sent(state, channel_key, group_key, current_priority)
-                entry_sent = True
-                sent_channel_count += 1
-                if notify_mode == "escalation":
-                    messages.append(f"{entry_title} 已作为升级提醒推送到{channel_name}")
-                elif total_count > 1:
-                    messages.append(f"{entry_title} 已合并 {total_count} 条同类提醒后推送到{channel_name}")
+            # ── 乐观写入：推送任务入队前立即更新冷却状态 ─────────────────
+            # 不等待 HTTP 实际完成，保证下一个刷新周期能正确判断冷却。
+            # 若后台线程最终推送失败，仅记录日志，不回滚冷却状态
+            # （冷却期内少推一次，优于因重试失败导致的刷屏）。
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if signature:
+                state[_build_channel_state_key(channel_key, signature)] = now_str
+            _mark_group_sent(state, channel_key, group_key, current_priority)
+            entry_sent = True
+            sent_channel_count += 1
+
+            # ── 拼装推送函数和入队 ────────────────────────────────────────
+            send_fn = send_dingtalk if channel_key == "dingtalk" else send_pushplus
+            _entry_title_cap = entry_title  # 闭包捕获
+            _channel_name_cap = channel_name
+            _notify_mode_cap = notify_mode
+            _total_count_cap = total_count
+
+            def _on_result(
+                ok: bool,
+                detail: str,
+                _title: str = _entry_title_cap,
+                _ch: str = _channel_name_cap,
+                _mode: str = _notify_mode_cap,
+                _cnt: int = _total_count_cap,
+            ) -> None:
+                if ok:
+                    if _mode == "escalation":
+                        logger.info("[推送] %s 已作为升级提醒推送到%s", _title, _ch)
+                    elif _cnt > 1:
+                        logger.info("[推送] %s 已合并 %d 条后推送到%s", _title, _cnt, _ch)
+                    else:
+                        logger.info("[推送] %s 已推送到%s", _title, _ch)
                 else:
-                    messages.append(f"{entry_title} 已推送到{channel_name}")
+                    logger.warning("[推送] %s 推送到%s失败：%s", _title, _ch, detail)
+
+            worker.enqueue({"send_fn": send_fn, "args": (send_entry, channel_value), "on_result": _on_result})
+
+            # 给调用方返回乐观结果（与实际推送结果一致的概率极高）
+            if notify_mode == "escalation":
+                messages.append(f"{entry_title} 已作为升级提醒投递到{channel_name}")
+            elif total_count > 1:
+                messages.append(f"{entry_title} 已合并 {total_count} 条同类提醒后投递到{channel_name}")
             else:
-                errors.append(f"{entry_title} 推送到{channel_name}失败：{detail}")
+                messages.append(f"{entry_title} 已投递到{channel_name}")
+
         if entry_sent:
             sent_count += 1
 
     if messages:
         _update_last_result(state, "；".join(messages), _normalize_text)
-    elif errors:
-        _update_last_result(state, "；".join(errors), _normalize_text)
 
     _write_state(state, state_file=state_file)
     return {"sent_count": sent_count, "sent_channel_count": sent_channel_count, "messages": messages, "errors": errors}
@@ -381,31 +426,36 @@ def send_ai_brief_notification(
         }
 
     entry = _build_ai_brief_entry(result, snapshot, config)
-    messages = []
-    errors = []
+    worker = get_notification_worker()
+    enqueued_count = 0
+
+    def _make_ai_result_cb(channel_label: str) -> object:
+        def _cb(ok: bool, detail: str) -> None:
+            if ok:
+                logger.info("[AI研判] 已推送到%s", channel_label)
+            else:
+                logger.warning("[AI研判] 推送到%s失败：%s", channel_label, detail)
+        return _cb
+
     if str(config.dingtalk_webhook or "").strip():
-        ok, detail = send_dingtalk(entry, config.dingtalk_webhook)
-        if ok:
-            messages.append("AI 研判已推送到钉钉")
-        else:
-            errors.append(f"AI 研判推送到钉钉失败：{detail}")
+        worker.enqueue({"send_fn": send_dingtalk, "args": (entry, config.dingtalk_webhook), "on_result": _make_ai_result_cb("钉钉")})
+        enqueued_count += 1
     if str(config.pushplus_token or "").strip():
-        ok, detail = send_pushplus(entry, config.pushplus_token)
-        if ok:
-            messages.append("AI 研判已推送到 PushPlus")
-        else:
-            errors.append(f"AI 研判推送到 PushPlus 失败：{detail}")
-    if messages:
-        # 推送成功后记录时间，供下次冷却判断（两个 key 同时更新，互不干扰）
+        worker.enqueue({"send_fn": send_pushplus, "args": (entry, config.pushplus_token), "on_result": _make_ai_result_cb("PushPlus")})
+        enqueued_count += 1
+
+    if enqueued_count > 0:
+        # 乐观写入：入队即视为将要推送，立即更新冷却时间戳
         state[cooldown_key] = now.strftime("%Y-%m-%d %H:%M:%S")
-        # 机会通道推送成功也刷新普通通道时间，避免5分钟内又推一次普通研判
         if is_opportunity:
             state["ai_brief::last_push_time"] = now.strftime("%Y-%m-%d %H:%M:%S")
-        _update_last_result(state, "；".join(messages), _normalize_text)
-    elif errors:
-        _update_last_result(state, "；".join(errors), _normalize_text)
+        _update_last_result(state, f"AI 研判已投递（{cooldown_label}）", _normalize_text)
+        _write_state(state, state_file=state_file)
+        messages = [f"AI 研判已投递到 {enqueued_count} 个渠道"]
+        return {"sent_count": enqueued_count, "messages": messages, "errors": [], "is_opportunity": is_opportunity}
+
     _write_state(state, state_file=state_file)
-    return {"sent_count": len(messages), "messages": messages, "errors": errors, "is_opportunity": is_opportunity}
+    return {"sent_count": 0, "messages": [], "errors": ["未配置任何推送渠道"], "is_opportunity": is_opportunity}
 
 
 def _build_learning_digest_hash(report: dict) -> str:
@@ -464,27 +514,32 @@ def send_learning_report_notification(
 
     entry = _build_learning_report_entry(report)
     entry["signature"] = f"learning::{digest_hash[:16]}"
-    messages = []
-    errors = []
+    worker = get_notification_worker()
+    enqueued_count = 0
+
+    def _make_lr_result_cb(channel_label: str) -> object:
+        def _cb(ok: bool, detail: str) -> None:
+            if ok:
+                logger.info("[学习摘要] 已推送到%s", channel_label)
+            else:
+                logger.warning("[学习摘要] 推送到%s失败：%s", channel_label, detail)
+        return _cb
+
     if str(config.dingtalk_webhook or "").strip():
-        ok, detail = send_dingtalk(entry, config.dingtalk_webhook)
-        if ok:
-            messages.append("知识库学习摘要已推送到钉钉")
-        else:
-            errors.append(f"知识库学习摘要推送到钉钉失败：{detail}")
+        worker.enqueue({"send_fn": send_dingtalk, "args": (entry, config.dingtalk_webhook), "on_result": _make_lr_result_cb("钉钉")})
+        enqueued_count += 1
     if str(config.pushplus_token or "").strip():
-        ok, detail = send_pushplus(entry, config.pushplus_token)
-        if ok:
-            messages.append("知识库学习摘要已推送到 PushPlus")
-        else:
-            errors.append(f"知识库学习摘要推送到 PushPlus 失败：{detail}")
-    if messages:
+        worker.enqueue({"send_fn": send_pushplus, "args": (entry, config.pushplus_token), "on_result": _make_lr_result_cb("PushPlus")})
+        enqueued_count += 1
+
+    if enqueued_count > 0:
+        # 乐观写入：入队即视为将要推送，防止重复触发
         _mark_learning_digest_sent(state, digest_hash, sent_at=current)
-        _update_last_result(state, "；".join(messages), _normalize_text)
-    elif errors:
-        _update_last_result(state, "；".join(errors), _normalize_text)
+        _update_last_result(state, "知识库学习摘要已投递", _normalize_text)
+
     _write_state(state, state_file=state_file)
-    return {"sent_count": len(messages), "messages": messages, "errors": errors}
+    messages = [f"知识库学习摘要已投递到 {enqueued_count} 个渠道"] if enqueued_count > 0 else []
+    return {"sent_count": enqueued_count, "messages": messages, "errors": []}
 
 
 def get_notification_status(config: MetalMonitorConfig, state_file: Path | None = None) -> dict:
