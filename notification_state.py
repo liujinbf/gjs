@@ -111,6 +111,19 @@ def _get_notify_priority(entry: dict) -> int:
         return 4 if tone == "warning" else 2
     if category == "structure":
         rr_ratio = float(entry.get("risk_reward_ratio", 0.0) or 0.0)
+        stage = str(entry.get("structure_entry_stage", "") or "").strip().lower()
+        if stage == "inside_zone":
+            if rr_ratio >= 1.6:
+                return 4
+            if rr_ratio >= 1.3:
+                return 3
+            return 2
+        if stage == "near_zone":
+            if rr_ratio >= 1.6:
+                return 3
+            if rr_ratio >= 1.3:
+                return 2
+            return 1
         if rr_ratio >= 2.0:
             return 3
         if rr_ratio >= 1.3:
@@ -171,7 +184,8 @@ def _build_notify_group_key(entry: dict) -> str:
     if category == "spread" or "点差" in title:
         return f"spread::{symbol or title}"
     if category == "structure":
-        return f"structure::{symbol or title or 'setup'}"
+        stage = str(entry.get("structure_entry_stage", "") or "").strip().lower() or "candidate"
+        return f"structure::{stage}::{symbol or title or 'setup'}"
     if category == "source":
         source_name = str(entry.get("source_name", "") or "").strip().lower()
         return f"source::{source_name or title or 'source'}"

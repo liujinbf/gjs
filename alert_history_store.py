@@ -182,6 +182,45 @@ def _item_action_meta(item: dict, fallback_trade_meta: dict | None = None) -> di
     return result
 
 
+def _classify_entry_zone_stage(item: dict) -> dict[str, str | float]:
+    latest_price = float(item.get("latest_price", 0.0) or 0.0)
+    zone_low = float(item.get("risk_reward_entry_zone_low", 0.0) or 0.0)
+    zone_high = float(item.get("risk_reward_entry_zone_high", 0.0) or 0.0)
+    point = max(float(item.get("point", 0.0) or 0.0), 0.0)
+    if latest_price <= 0 or zone_low <= 0 or zone_high <= 0 or zone_high < zone_low:
+        return {}
+
+    zone_width = max(zone_high - zone_low, point or 0.0)
+    tolerance = max(zone_width * 0.35, point * 30 if point > 0 else 0.0)
+    if zone_low <= latest_price <= zone_high:
+        return {
+            "stage": "inside_zone",
+            "title_suffix": "接近观察区间",
+            "distance": 0.0,
+            "distance_text": "价格已进入观察区间",
+        }
+
+    distance = min(abs(latest_price - zone_low), abs(latest_price - zone_high))
+    if distance <= tolerance:
+        distance_points = distance / point if point > 0 else 0.0
+        if point > 0:
+            distance_text = f"距离观察区间约 {distance_points:.0f} 点"
+        else:
+            distance_text = f"距离观察区间约 {distance:.2f}"
+        return {
+            "stage": "near_zone",
+            "title_suffix": "靠近观察区间",
+            "distance": float(distance),
+            "distance_text": distance_text,
+        }
+    return {
+        "stage": "candidate",
+        "title_suffix": "结构候选",
+        "distance": float(distance),
+        "distance_text": "价格仍未靠近观察区间",
+    }
+
+
 def _pick_representative_item(items_by_symbol: dict[str, dict]) -> dict:
     candidates = [dict(item or {}) for item in items_by_symbol.values() if bool(item.get("has_live_quote", False))]
     if not candidates:
@@ -307,10 +346,21 @@ def _build_structure_entries(
         risk_reward_state = str(item.get("risk_reward_state", "") or "").strip().lower()
         if risk_reward_state not in {"favorable", "acceptable"}:
             continue
+        entry_zone_meta = _classify_entry_zone_stage(item)
+        stage = str(entry_zone_meta.get("stage", "candidate") or "candidate").strip()
 
         signal_side = str(item.get("signal_side_text", "") or "").strip() or "等待方向进一步确认"
+        if stage == "inside_zone":
+            lead_text = f"{symbol} 已进入观察区间，若回踩确认和点差继续稳定，可以重点盯执行。"
+        elif stage == "near_zone":
+            lead_text = (
+                f"{symbol} 已靠近观察区间，{str(entry_zone_meta.get('distance_text', '') or '建议开始盯价格贴近情况')}。"
+            )
+        else:
+            lead_text = f"{symbol} 当前结构和报价相对干净，可继续作为候选机会观察。"
+
         detail_parts = [
-            f"{symbol} 当前结构和报价相对干净，可继续作为候选机会观察。",
+            lead_text,
             signal_side,
             _normalize_text(item.get("trade_grade_detail", "")),
             _normalize_text(item.get("risk_reward_context_text", "")),
@@ -323,26 +373,43 @@ def _build_structure_entries(
         if event_note:
             detail_parts.append(event_note)
         detail = " ".join(part for part in detail_parts if part)
+        entry_meta = {
+            "symbol": symbol,
+            **_item_action_meta(item, fallback_trade_meta=trade_meta),
+            **_item_event_meta(item, fallback=snapshot_event_meta),
+            "structure_entry_stage": stage,
+            "entry_zone_distance": float(entry_zone_meta.get("distance", 0.0) or 0.0),
+            "entry_zone_distance_text": _normalize_text(entry_zone_meta.get("distance_text", "")),
+        }
         result.append(
             _build_entry(
                 "structure",
-                f"{symbol} 结构候选",
+                f"{symbol} {str(entry_zone_meta.get('title_suffix', '结构候选') or '结构候选')}",
                 detail,
                 "success",
                 occurred_at,
-                extra={
-                    "symbol": symbol,
-                    **_item_action_meta(item, fallback_trade_meta=trade_meta),
-                    **_item_event_meta(item, fallback=snapshot_event_meta),
-                },
+                extra=entry_meta,
                 sig_extra=[
                     symbol,
+                    stage,
                     _normalize_text(item.get("signal_side", "")),
                     _normalize_text(item.get("trade_grade_detail", "")),
                     _normalize_text(item.get("risk_reward_state", "")),
                     _normalize_text(item.get("risk_reward_entry_zone_text", "")),
                     _normalize_text(item.get("external_bias_note", "")),
                     _normalize_text(item.get("event_active_name", "")),
+                    _build_price_bucket(
+                        float(item.get("latest_price", 0.0) or 0.0),
+                        max(
+                            float(item.get("point", 0.0) or 0.0) * 50.0,
+                            abs(
+                                float(item.get("risk_reward_entry_zone_high", 0.0) or 0.0)
+                                - float(item.get("risk_reward_entry_zone_low", 0.0) or 0.0)
+                            )
+                            / 2.0
+                            or 10.0,
+                        ),
+                    ),
                 ],
             )
         )

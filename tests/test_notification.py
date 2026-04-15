@@ -281,6 +281,32 @@ def test_pick_notify_entries_allows_structure_entry_when_risk_reward_is_good():
     shutil.rmtree(state_dir)
 
 
+def test_pick_notify_entries_prioritizes_structure_inside_entry_zone():
+    state_dir = ROOT / ".runtime_test_notify_structure_zone"
+    if state_dir.exists():
+        shutil.rmtree(state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_file = state_dir / "notify_state.json"
+
+    entries = [
+        {
+            "occurred_at": "2026-04-12 10:20:00",
+            "category": "structure",
+            "title": "XAUUSD 接近观察区间",
+            "detail": "已进入观察区间，可重点盯执行。",
+            "tone": "success",
+            "signature": "structure-zone-1",
+            "symbol": "XAUUSD",
+            "risk_reward_ratio": 1.8,
+            "structure_entry_stage": "inside_zone",
+        }
+    ]
+    picked = notification.pick_notify_entries(entries, _build_config(), state_file=state_file)
+    assert len(picked) == 1
+    assert picked[0]["title"] == "XAUUSD 接近观察区间"
+    shutil.rmtree(state_dir)
+
+
 def test_pick_notify_entries_allows_source_alert_entry():
     state_dir = ROOT / ".runtime_test_notify_source"
     if state_dir.exists():
