@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from knowledge_base import KNOWLEDGE_DB_FILE, kv_get, kv_set, open_knowledge_connection
+from signal_enums import TradeGrade
 
 SUPPORTED_RUNTIME_CATEGORIES = {"entry", "trend", "directional"}
 SKIP_RULE_MARKERS = {
@@ -159,7 +160,7 @@ def _rule_matches_snapshot(rule: sqlite3.Row, snapshot: sqlite3.Row) -> tuple[bo
     snapshot_text = _snapshot_text(snapshot)
     direction_hint = _rule_direction_hint(rule_text)
 
-    if category in {"entry", "trend", "directional"} and snapshot_trade_grade != "可轻仓试仓":
+    if category in {"entry", "trend", "directional"} and snapshot_trade_grade != TradeGrade.LIGHT_POSITION:
         return False, ""
     if category == "directional" and snapshot_side == "neutral":
         return False, ""

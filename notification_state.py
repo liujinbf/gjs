@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from app_config import MetalMonitorConfig, PROJECT_DIR
+from signal_enums import AlertTone
 from runtime_utils import parse_time as _parse_time_impl
 from knowledge_base import kv_get, kv_set  # 3.2 修复：通知状态持久化走 SQLite KV
 
@@ -108,7 +109,7 @@ def _normalize_event_importance(value: str) -> str:
 def _get_notify_priority(entry: dict) -> int:
     category = str(entry.get("category", "") or "").strip()
     title = str(entry.get("title", "") or "").strip()
-    tone = str(entry.get("tone", "neutral") or "neutral").strip().lower()
+    tone = str(entry.get("tone", AlertTone.NEUTRAL.value) or AlertTone.NEUTRAL.value).strip().lower()
     # 保留原始字段局以区分"无事件"和"明确低影响事件"
     raw_importance_text = str(entry.get("event_importance_text", "") or "").strip()
     importance = _normalize_event_importance(raw_importance_text)
@@ -118,7 +119,7 @@ def _get_notify_priority(entry: dict) -> int:
     if category == "session":
         return 3
     if category == "source":
-        return 4 if tone == "warning" else 2
+        return 4 if tone == AlertTone.WARNING.value else 2
     if category == "structure":
         rr_ratio = float(entry.get("risk_reward_ratio", 0.0) or 0.0)
         stage = str(entry.get("structure_entry_stage", "") or "").strip().lower()
@@ -159,9 +160,9 @@ def _get_notify_priority(entry: dict) -> int:
             return 3
         return 0
     if category == "spread" or "点差" in title:
-        if tone == "warning":
+        if tone == AlertTone.WARNING.value:
             return 5 if importance == "high" else 4
-        if tone == "accent":
+        if tone == AlertTone.ACCENT.value:
             if importance == "high":
                 return 4
             if importance == "medium":
