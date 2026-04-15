@@ -7,6 +7,7 @@
 3. 保持"硬核数据 + 大白话"双轨风格，既专业又易读
 """
 
+from quote_models import SnapshotItem
 from signal_enums import QuoteStatus
 
 PROMPT_VERSION = "metal-monitor-v2.2"
@@ -26,6 +27,11 @@ def _format_quote_status_text(item: dict) -> str:
     if status_code == QuoteStatus.ERROR:
         return "报价拉取异常"
     return str(item.get("status_text", "--") or "--").strip()
+
+
+def _normalize_snapshot_item(item: dict | SnapshotItem | None) -> dict:
+    """统一提示词链消费的快照项字段契约。"""
+    return SnapshotItem.from_payload(item).to_dict()
 
 AI_BRIEF_SYSTEM_PROMPT = (
     "你是一位拥有 15 年经验的「贵金属与外汇资深量化交易教练」。\n"
@@ -270,7 +276,7 @@ METAL_BATCH_TEMPLATE = """\
 
 
 def _build_item_lines(snapshot: dict) -> str:
-    items = list(snapshot.get("items", []) or [])
+    items = [_normalize_snapshot_item(item) for item in list(snapshot.get("items", []) or [])]
     if not items:
         return "- 当前还没有可用快照"
 
@@ -368,7 +374,7 @@ def _build_macro_data_lines(snapshot: dict) -> str:
 def _build_local_model_lines(snapshot: dict) -> str:
     summary = str(snapshot.get("model_probability_summary_text", "") or "").strip()
     item_lines = []
-    for item in list(snapshot.get("items", []) or []):
+    for item in [_normalize_snapshot_item(item) for item in list(snapshot.get("items", []) or [])]:
         if not bool(item.get("model_ready", False)):
             continue
         symbol = str(item.get("symbol", "--") or "--").strip()

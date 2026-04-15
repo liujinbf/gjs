@@ -8,6 +8,7 @@ sys.path.insert(0, str(ROOT))
 from ai_briefing import _post_json_with_headers, build_snapshot_prompt, request_ai_brief
 from app_config import MetalMonitorConfig
 from prompt_templates import build_metal_advisor_prompt, build_metal_batch_prompt
+from quote_models import SnapshotItem
 
 
 def _build_config(api_key: str = "demo-key") -> MetalMonitorConfig:
@@ -90,6 +91,63 @@ def test_build_snapshot_prompt_contains_symbols_and_alerts():
     assert "参考胜率 74%" in prompt
     assert "报价状态 活跃报价" in prompt
     assert "经纪商返回实时字符串" not in prompt
+
+
+def test_build_snapshot_prompt_accepts_snapshot_item_objects():
+    snapshot = {
+        "summary_text": "当前共观察 1 个品种。",
+        "alert_text": "贵金属提醒：先盯点差和美元方向。",
+        "market_text": "黄金优先看非农和 CPI。",
+        "items": [
+            SnapshotItem(
+                symbol="XAUUSD",
+                latest_price=4759.82,
+                spread_points=17.0,
+                point=0.01,
+                has_live_quote=True,
+                bid=4759.74,
+                ask=4759.91,
+                latest_text="4759.82",
+                quote_text="Bid 4759.74 | Ask 4759.91 | 点差 17点",
+                status_text="实时报价",
+                quote_status_code="live",
+                execution_note="点差稳定，可继续观察。",
+                trade_grade="可轻仓试仓",
+                trade_grade_detail="结构相对干净。",
+                trade_next_review="10 分钟后复核。",
+                trade_grade_source="structure",
+                alert_state_text="结构候选",
+                alert_state_detail="当前执行面相对干净。",
+                alert_state_tone="success",
+                alert_state_rank=2,
+                regime_tag="trend_expansion",
+                regime_text="趋势扩张",
+                regime_reason="多周期同向偏多。",
+                tone="success",
+                signal_side="long",
+                signal_side_text="【↑ 多头参考】",
+                extra={
+                    "macro_focus": "重点看非农、CPI 和联储。",
+                    "model_ready": True,
+                    "model_win_probability": 0.71,
+                    "model_confidence_text": "中等信心",
+                    "model_note": "本地模型参考胜率约 71%。",
+                    "risk_reward_ready": True,
+                    "risk_reward_ratio": 2.0,
+                    "risk_reward_stop_price": 4748.0,
+                    "risk_reward_target_price": 4788.0,
+                    "risk_reward_target_price_2": 4810.0,
+                    "risk_reward_entry_zone_text": "观察进场区间 4760.00 - 4770.00。",
+                },
+            )
+        ],
+    }
+
+    prompt = build_snapshot_prompt(snapshot, rulebook={})
+
+    assert "XAUUSD" in prompt
+    assert "报价状态 活跃报价" in prompt
+    assert "参考胜率 71%" in prompt
 
 
 def test_full_prompt_assets_are_independent():
