@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT))
 
 from app_config import MetalMonitorConfig
 import notification
+from quote_models import SnapshotItem
 
 
 def _build_config() -> MetalMonitorConfig:
@@ -804,6 +805,56 @@ def test_send_ai_brief_notification_honors_summary_mode(monkeypatch):
     assert payloads
     assert payloads[0]["title"].startswith("AI 研判")
     assert "方向判断：黄金偏强。" == payloads[0]["detail"]
+
+    import shutil
+    shutil.rmtree(state_dir)
+
+
+def test_send_ai_brief_notification_accepts_snapshot_item_objects(monkeypatch):
+    state_dir = ROOT / ".runtime_test_ai_brief_snapshot_item"
+    if state_dir.exists():
+        import shutil
+        shutil.rmtree(state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_file = state_dir / "notify_state.json"
+
+    config = _build_config()
+    config.ai_push_enabled = True
+    config.ai_push_summary_only = True
+    payloads = []
+
+    def fake_ding(entry, webhook):
+        payloads.append(entry)
+        return True, "ok"
+
+    monkeypatch.setattr(notification, "send_dingtalk", fake_ding)
+    monkeypatch.setattr(notification, "send_pushplus", lambda entry, token: (False, "skip"))
+
+    result = notification.send_ai_brief_notification(
+        {
+            "model": "deepseek-chat",
+            "content": "方向判断：黄金偏强。\n行动建议：先等回踩确认。",
+        },
+        {
+            "summary_text": "当前共观察 1 个品种。",
+            "items": [
+                SnapshotItem(
+                    symbol="XAUUSD",
+                    latest_price=4759.82,
+                    spread_points=17.0,
+                    point=0.01,
+                    has_live_quote=True,
+                    status_text="实时报价",
+                )
+            ],
+        },
+        config,
+        state_file=state_file,
+    )
+
+    assert result["sent_count"] == 1
+    assert payloads
+    assert payloads[0]["title"] == "AI 研判：XAUUSD"
 
     import shutil
     shutil.rmtree(state_dir)

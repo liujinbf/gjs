@@ -6,10 +6,16 @@ from __future__ import annotations
 from datetime import datetime
 
 from app_config import MetalMonitorConfig
+from quote_models import SnapshotItem
 
 
 def _normalize_text(value: str) -> str:
     return " ".join(str(value or "").replace("\n", " ").split()).strip()
+
+
+def _normalize_snapshot_item(item: dict | SnapshotItem | None) -> dict:
+    """统一通知推送链消费的快照项字段契约。"""
+    return SnapshotItem.from_payload(item).to_dict()
 
 
 def _format_price(value: float, point: float = 0.0) -> str:
@@ -299,7 +305,7 @@ def _build_markdown(entry: dict) -> str:
 
 
 def _build_ai_brief_entry(result: dict, snapshot: dict, config: MetalMonitorConfig) -> dict:
-    items = list((snapshot or {}).get("items", []) or [])
+    items = [_normalize_snapshot_item(item) for item in list((snapshot or {}).get("items", []) or [])]
     symbols = [str(item.get("symbol", "") or "").strip().upper() for item in items if str(item.get("symbol", "") or "").strip()]
     title = "AI 研判已生成"
     if symbols:
