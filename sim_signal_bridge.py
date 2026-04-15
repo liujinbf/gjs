@@ -63,6 +63,33 @@ def _is_price_near_entry_zone(item: dict, action: str) -> bool:
     return (low - padding) <= price <= (high + padding)
 
 
+def _resolve_entry_zone_position(item: dict, action: str) -> tuple[str, str]:
+    entry_zone_low = float(item.get("risk_reward_entry_zone_low", 0.0) or 0.0)
+    entry_zone_high = float(item.get("risk_reward_entry_zone_high", 0.0) or 0.0)
+    if entry_zone_low <= 0 or entry_zone_high <= 0:
+        return "", ""
+
+    low, high = sorted((entry_zone_low, entry_zone_high))
+    span = max(high - low, 0.0)
+    price = _pick_entry_price(item, action)
+    if span <= 0:
+        return "middle", "中段"
+
+    if low <= price <= high:
+        progress = (price - low) / span
+        if progress <= 0.33:
+            return "lower", "下沿"
+        if progress >= 0.67:
+            return "upper", "上沿"
+        return "middle", "中段"
+
+    distance_to_low = abs(price - low)
+    distance_to_high = abs(price - high)
+    if distance_to_low <= distance_to_high:
+        return "lower", "下沿"
+    return "upper", "上沿"
+
+
 def _evaluate_item_for_sim(item: dict) -> tuple[bool, str, str]:
     if not bool(item.get("has_live_quote", False)):
         return False, "当前不是实时报价。", "neutral"
@@ -92,6 +119,12 @@ def _evaluate_item_for_sim(item: dict) -> tuple[bool, str, str]:
     if not _is_price_near_entry_zone(item, action):
         return False, "价格尚未回到可执行观察区间附近，继续等回踩。", action
 
+    zone_side, zone_side_text = _resolve_entry_zone_position(item, action)
+    if action == "long" and zone_side == "upper":
+        return False, f"当前更贴近观察区间{zone_side_text}，自动试仓先别在上沿追价。", action
+    if action == "short" and zone_side == "lower":
+        return False, f"当前更贴近观察区间{zone_side_text}，自动试仓先别在下沿追空。", action
+
     meta = normalize_signal_meta(
         {
             "symbol": _normalize_text(item.get("symbol", "")).upper(),
@@ -101,6 +134,9 @@ def _evaluate_item_for_sim(item: dict) -> tuple[bool, str, str]:
             "tp": float(item.get("risk_reward_target_price", 0.0) or 0.0),
         }
     )
+    if zone_side:
+        meta["entry_zone_side"] = zone_side
+        meta["entry_zone_side_text"] = zone_side_text
     valid, reason = validate_signal_meta(meta)
     if not valid:
         return False, reason, action
@@ -137,6 +173,10 @@ def build_rule_sim_signal_decision(snapshot: dict) -> tuple[dict | None, str]:
         payload["atr14_h4"] = float(item.get("atr14_h4", 0.0) or 0.0)
         payload["risk_reward_atr"] = float(item.get("risk_reward_atr", 0.0) or 0.0)
         payload["tp2"] = float(item.get("risk_reward_target_price_2", 0.0) or 0.0)
+        zone_side, zone_side_text = _resolve_entry_zone_position(item, action)
+        if zone_side:
+            payload["entry_zone_side"] = zone_side
+            payload["entry_zone_side_text"] = zone_side_text
         actionable_candidates.append((score, payload))
 
     if actionable_candidates:
