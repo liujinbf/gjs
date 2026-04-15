@@ -20,13 +20,13 @@ from monitor_rules import (
 )
 from mt5_gateway import fetch_quotes, initialize_connection
 from runtime_utils import parse_time as _parse_time
-from signal_enums import AlertTone, EventModeText, TradeGrade
+from signal_enums import AlertTone, EventModeText, QuoteStatus, SignalSide, TradeGrade
 
 
 _SIGNAL_SIDE_TEXT = {
-    "long": "【↑ 多头参考】",
-    "short": "【↓ 空头参考】",
-    "neutral": "",
+    SignalSide.LONG.value: "【↑ 多头参考】",
+    SignalSide.SHORT.value: "【↓ 空头参考】",
+    SignalSide.NEUTRAL.value: "",
 }
 
 
@@ -109,33 +109,38 @@ def _build_symbol_alert_state(
     event_mode_text = str(item_event_meta.get("event_mode_text", "") or "").strip()
     trade_source = str(trade_grade.get("source", "") or "").strip()
 
-    if not has_live_quote or status_code in {"inactive", "unknown_symbol", "not_selected", "error"}:
+    if not has_live_quote or status_code in {
+        QuoteStatus.INACTIVE.value,
+        QuoteStatus.UNKNOWN_SYMBOL.value,
+        QuoteStatus.NOT_SELECTED.value,
+        QuoteStatus.ERROR.value,
+    }:
         return {
             "alert_state_text": "休市 / 暂无报价",
             "alert_state_detail": f"{symbol_key} 当前暂无活跃报价，先不做临场判断。",
-            "alert_state_tone": "neutral",
+            "alert_state_tone": AlertTone.NEUTRAL.value,
             "alert_state_rank": 3,
         }
 
-    if tone == "warning":
+    if tone == AlertTone.WARNING.value:
         detail = f"{symbol_key} 当前点差仍明显放大，异常仍在进行中。"
         if event_note:
             detail += f" {event_note}"
         return {
             "alert_state_text": "点差异常进行中",
             "alert_state_detail": detail,
-            "alert_state_tone": "warning",
+            "alert_state_tone": AlertTone.WARNING.value,
             "alert_state_rank": 6,
         }
 
-    if tone == "accent":
+    if tone == AlertTone.ACCENT.value:
         detail = f"{symbol_key} 当前点差仍偏宽，先继续观察别急着追。"
         if event_note:
             detail += f" {event_note}"
         return {
             "alert_state_text": "点差偏宽观察",
             "alert_state_detail": detail,
-            "alert_state_tone": "accent",
+            "alert_state_tone": AlertTone.ACCENT.value,
             "alert_state_rank": 5,
         }
 
@@ -145,14 +150,14 @@ def _build_symbol_alert_state(
             return {
                 "alert_state_text": f"{event_importance_text or '事件'}事件前",
                 "alert_state_detail": f"{event_name} 将于 {event_time_text or '稍后'} 落地，当前品种正处于事件前观察窗口。",
-                "alert_state_tone": AlertTone.WARNING if "高影响" in event_importance_text else AlertTone.ACCENT,
+                "alert_state_tone": AlertTone.WARNING.value if "高影响" in event_importance_text else AlertTone.ACCENT.value,
                 "alert_state_rank": 4 if "高影响" in event_importance_text else 3,
             }
         if event_mode_text == EventModeText.POST_EVENT:
             return {
                 "alert_state_text": f"{event_importance_text or '事件'}事件后观察",
                 "alert_state_detail": f"{event_name} 刚落地，当前品种先等重新定价完成再动手。",
-                "alert_state_tone": AlertTone.ACCENT,
+                "alert_state_tone": AlertTone.ACCENT.value,
                 "alert_state_rank": 3,
             }
 
@@ -171,7 +176,7 @@ def _build_symbol_alert_state(
             return {
                 "alert_state_text": "点差已恢复",
                 "alert_state_detail": f"{symbol_key} 当前点差约 {current_spread_points:.0f} 点，相比 {latest_title} 已明显收敛。",
-                "alert_state_tone": AlertTone.SUCCESS,
+                "alert_state_tone": AlertTone.SUCCESS.value,
                 "alert_state_rank": 4,
             }
 
@@ -179,7 +184,7 @@ def _build_symbol_alert_state(
         return {
             "alert_state_text": "结构候选",
             "alert_state_detail": f"{symbol_key} 当前执行面相对干净，可以继续作为候选机会观察。",
-            "alert_state_tone": AlertTone.SUCCESS,
+            "alert_state_tone": AlertTone.SUCCESS.value,
             "alert_state_rank": 2,
         }
 
@@ -187,14 +192,14 @@ def _build_symbol_alert_state(
         return {
             "alert_state_text": "事件窗口观察",
             "alert_state_detail": event_note or f"{symbol_key} 当前更受事件窗口约束，先观察。",
-            "alert_state_tone": "accent",
+            "alert_state_tone": AlertTone.ACCENT.value,
             "alert_state_rank": 3,
         }
 
     return {
         "alert_state_text": "报价正常观察",
         "alert_state_detail": f"{symbol_key} 当前报价和点差相对稳定，继续等待更清晰结构。",
-        "alert_state_tone": "neutral",
+        "alert_state_tone": AlertTone.NEUTRAL.value,
         "alert_state_rank": 1,
     }
 
@@ -253,7 +258,7 @@ def build_snapshot_from_rows(
             f"{trade_grade['grade']}：{trade_grade['detail'] if str(trade_grade.get('source', '') or '').strip() == 'event' else execution_note}"
         ]
         # 方向推断（当出手分级为可轻仓时）
-        signal_side = "neutral"
+        signal_side = SignalSide.NEUTRAL.value
         if str(trade_grade.get("grade", "") or "").strip() == TradeGrade.LIGHT_POSITION:
             # 使用 row 里的方向字段（intraday/multi_timeframe/breakout 来自 row，非 enriched_row）
             intraday_b = _safe_field(row, "intraday_bias")
@@ -262,9 +267,9 @@ def build_snapshot_from_rows(
             long_s = sum(1 for v in (intraday_b, multi_b, bk_dir) if v == "bullish")
             short_s = sum(1 for v in (intraday_b, multi_b, bk_dir) if v == "bearish")
             if long_s > short_s:
-                signal_side = "long"
+                signal_side = SignalSide.LONG.value
             elif short_s > long_s:
-                signal_side = "short"
+                signal_side = SignalSide.SHORT.value
         signal_side_text = _SIGNAL_SIDE_TEXT.get(signal_side, "")
 
         if item_event_meta["event_note"] and str(trade_grade.get("source", "") or "").strip() != "event":
@@ -486,7 +491,7 @@ def build_snapshot_from_rows(
 
     return {
         "status_badge": "MT5 已连接" if connected else "MT5 未连接",
-        "status_tone": "success" if connected else "negative",
+        "status_tone": AlertTone.SUCCESS.value if connected else AlertTone.NEGATIVE.value,
         "status_hint": connection_message or "可继续观察点差、关键位和宏观窗口。",
         "summary_text": "\n".join(line for line in summary_lines if str(line).strip()),
         "regime_tag": str(regime_summary.get("regime_tag", "") or "").strip(),
