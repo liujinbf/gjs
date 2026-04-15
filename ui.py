@@ -1,6 +1,7 @@
 import copy
 import os
 import queue
+import time
 
 from PySide6.QtCore import QThread, QTimer, Signal, Qt
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QTabWidget, QVBoxLayout, QWidget
@@ -35,11 +36,21 @@ from ui_panels import DashboardMetricsPanel, InsightPanel, LeftTabPanel, WatchLi
 
 SNAPSHOT_TASK_QUEUE: queue.Queue = queue.Queue(maxsize=100)
 MACRO_SYNC_INTERVAL_MS = 15 * 60 * 1000
+MACRO_SYNC_SLOW_THRESHOLD_MS = 3000
+MACRO_SYNC_DEGRADED_STATUSES = {"error", "stale_cache", "cache_missing"}
 
 
 def _normalize_snapshot_item(item: dict | SnapshotItem | None) -> dict:
     """统一 UI 主链消费的快照项字段契约。"""
     return SnapshotItem.from_payload(item).to_dict()
+
+
+def _is_degraded_feed_status(status: str, status_text: str) -> bool:
+    clean_status = str(status or "").strip().lower()
+    clean_text = str(status_text or "").strip()
+    if clean_status in MACRO_SYNC_DEGRADED_STATUSES:
+        return True
+    return any(keyword in clean_text for keyword in ("拉取失败", "继续使用", "等待后台同步", "尚无可用缓存"))
 
 
 def _queue_latest_task(task_payload: dict) -> int:
@@ -79,21 +90,27 @@ def _queue_stop_task() -> None:
 
 
 def _load_external_feeds(runtime_config, symbols: list[str], cache_only: bool) -> dict:
-    return {
-        "event_feed": load_event_feed(
+    started_at = time.perf_counter()
+    bundle = {}
+    sync_meta = {
+        "cache_only": bool(cache_only),
+        "feed_metrics": {},
+    }
+    feed_loaders = {
+        "event_feed": lambda: load_event_feed(
             enabled=bool(getattr(runtime_config, "event_feed_enabled", False)) if runtime_config else False,
             source=str(getattr(runtime_config, "event_feed_url", "") or "") if runtime_config else "",
             refresh_min=int(getattr(runtime_config, "event_feed_refresh_min", 60) or 60) if runtime_config else 60,
             cache_only=cache_only,
         ),
-        "macro_news": load_macro_news_feed(
+        "macro_news": lambda: load_macro_news_feed(
             enabled=bool(getattr(runtime_config, "macro_news_feed_enabled", False)) if runtime_config else False,
             source_text=str(getattr(runtime_config, "macro_news_feed_urls", "") or "") if runtime_config else "",
             refresh_min=int(getattr(runtime_config, "macro_news_feed_refresh_min", 30) or 30) if runtime_config else 30,
             symbols=symbols,
             cache_only=cache_only,
         ),
-        "macro_data": load_macro_data_feed(
+        "macro_data": lambda: load_macro_data_feed(
             enabled=bool(getattr(runtime_config, "macro_data_feed_enabled", False)) if runtime_config else False,
             spec_source=str(getattr(runtime_config, "macro_data_feed_specs", "") or "") if runtime_config else "",
             refresh_min=int(getattr(runtime_config, "macro_data_feed_refresh_min", 60) or 60) if runtime_config else 60,
@@ -102,6 +119,37 @@ def _load_external_feeds(runtime_config, symbols: list[str], cache_only: bool) -
             env=dict(os.environ),  # 透传环境变量：ALPHAVANTAGE_API_KEY / FRED_API_KEY / BLS_API_KEY
         ),
     }
+
+    for key, loader in feed_loaders.items():
+        feed_started = time.perf_counter()
+        try:
+            item = dict(loader() or {})
+        except Exception as exc:  # noqa: BLE001
+            item = {
+                "status": "error",
+                "status_text": f"{key} 后台同步异常：{str(exc or '未知错误').strip()}",
+                "error_text": str(exc or "未知错误").strip(),
+                "items": [],
+                "summary_text": "",
+            }
+        elapsed_ms = int((time.perf_counter() - feed_started) * 1000)
+        status = str(item.get("status", "") or "").strip().lower()
+        status_text = str(item.get("status_text", "") or "").strip()
+        sync_meta["feed_metrics"][key] = {
+            "elapsed_ms": elapsed_ms,
+            "status": status,
+            "status_text": status_text,
+            "is_slow": elapsed_ms >= MACRO_SYNC_SLOW_THRESHOLD_MS,
+            "is_degraded": _is_degraded_feed_status(status, status_text),
+        }
+        bundle[key] = item
+
+    sync_meta["total_elapsed_ms"] = int((time.perf_counter() - started_at) * 1000)
+    sync_meta["slow_feed_keys"] = [
+        key for key, metric in dict(sync_meta.get("feed_metrics", {}) or {}).items() if bool(metric.get("is_slow", False))
+    ]
+    bundle["_sync_meta"] = sync_meta
+    return bundle
 
 
 class MonitorWorker(QThread):
@@ -429,7 +477,13 @@ class MetalMonitorWindow(QMainWindow):
         self._ai_auto_is_running = False  # 防止自动触发重叠
         self._last_external_source_warning_digest = ""
         self._last_macro_sync_status_digest = ""
+        self._last_macro_sync_perf_digest = ""
         self._macro_sync_refresh_pending = False
+        self._macro_source_degraded_counts = {
+            "event_feed": 0,
+            "macro_news": 0,
+            "macro_data": 0,
+        }
         self._build_ui()
         self._start_background_task_worker()
         # 炸弹三修复：保留 _timer 对象（供 closeEvent/toggle_polling 使用），
@@ -671,7 +725,9 @@ class MetalMonitorWindow(QMainWindow):
     def _on_macro_sync_ready(self, result: dict):
         self._macro_worker = None
         payload = dict(result or {})
+        sync_meta = dict(payload.get("_sync_meta", {}) or {})
         status_parts = []
+        perf_parts = []
         refresh_needed = False
         for result_key, snapshot_key, label in (
             ("event_feed", "event_feed_status_text", "事件源"),
@@ -681,14 +737,40 @@ class MetalMonitorWindow(QMainWindow):
             item = dict(payload.get(result_key, {}) or {})
             status_text = str(item.get("status_text", "") or "").strip()
             status = str(item.get("status", "") or "").strip().lower()
+            metric = dict(sync_meta.get("feed_metrics", {}) or {}).get(result_key, {}) or {}
+            elapsed_ms = int(metric.get("elapsed_ms", 0) or 0)
+            is_slow = bool(metric.get("is_slow", False))
+            is_degraded = bool(metric.get("is_degraded", False))
             if status_text:
                 status_parts.append(f"{label}:{status_text}")
                 if status not in {"disabled", "missing"} and self._last_snapshot.get(snapshot_key) != status_text:
                     refresh_needed = True
+            if elapsed_ms > 0:
+                perf_label = f"{label} {elapsed_ms}ms"
+                if is_slow:
+                    perf_label += "（偏慢）"
+                perf_parts.append(perf_label)
+            if is_degraded:
+                self._macro_source_degraded_counts[result_key] = int(self._macro_source_degraded_counts.get(result_key, 0) or 0) + 1
+                degrade_count = int(self._macro_source_degraded_counts.get(result_key, 0) or 0)
+                if degrade_count >= 3:
+                    self._append_log(f"[宏观同步] {label} 已连续 {degrade_count} 轮处于降级状态，当前建议继续依赖缓存并关注外部源稳定性。")
+            else:
+                self._macro_source_degraded_counts[result_key] = 0
         digest = " | ".join(status_parts)
         if digest and digest != self._last_macro_sync_status_digest:
             self._append_log(f"[宏观同步] {digest}")
         self._last_macro_sync_status_digest = digest
+
+        total_elapsed_ms = int(sync_meta.get("total_elapsed_ms", 0) or 0)
+        perf_digest = ""
+        if perf_parts:
+            perf_digest = f"总耗时 {total_elapsed_ms}ms | " + " | ".join(perf_parts)
+            if perf_digest != self._last_macro_sync_perf_digest and (
+                total_elapsed_ms >= MACRO_SYNC_SLOW_THRESHOLD_MS or any("偏慢" in part for part in perf_parts)
+            ):
+                self._append_log(f"[宏观同步耗时] {perf_digest}")
+        self._last_macro_sync_perf_digest = perf_digest
 
         if not refresh_needed:
             return
