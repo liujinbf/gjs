@@ -132,6 +132,8 @@ def _item_action_meta(item: dict, fallback_trade_meta: dict | None = None) -> di
     result = {
         "baseline_latest_price": float(item.get("latest_price", 0.0) or 0.0),
         "baseline_spread_points": float(item.get("spread_points", 0.0) or 0.0),
+        "baseline_bid": float(item.get("bid", 0.0) or 0.0),
+        "baseline_ask": float(item.get("ask", 0.0) or 0.0),
         "price_point": float(item.get("point", 0.0) or 0.0),
         "trade_grade": str(item.get("trade_grade", "") or "").strip() or trade_meta.get("trade_grade", ""),
         "trade_grade_detail": _normalize_text(item.get("trade_grade_detail", "")) or trade_meta.get("trade_grade_detail", ""),

@@ -207,3 +207,20 @@ def test_fetch_quotes_prefers_live_bid_ask_spread_over_symbol_info(monkeypatch):
     rows = mt5_gateway.fetch_quotes(["XAUUSD"])
     assert len(rows) == 1
     assert rows[0]["spread_points"] == 17.0
+
+
+def test_shutdown_connection_resets_broker_offset(monkeypatch):
+    class FakeMt5:
+        @staticmethod
+        def shutdown():
+            return None
+
+    monkeypatch.setattr(mt5_gateway, "HAS_MT5", True)
+    monkeypatch.setattr(mt5_gateway, "mt5", FakeMt5)
+    monkeypatch.setattr(mt5_gateway, "_mt5_initialized", True)
+    monkeypatch.setattr(mt5_gateway, "_broker_utc_offset_sec", 10_800.0)
+
+    mt5_gateway.shutdown_connection()
+
+    assert mt5_gateway._mt5_initialized is False
+    assert mt5_gateway._broker_utc_offset_sec is None

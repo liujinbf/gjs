@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from alert_history_store import build_latest_symbol_event_map
@@ -18,10 +18,12 @@ from monitor_rules import (
     format_quote_price,
 )
 from mt5_gateway import fetch_quotes, initialize_connection
+from runtime_utils import parse_time as _parse_time
+from signal_enums import AlertTone, EventModeText, TradeGrade
 
 
 _SIGNAL_SIDE_TEXT = {
-    "long": "【↑ 唇头参考】",
+    "long": "【↑ 多头参考】",
     "short": "【↓ 空头参考】",
     "neutral": "",
 }
@@ -129,18 +131,18 @@ def _build_symbol_alert_state(
 
     # 事件窗口优先级最高（高影响事件前 / 后）
     if bool(item_event_meta.get("event_applies")) and event_name:
-        if event_mode_text == "事件前高敏":
+        if event_mode_text == EventModeText.PRE_EVENT:
             return {
                 "alert_state_text": f"{event_importance_text or '事件'}事件前",
                 "alert_state_detail": f"{event_name} 将于 {event_time_text or '稍后'} 落地，当前品种正处于事件前观察窗口。",
-                "alert_state_tone": "warning" if "高影响" in event_importance_text else "accent",
+                "alert_state_tone": AlertTone.WARNING if "高影响" in event_importance_text else AlertTone.ACCENT,
                 "alert_state_rank": 4 if "高影响" in event_importance_text else 3,
             }
-        if event_mode_text == "事件落地观察":
+        if event_mode_text == EventModeText.POST_EVENT:
             return {
                 "alert_state_text": f"{event_importance_text or '事件'}事件后观察",
                 "alert_state_detail": f"{event_name} 刚落地，当前品种先等重新定价完成再动手。",
-                "alert_state_tone": "accent",
+                "alert_state_tone": AlertTone.ACCENT,
                 "alert_state_rank": 3,
             }
 
@@ -148,31 +150,26 @@ def _build_symbol_alert_state(
     latest_category = str(latest_event.get("category", "") or "").strip().lower()
     if latest_category == "spread":
         # 只有 12 小时内的点差历史才触发"已恢复"提示，避免陈旧记录干扰
-        from datetime import datetime, timedelta
         occurred_at_text = str(latest_event.get("occurred_at", "") or "").strip()
         _expired = True
         if occurred_at_text:
-            for _fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
-                try:
-                    _event_time = datetime.strptime(occurred_at_text, _fmt)
-                    _expired = (datetime.now() - _event_time) > timedelta(hours=12)
-                    break
-                except ValueError:
-                    continue
+            _event_time = _parse_time(occurred_at_text)
+            if _event_time is not None:
+                _expired = (datetime.now() - _event_time) > timedelta(hours=12)
         if not _expired:
             latest_title = str(latest_event.get("title", "上一轮点差异常") or "上一轮点差异常").strip()
             return {
                 "alert_state_text": "点差已恢复",
                 "alert_state_detail": f"{symbol_key} 当前点差约 {current_spread_points:.0f} 点，相比 {latest_title} 已明显收敛。",
-                "alert_state_tone": "success",
+                "alert_state_tone": AlertTone.SUCCESS,
                 "alert_state_rank": 4,
             }
 
-    if str(trade_grade.get("grade", "") or "").strip() == "可轻仓试仓":
+    if str(trade_grade.get("grade", "") or "").strip() == TradeGrade.LIGHT_POSITION:
         return {
             "alert_state_text": "结构候选",
             "alert_state_detail": f"{symbol_key} 当前执行面相对干净，可以继续作为候选机会观察。",
-            "alert_state_tone": "success",
+            "alert_state_tone": AlertTone.SUCCESS,
             "alert_state_rank": 2,
         }
 

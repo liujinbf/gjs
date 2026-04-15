@@ -166,6 +166,8 @@ def test_build_snapshot_history_entries_adds_structure_entry_with_action_meta():
     assert structure_entry["stop_loss_price"] == 4748.0
     assert structure_entry["take_profit_1"] == 4788.0
     assert structure_entry["take_profit_2"] == 4810.0
+    assert structure_entry["baseline_bid"] == 0.0
+    assert structure_entry["baseline_ask"] == 0.0
     assert "两段止盈" in structure_entry["position_plan_text"]
     assert "观察进场区间" in structure_entry["detail"]
 

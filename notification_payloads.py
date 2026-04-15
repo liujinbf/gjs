@@ -37,6 +37,13 @@ def _append_block(lines: list[str], title: str, items: list[str]) -> None:
     lines.extend(payload)
 
 
+def _format_spread_points(value: float) -> str:
+    spread = float(value or 0.0)
+    if abs(spread - round(spread)) < 1e-6:
+        return f"{int(round(spread))}点"
+    return f"{spread:.1f}点"
+
+
 def _build_structure_decision_lines(entry: dict) -> list[str]:
     lines: list[str] = []
     regime_text = _normalize_text(entry.get("regime_text", ""))
@@ -106,6 +113,9 @@ def _build_markdown(entry: dict) -> str:
 
     change_pct  = entry.get("change_pct_24h")
     latest_price = entry.get("baseline_latest_price")
+    bid_price = entry.get("baseline_bid")
+    ask_price = entry.get("baseline_ask")
+    spread_points = entry.get("baseline_spread_points")
     risk_reward_ratio = entry.get("risk_reward_ratio")
     stop_loss_price = entry.get("stop_loss_price")
     take_profit_1   = entry.get("take_profit_1")
@@ -138,6 +148,19 @@ def _build_markdown(entry: dict) -> str:
             headline_lines.append(price_line)
         except (TypeError, ValueError):
             pass
+    if bid_price or ask_price or spread_points:
+        quote_parts = []
+        try:
+            if bid_price and float(bid_price) > 0:
+                quote_parts.append(f"Bid {_format_price(float(bid_price), price_point)}")
+            if ask_price and float(ask_price) > 0:
+                quote_parts.append(f"Ask {_format_price(float(ask_price), price_point)}")
+            if spread_points and float(spread_points) > 0:
+                quote_parts.append(f"点差 {_format_spread_points(float(spread_points))}")
+        except (TypeError, ValueError):
+            quote_parts = []
+        if quote_parts:
+            headline_lines.append(f"- 报价：{' | '.join(quote_parts)}")
     lines.extend(headline_lines)
 
     category_key = category.lower()

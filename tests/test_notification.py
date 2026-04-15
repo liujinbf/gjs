@@ -582,6 +582,9 @@ def test_build_markdown_includes_trade_grade_and_next_review():
             "detail": "当前点差明显放大。",
             "symbol": "XAUUSD",
             "baseline_latest_price": 4759.82,
+            "baseline_bid": 4759.74,
+            "baseline_ask": 4759.91,
+            "baseline_spread_points": 17.0,
             "price_point": 0.01,
             "trade_grade": "当前不宜出手",
             "trade_grade_detail": "执行成本过高，强行追单容易被来回扫掉。",
@@ -590,6 +593,7 @@ def test_build_markdown_includes_trade_grade_and_next_review():
     )
     assert "品种：XAUUSD" in markdown
     assert "当前价格：4,759.82" in markdown
+    assert "报价：Bid 4,759.74 | Ask 4,759.91 | 点差 17点" in markdown
     assert "结论：**当前不宜出手**" in markdown
     assert "**先看这个**" in markdown
     assert "复核：等点差恢复正常后再复核。" in markdown
@@ -626,6 +630,9 @@ def test_build_markdown_includes_risk_reward_action_levels():
             "detail": "结构和报价相对干净。",
             "symbol": "XAUUSD",
             "baseline_latest_price": 4759.82,
+            "baseline_bid": 4759.74,
+            "baseline_ask": 4759.91,
+            "baseline_spread_points": 17.0,
             "price_point": 0.01,
             "trade_grade": "可轻仓试仓",
             "trade_grade_detail": "可作为候选机会观察。",
@@ -646,6 +653,7 @@ def test_build_markdown_includes_risk_reward_action_levels():
         }
     )
     assert "当前价格：4,759.82" in markdown
+    assert "报价：Bid 4,759.74 | Ask 4,759.91 | 点差 17点" in markdown
     assert "**决策速览**" in markdown
     assert "环境：趋势扩张" in markdown
     assert "模型：参考胜率 74%（中等信心），与当前结构基本一致" in markdown
