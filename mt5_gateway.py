@@ -338,19 +338,16 @@ def shutdown_connection() -> None:
 
 
 def fetch_quotes(symbols: list[str], include_inactive: bool = True) -> list[dict]:
-    # initialize_connection() 处理"从未连接"和"明显断线"的场景；
-    # _force_reconnect_if_needed() 额外处理"看起来已连但实际僵死（MT5进程已挂）"的场景。
+    # initialize_connection() 已负责一次完整的连接探测：
+    # - 从未连接时尝试初始化
+    # - 已连接但心跳失败时执行 shutdown -> reinitialize
+    # 因此这里只在初始化失败后再补一次强制重连，避免每轮轮询重复探测 MT5 心跳。
     ok, _message = initialize_connection()
     if not ok:
         # 连接明显失败时，再尝试一次强制重连（节流保护内）
         ok = _force_reconnect_if_needed()
         if not ok:
             return []
-    else:
-        # 即使 initialize_connection 认为"已连"，仍做一次心跳探测
-        # 若发现僵死则强制重连；若重连失败则返回空（不阻塞轮询，等下轮再试）
-        _force_reconnect_if_needed()
-
 
     rows = []
     for symbol in symbols or []:

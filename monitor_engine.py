@@ -254,7 +254,7 @@ def build_snapshot_from_rows(
         ]
         # 方向推断（当出手分级为可轻仓时）
         signal_side = "neutral"
-        if str(trade_grade.get("grade", "") or "") == "可轻仓试仓":
+        if str(trade_grade.get("grade", "") or "").strip() == TradeGrade.LIGHT_POSITION:
             # 使用 row 里的方向字段（intraday/multi_timeframe/breakout 来自 row，非 enriched_row）
             intraday_b = _safe_field(row, "intraday_bias")
             multi_b = _safe_field(row, "multi_timeframe_bias")

@@ -1,6 +1,7 @@
 import logging
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from ui import MetalMonitorWindow
 
 # 运行时日志文件，与现有 error_log.txt 共用
 _LOG_FILE = Path(__file__).parent / "error_log.txt"
+_last_alert_time = 0.0
 
 
 def _can_show_exception_dialog(app: QApplication | None = None) -> bool:
@@ -45,6 +47,7 @@ def _install_global_exception_hooks(app: QApplication) -> None:
 
     def _write_and_alert(exc_type, exc_value, exc_tb, thread_name: str = "") -> None:
         """将层叠信息写入日志文件并尝试弹窗。"""
+        global _last_alert_time
         tb_text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
         prefix = f"[Thread: {thread_name}] " if thread_name else ""
         msg = f"未处理异常 {prefix}\n{tb_text}"
@@ -52,6 +55,10 @@ def _install_global_exception_hooks(app: QApplication) -> None:
         # 只允许主线程弹窗，子线程异常只写日志，避免 Qt 跨线程操作导致段错误。
         if not _can_show_exception_dialog(app):
             return
+        now = time.time()
+        if now - _last_alert_time < 10.0:
+            return
+        _last_alert_time = now
         try:
             box = QMessageBox()
             box.setWindowTitle("程序错误")

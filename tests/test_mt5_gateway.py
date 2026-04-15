@@ -259,6 +259,38 @@ def test_fetch_quotes_keeps_other_symbols_alive_when_one_symbol_errors(monkeypat
     assert eur["has_live_quote"] is False
 
 
+def test_fetch_quotes_does_not_force_double_heartbeat_probe_after_init_success(monkeypatch):
+    calls = {"force_reconnect": 0}
+
+    class FakeMt5:
+        @staticmethod
+        def symbol_select(symbol, enable):
+            return False
+
+        @staticmethod
+        def symbol_info(symbol):
+            return SimpleNamespace(spread=17.0, point=0.01)
+
+        @staticmethod
+        def symbol_info_tick(symbol):
+            return SimpleNamespace(time=1_000, bid=4759.74, ask=4759.91, last=4759.82)
+
+    monkeypatch.setattr(mt5_gateway, "mt5", FakeMt5)
+    monkeypatch.setattr(mt5_gateway, "HAS_MT5", True)
+    monkeypatch.setattr(mt5_gateway, "initialize_connection", lambda: (True, "ok"))
+    monkeypatch.setattr(
+        mt5_gateway,
+        "_force_reconnect_if_needed",
+        lambda: calls.__setitem__("force_reconnect", calls["force_reconnect"] + 1) or True,
+    )
+    monkeypatch.setattr(mt5_gateway, "_is_live_tick", lambda tick, now_ts=None, max_age_sec=180: True)
+
+    rows = mt5_gateway.fetch_quotes(["XAUUSD"])
+
+    assert len(rows) == 1
+    assert calls["force_reconnect"] == 0
+
+
 def test_quote_row_normalizes_core_fields():
     row = QuoteRow.from_payload(
         {
