@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from knowledge_base import KNOWLEDGE_DB_FILE, open_knowledge_connection
+from quote_models import SnapshotItem
 
 MODEL_NAME = "naive-edge-v1"
 MIN_TRAIN_SAMPLES = 20
@@ -32,6 +33,11 @@ def _now_text() -> str:
 
 def _normalize_text(value: object) -> str:
     return " ".join(str(value or "").replace("\n", " ").split()).strip()
+
+
+def _normalize_snapshot_item(item: dict | SnapshotItem | None) -> dict:
+    """统一本地概率模型链消费的快照项字段契约。"""
+    return SnapshotItem.from_payload(item).to_dict()
 
 
 def _bucket_numeric(value: float, step: float) -> str:
@@ -334,7 +340,7 @@ def annotate_snapshot_with_model(snapshot: dict, db_path: Path | str | None = No
     result = dict(snapshot or {})
     items = []
     probabilities = []
-    for item in list(result.get("items", []) or []):
+    for item in [_normalize_snapshot_item(item) for item in list(result.get("items", []) or [])]:
         enriched = dict(item or {})
         prediction = predict_item_probability(result, enriched, db_path=db_path, horizon_min=horizon_min)
         enriched.update(
@@ -378,7 +384,7 @@ def apply_model_probability_context(snapshot: dict) -> dict:
     items = []
     model_notes = []
 
-    for raw_item in list(payload.get("items", []) or []):
+    for raw_item in [_normalize_snapshot_item(item) for item in list(payload.get("items", []) or [])]:
         item = dict(raw_item or {})
         probability = float(item.get("model_win_probability", 0.0) or 0.0)
         model_ready = bool(item.get("model_ready", False))

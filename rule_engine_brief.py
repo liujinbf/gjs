@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 
+from quote_models import SnapshotItem
 from signal_protocol import SIGNAL_SCHEMA_VERSION, build_empty_signal_meta, validate_signal_meta
 
 logger = logging.getLogger(__name__)
@@ -38,9 +39,14 @@ def _ss(v, default: str = "--") -> str:
     return str(v or "").strip() or default
 
 
+def _normalize_snapshot_item(item: dict | SnapshotItem | None) -> dict:
+    """统一降级简报链消费的快照项字段契约。"""
+    return SnapshotItem.from_payload(item).to_dict()
+
+
 def _first_item(snapshot: dict) -> dict:
     items = list(snapshot.get("items", []) or [])
-    return dict(items[0]) if items else {}
+    return _normalize_snapshot_item(items[0]) if items else {}
 
 
 # ──────────────────────────────────────────────

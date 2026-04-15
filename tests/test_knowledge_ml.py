@@ -7,6 +7,7 @@ sys.path.insert(0, str(ROOT))
 
 from knowledge_ml import annotate_snapshot_with_model, apply_model_probability_context, train_probability_model
 from knowledge_runtime import backfill_snapshot_outcomes, record_snapshot
+from quote_models import SnapshotItem
 
 
 def _build_snapshot(snapshot_time: str, price: float, trade_grade: str = "可轻仓试仓") -> dict:
@@ -136,3 +137,90 @@ def test_apply_model_probability_context_keeps_high_probability_setup_as_candida
     assert item["trade_grade"] == "可轻仓试仓"
     assert "本地模型参考胜率约 74%" in item["trade_grade_detail"]
     assert result["trade_grade"] == "可轻仓试仓"
+
+
+def test_annotate_snapshot_with_model_accepts_snapshot_item_objects(tmp_path):
+    db_path = tmp_path / "knowledge.db"
+
+    for idx, price in enumerate([100.00, 100.15, 100.30, 100.45, 100.60, 100.72, 100.88, 101.02, 101.18, 101.30, 101.42, 101.60]):
+        record_snapshot(_build_snapshot(f"2026-04-13 10:{idx * 5:02d}:00", price), db_path=db_path)
+    for idx, price in enumerate([100.00, 99.92, 99.85, 99.70, 99.60, 99.52, 99.45, 99.38, 99.30, 99.22]):
+        snap = _build_snapshot(f"2026-04-13 {14 + idx // 6:02d}:{(idx % 6) * 10:02d}:00", price)
+        snap["regime_tag"] = "low_volatility_range"
+        snap["regime_text"] = "低波震荡"
+        snap["items"][0]["regime_tag"] = "low_volatility_range"
+        snap["items"][0]["regime_text"] = "低波震荡"
+        snap["items"][0]["trade_grade"] = "只适合观察"
+        record_snapshot(snap, db_path=db_path)
+
+    backfill_snapshot_outcomes(db_path=db_path, now=datetime(2026, 4, 13, 16, 30, 0), horizons_min=(30,))
+    train_probability_model(db_path=db_path, horizon_min=30, min_train_samples=4)
+
+    snapshot = {
+        "last_refresh_text": "2026-04-13 12:30:00",
+        "event_risk_mode_text": "正常观察",
+        "regime_tag": "trend_expansion",
+        "regime_text": "趋势扩张",
+        "items": [
+            SnapshotItem(
+                symbol="XAUUSD",
+                latest_price=101.40,
+                spread_points=18,
+                has_live_quote=True,
+                trade_grade="可轻仓试仓",
+                trade_grade_source="structure",
+                quote_status_code="live",
+                extra={
+                    "tone": "success",
+                    "alert_state_text": "结构候选",
+                    "event_importance_text": "",
+                    "intraday_bias_text": "偏多",
+                    "multi_timeframe_bias_text": "偏多",
+                    "breakout_state_text": "上破已确认",
+                    "retest_state_text": "回踩已确认",
+                    "risk_reward_state_text": "盈亏比优秀",
+                    "regime_tag": "trend_expansion",
+                    "atr14": 8.0,
+                    "atr14_h4": 20.0,
+                    "signal_side": "long",
+                },
+            )
+        ],
+    }
+
+    annotated = annotate_snapshot_with_model(snapshot, db_path=db_path, horizon_min=30)
+    item = annotated["items"][0]
+
+    assert item["model_ready"] is True
+    assert 0.05 <= item["model_win_probability"] <= 0.95
+
+
+def test_apply_model_probability_context_accepts_snapshot_item_objects():
+    snapshot = {
+        "status_tone": "success",
+        "event_risk_mode": "normal",
+        "summary_text": "出手分级：可轻仓试仓。结构相对干净，可作为候选机会。",
+        "trade_grade": "可轻仓试仓",
+        "trade_grade_detail": "结构相对干净，可作为候选机会。",
+        "items": [
+            SnapshotItem(
+                symbol="XAUUSD",
+                trade_grade="可轻仓试仓",
+                trade_grade_detail="结构相对干净，可作为候选机会。",
+                trade_next_review="10 分钟后复核。",
+                trade_grade_source="structure",
+                extra={
+                    "model_ready": True,
+                    "model_win_probability": 0.42,
+                    "alert_state_text": "结构候选",
+                    "alert_state_rank": 2,
+                },
+            )
+        ],
+    }
+
+    result = apply_model_probability_context(snapshot)
+    item = result["items"][0]
+
+    assert item["trade_grade"] == "只适合观察"
+    assert item["trade_grade_source"] == "model"
