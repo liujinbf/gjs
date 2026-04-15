@@ -151,6 +151,9 @@ class SnapshotItem:
     trade_grade_detail: str = ""
     trade_next_review: str = ""
     trade_grade_source: str = ""
+    event_importance_text: str = ""
+    event_note: str = ""
+    macro_focus: str = ""
     alert_state_text: str = ""
     alert_state_detail: str = ""
     alert_state_tone: str = ""
@@ -162,6 +165,34 @@ class SnapshotItem:
     tone: str = ""
     signal_side: str = ""
     signal_side_text: str = ""
+    intraday_bias: str = ""
+    intraday_bias_text: str = ""
+    multi_timeframe_alignment: str = ""
+    multi_timeframe_alignment_text: str = ""
+    multi_timeframe_bias: str = ""
+    multi_timeframe_bias_text: str = ""
+    breakout_direction: str = ""
+    breakout_state: str = ""
+    breakout_state_text: str = ""
+    retest_state: str = ""
+    retest_state_text: str = ""
+    risk_reward_ready: bool = False
+    risk_reward_state: str = ""
+    risk_reward_state_text: str = ""
+    risk_reward_ratio: float = 0.0
+    risk_reward_stop_price: float = 0.0
+    risk_reward_target_price: float = 0.0
+    risk_reward_target_price_2: float = 0.0
+    risk_reward_entry_zone_low: float = 0.0
+    risk_reward_entry_zone_high: float = 0.0
+    risk_reward_atr: float = 0.0
+    atr14: float = 0.0
+    atr14_h4: float = 0.0
+    model_ready: bool = False
+    model_win_probability: float = 0.0
+    model_confidence_text: str = ""
+    model_note: str = ""
+    snapshot_id: int = 0
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -187,6 +218,9 @@ class SnapshotItem:
             "trade_grade_detail",
             "trade_next_review",
             "trade_grade_source",
+            "event_importance_text",
+            "event_note",
+            "macro_focus",
             "alert_state_text",
             "alert_state_detail",
             "alert_state_tone",
@@ -198,6 +232,34 @@ class SnapshotItem:
             "tone",
             "signal_side",
             "signal_side_text",
+            "intraday_bias",
+            "intraday_bias_text",
+            "multi_timeframe_alignment",
+            "multi_timeframe_alignment_text",
+            "multi_timeframe_bias",
+            "multi_timeframe_bias_text",
+            "breakout_direction",
+            "breakout_state",
+            "breakout_state_text",
+            "retest_state",
+            "retest_state_text",
+            "risk_reward_ready",
+            "risk_reward_state",
+            "risk_reward_state_text",
+            "risk_reward_ratio",
+            "risk_reward_stop_price",
+            "risk_reward_target_price",
+            "risk_reward_target_price_2",
+            "risk_reward_entry_zone_low",
+            "risk_reward_entry_zone_high",
+            "risk_reward_atr",
+            "atr14",
+            "atr14_h4",
+            "model_ready",
+            "model_win_probability",
+            "model_confidence_text",
+            "model_note",
+            "snapshot_id",
         }
         quote_status_source = {
             "quote_status_code": source.get("quote_status_code", ""),
@@ -222,6 +284,9 @@ class SnapshotItem:
             trade_grade_detail=_safe_text(source.get("trade_grade_detail", "")),
             trade_next_review=_safe_text(source.get("trade_next_review", "")),
             trade_grade_source=_safe_text(source.get("trade_grade_source", "")),
+            event_importance_text=_safe_text(source.get("event_importance_text", "")),
+            event_note=_safe_text(source.get("event_note", "")),
+            macro_focus=_safe_text(source.get("macro_focus", "")),
             alert_state_text=_safe_text(source.get("alert_state_text", "")),
             alert_state_detail=_safe_text(source.get("alert_state_detail", "")),
             alert_state_tone=_safe_text(source.get("alert_state_tone", "")),
@@ -233,6 +298,34 @@ class SnapshotItem:
             tone=_safe_text(source.get("tone", "")),
             signal_side=_safe_text(source.get("signal_side", "")),
             signal_side_text=_safe_text(source.get("signal_side_text", "")),
+            intraday_bias=_safe_text(source.get("intraday_bias", "")),
+            intraday_bias_text=_safe_text(source.get("intraday_bias_text", "")),
+            multi_timeframe_alignment=_safe_text(source.get("multi_timeframe_alignment", "")),
+            multi_timeframe_alignment_text=_safe_text(source.get("multi_timeframe_alignment_text", "")),
+            multi_timeframe_bias=_safe_text(source.get("multi_timeframe_bias", "")),
+            multi_timeframe_bias_text=_safe_text(source.get("multi_timeframe_bias_text", "")),
+            breakout_direction=_safe_text(source.get("breakout_direction", "")),
+            breakout_state=_safe_text(source.get("breakout_state", "")),
+            breakout_state_text=_safe_text(source.get("breakout_state_text", "")),
+            retest_state=_safe_text(source.get("retest_state", "")),
+            retest_state_text=_safe_text(source.get("retest_state_text", "")),
+            risk_reward_ready=bool(source.get("risk_reward_ready", False)),
+            risk_reward_state=_safe_text(source.get("risk_reward_state", "")),
+            risk_reward_state_text=_safe_text(source.get("risk_reward_state_text", "")),
+            risk_reward_ratio=_safe_float(source.get("risk_reward_ratio", 0.0)),
+            risk_reward_stop_price=_safe_float(source.get("risk_reward_stop_price", 0.0)),
+            risk_reward_target_price=_safe_float(source.get("risk_reward_target_price", 0.0)),
+            risk_reward_target_price_2=_safe_float(source.get("risk_reward_target_price_2", 0.0)),
+            risk_reward_entry_zone_low=_safe_float(source.get("risk_reward_entry_zone_low", 0.0)),
+            risk_reward_entry_zone_high=_safe_float(source.get("risk_reward_entry_zone_high", 0.0)),
+            risk_reward_atr=_safe_float(source.get("risk_reward_atr", 0.0)),
+            atr14=_safe_float(source.get("atr14", 0.0)),
+            atr14_h4=_safe_float(source.get("atr14_h4", 0.0)),
+            model_ready=bool(source.get("model_ready", False)),
+            model_win_probability=_safe_float(source.get("model_win_probability", 0.0)),
+            model_confidence_text=_safe_text(source.get("model_confidence_text", "")),
+            model_note=_safe_text(source.get("model_note", "")),
+            snapshot_id=_safe_int(source.get("snapshot_id", 0)),
             extra={key: value for key, value in source.items() if key not in known_keys},
         )
 
@@ -255,6 +348,9 @@ class SnapshotItem:
             "trade_grade_detail": self.trade_grade_detail,
             "trade_next_review": self.trade_next_review,
             "trade_grade_source": self.trade_grade_source,
+            "event_importance_text": self.event_importance_text,
+            "event_note": self.event_note,
+            "macro_focus": self.macro_focus,
             "alert_state_text": self.alert_state_text,
             "alert_state_detail": self.alert_state_detail,
             "alert_state_tone": self.alert_state_tone,
@@ -266,6 +362,34 @@ class SnapshotItem:
             "tone": self.tone,
             "signal_side": self.signal_side,
             "signal_side_text": self.signal_side_text,
+            "intraday_bias": self.intraday_bias,
+            "intraday_bias_text": self.intraday_bias_text,
+            "multi_timeframe_alignment": self.multi_timeframe_alignment,
+            "multi_timeframe_alignment_text": self.multi_timeframe_alignment_text,
+            "multi_timeframe_bias": self.multi_timeframe_bias,
+            "multi_timeframe_bias_text": self.multi_timeframe_bias_text,
+            "breakout_direction": self.breakout_direction,
+            "breakout_state": self.breakout_state,
+            "breakout_state_text": self.breakout_state_text,
+            "retest_state": self.retest_state,
+            "retest_state_text": self.retest_state_text,
+            "risk_reward_ready": self.risk_reward_ready,
+            "risk_reward_state": self.risk_reward_state,
+            "risk_reward_state_text": self.risk_reward_state_text,
+            "risk_reward_ratio": self.risk_reward_ratio,
+            "risk_reward_stop_price": self.risk_reward_stop_price,
+            "risk_reward_target_price": self.risk_reward_target_price,
+            "risk_reward_target_price_2": self.risk_reward_target_price_2,
+            "risk_reward_entry_zone_low": self.risk_reward_entry_zone_low,
+            "risk_reward_entry_zone_high": self.risk_reward_entry_zone_high,
+            "risk_reward_atr": self.risk_reward_atr,
+            "atr14": self.atr14,
+            "atr14_h4": self.atr14_h4,
+            "model_ready": self.model_ready,
+            "model_win_probability": self.model_win_probability,
+            "model_confidence_text": self.model_confidence_text,
+            "model_note": self.model_note,
+            "snapshot_id": self.snapshot_id,
         }
         payload.update(dict(self.extra))
         return payload
