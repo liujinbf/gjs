@@ -664,6 +664,8 @@ def test_build_markdown_includes_risk_reward_action_levels():
             "trade_grade": "可轻仓试仓",
             "trade_grade_detail": "可作为候选机会观察。",
             "trade_grade_source": "structure",
+            "structure_entry_stage": "inside_zone",
+            "signal_side": "long",
             "regime_text": "趋势扩张",
             "regime_reason": "H1 与 H4 同向偏多，ATR 走阔，当前更像趋势延续而不是低波震荡。",
             "external_bias_note": "宏观数据：美国10年期实际利率 当前值 1.85，较前值 -0.06，背景偏多",
@@ -696,11 +698,34 @@ def test_build_markdown_includes_risk_reward_action_levels():
     assert "目标1：4,788.00" in markdown
     assert "目标2：4,810.00" in markdown
     assert "观察区间：观察进场区间 4760.00 - 4770.00，若价格直接远离该区间，就不建议追。" in markdown
+    assert "位置：更接近回踩承接位，可重点盯确认。" in markdown
     assert "仓位：可轻仓试仓，优先分两段止盈，第一目标落袋后再看延续。" in markdown
     assert "失效：若价格重新跌回 4748.00 下方，当前多头结构可视为失效。" in markdown
     assert "**背景**" in markdown
     assert "外部背景：宏观数据：美国10年期实际利率 当前值 1.85，较前值 -0.06，背景偏多" in markdown
     assert "技术面" not in markdown
+
+
+def test_build_markdown_includes_upper_side_caution_for_long_structure():
+    markdown = notification._build_markdown(
+        {
+            "occurred_at": "2026-04-12 10:20:00",
+            "category": "structure",
+            "title": "XAUUSD 靠近观察区间（上沿）",
+            "detail": "价格已靠近观察区间上沿。",
+            "symbol": "XAUUSD",
+            "price_point": 0.01,
+            "trade_grade": "可轻仓试仓",
+            "trade_grade_detail": "结构相对干净，但位置不算理想。",
+            "trade_grade_source": "structure",
+            "structure_entry_stage": "near_zone",
+            "signal_side": "long",
+            "entry_zone_side_text": "上沿",
+            "entry_zone_text": "观察进场区间 4760.00 - 4770.00，若价格直接远离该区间，就不建议追。",
+            "risk_reward_ratio": 1.9,
+        }
+    )
+    assert "位置：更靠近上沿，自动试仓通常会继续等回踩。" in markdown
 
 
 def test_send_test_notification_returns_channel_messages(monkeypatch):

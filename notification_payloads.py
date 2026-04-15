@@ -82,6 +82,33 @@ def _build_execution_card_line(entry: dict, price_point: float) -> str:
     return "；".join(parts[:4])
 
 
+def _build_entry_zone_hint(entry: dict) -> str:
+    stage = _normalize_text(entry.get("structure_entry_stage", "")).lower()
+    side_text = _normalize_text(entry.get("entry_zone_side_text", ""))
+    signal_side = _normalize_text(entry.get("signal_side", "")).lower()
+    if not side_text:
+        return ""
+    if signal_side == "long":
+        if stage == "inside_zone" and side_text == "下沿":
+            return "位置：更接近回踩承接位，可重点盯确认。"
+        if stage == "inside_zone" and side_text == "上沿":
+            return "位置：已经贴近区间上沿，先别急着追多。"
+        if stage == "near_zone" and side_text == "下沿":
+            return "位置：正在靠近理想回踩位，留意是否出现承接。"
+        if stage == "near_zone" and side_text == "上沿":
+            return "位置：更靠近上沿，自动试仓通常会继续等回踩。"
+    if signal_side == "short":
+        if stage == "inside_zone" and side_text == "上沿":
+            return "位置：更接近反抽承压位，可重点盯确认。"
+        if stage == "inside_zone" and side_text == "下沿":
+            return "位置：已经贴近区间下沿，先别急着追空。"
+        if stage == "near_zone" and side_text == "上沿":
+            return "位置：正在靠近理想反抽位，留意是否出现承压。"
+        if stage == "near_zone" and side_text == "下沿":
+            return "位置：更靠近下沿，自动试仓通常会继续等反抽。"
+    return ""
+
+
 def _build_structure_decision_lines(entry: dict) -> list[str]:
     lines: list[str] = []
     regime_text = _normalize_text(entry.get("regime_text", ""))
@@ -240,6 +267,9 @@ def _build_markdown(entry: dict) -> str:
             action_lines.append(f"- 仓位：{_clip_text(position_plan_text, 58)}")
         if entry_invalidation_text:
             action_lines.append(f"- 失效：{_clip_text(entry_invalidation_text, 66)}")
+        entry_zone_hint = _build_entry_zone_hint(entry)
+        if entry_zone_hint:
+            action_lines.append(f"- 位置：{entry_zone_hint.replace('位置：', '', 1)}")
     _append_block(lines, "执行参数", action_lines)
 
     background_lines = []
