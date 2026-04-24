@@ -8,7 +8,9 @@ import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from knowledge_base import KNOWLEDGE_DB_FILE, open_knowledge_connection
+from knowledge_base import KNOWLEDGE_DB_FILE, kv_get, kv_set, open_knowledge_connection
+
+FEEDBACK_PUSH_POLICY_KEY = "feedback_push_policy"
 
 FEEDBACK_SCORE_MAP = {
     "helpful": 1.0,
@@ -337,6 +339,7 @@ def summarize_feedback_stats(
 
     counts = {str(row["feedback_label"]): int(row["count"]) for row in rows}
     total_count = sum(counts.values())
+    action_suggestions = build_feedback_action_suggestions(counts, days=days)
 
     def _format_rule_rows(items: list[sqlite3.Row]) -> list[str]:
         return [
@@ -355,6 +358,7 @@ def summarize_feedback_stats(
         "risky_count": counts.get("risky", 0),
         "top_positive_rules": _format_rule_rows(list(top_positive_rows)),
         "top_negative_rules": _format_rule_rows(list(top_negative_rows)),
+        "action_suggestions": action_suggestions,
         "summary_text": (
             f"最近 {max(1, int(days))} 天共收到 {total_count} 条用户反馈，"
             f"其中有帮助 {counts.get('helpful', 0)} 条，没帮助 {counts.get('unhelpful', 0)} 条，"
@@ -362,3 +366,99 @@ def summarize_feedback_stats(
             f"风险过高 {counts.get('risky', 0)} 条。"
         ),
     }
+
+
+def build_feedback_action_suggestions(counts: dict[str, int], days: int = 30) -> list[dict]:
+    """把用户反馈翻译成可执行但不自动生效的调参建议。"""
+    total_count = sum(int(value or 0) for value in dict(counts or {}).values())
+    if total_count <= 0:
+        return []
+
+    suggestions: list[dict] = []
+
+    def _rate(key: str) -> float:
+        return int(counts.get(key, 0) or 0) / total_count
+
+    if int(counts.get("too_late", 0) or 0) >= 2 and _rate("too_late") >= 0.30:
+        suggestions.append(
+            {
+                "action_key": "advance_warning",
+                "title": "提醒偏晚",
+                "suggestion": "把接近入场区提醒提前一级：near_zone 也进入重点观察，但仍不自动开仓。",
+                "reason": f"最近 {max(1, int(days))} 天太晚反馈占比 {_rate('too_late') * 100:.0f}%。",
+            }
+        )
+    if int(counts.get("noise", 0) or 0) >= 2 and _rate("noise") >= 0.30:
+        suggestions.append(
+            {
+                "action_key": "reduce_noise",
+                "title": "提醒噪音偏多",
+                "suggestion": "提高普通机会推送门槛，只把高评分或价格接近入场区的信号推到钉钉。",
+                "reason": f"最近 {max(1, int(days))} 天噪音反馈占比 {_rate('noise') * 100:.0f}%。",
+            }
+        )
+    if int(counts.get("risky", 0) or 0) >= 1 and _rate("risky") >= 0.20:
+        suggestions.append(
+            {
+                "action_key": "tighten_risk",
+                "title": "风险感知偏高",
+                "suggestion": "提高风险提醒权重：事件窗口、点差偏宽、RR 不足时只给观察，不给出手建议。",
+                "reason": f"最近 {max(1, int(days))} 天风险过高反馈占比 {_rate('risky') * 100:.0f}%。",
+            }
+        )
+    if int(counts.get("unhelpful", 0) or 0) >= 3 and _rate("unhelpful") >= 0.40:
+        suggestions.append(
+            {
+                "action_key": "review_context",
+                "title": "帮助度不足",
+                "suggestion": "复核触发最多的规则，把低命中、低反馈分的规则降到观察或冻结。",
+                "reason": f"最近 {max(1, int(days))} 天没帮助反馈占比 {_rate('unhelpful') * 100:.0f}%。",
+            }
+        )
+    return suggestions[:3]
+
+
+def build_feedback_push_policy(summary: dict | None = None) -> dict:
+    """把反馈建议转成轻量推送策略；只影响提醒，不影响模拟盘或实盘开仓。"""
+    payload = dict(summary or {})
+    suggestions = [
+        dict(item)
+        for item in list(payload.get("action_suggestions", []) or [])
+        if isinstance(item, dict)
+    ]
+    action_keys = {_normalize_text(item.get("action_key", "")).lower() for item in suggestions}
+    total_count = int(payload.get("total_count", 0) or 0)
+    policy = {
+        "advance_warning": "advance_warning" in action_keys,
+        "reduce_noise": "reduce_noise" in action_keys,
+        "tighten_risk": "tighten_risk" in action_keys,
+        "review_context": "review_context" in action_keys,
+        "min_score_boost": 0,
+        "active": bool(action_keys),
+        "sample_count": total_count,
+        "updated_at": _now_text(),
+        "source": "user_feedback",
+    }
+    if policy["reduce_noise"]:
+        policy["min_score_boost"] += 10
+    if policy["tighten_risk"]:
+        policy["min_score_boost"] += 5
+    if policy["advance_warning"] and not policy["reduce_noise"]:
+        policy["min_score_boost"] -= 5
+    return policy
+
+
+def refresh_feedback_push_policy(
+    db_path: Path | str | None = None,
+    days: int = 30,
+    now: datetime | None = None,
+) -> dict:
+    summary = summarize_feedback_stats(db_path=db_path, days=days, now=now)
+    policy = build_feedback_push_policy(summary)
+    kv_set(FEEDBACK_PUSH_POLICY_KEY, policy, db_path=db_path)
+    return policy
+
+
+def get_feedback_push_policy(db_path: Path | str | None = None) -> dict:
+    payload = kv_get(FEEDBACK_PUSH_POLICY_KEY, default={}, db_path=db_path)
+    return dict(payload) if isinstance(payload, dict) else {}

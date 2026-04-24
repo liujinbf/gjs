@@ -20,6 +20,14 @@ def _normalize_text(value: str) -> str:
     return " ".join(str(value or "").replace("\n", " ").split()).strip()
 
 
+def _atomic_write_text(target: Path, text: str) -> None:
+    """先写临时文件再原子替换，避免截断写入时留下半截历史文件。"""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_file = target.with_name(f"{target.name}.tmp")
+    temp_file.write_text(text, encoding="utf-8")
+    temp_file.replace(target)
+
+
 def _pick_summary_line(content: str) -> str:
     preferred_prefixes = ("当前结论：", "方向判断：", "风险点：", "行动建议：")
     fallback_lines = []
@@ -64,6 +72,11 @@ def build_ai_history_entry(result: dict, snapshot: dict, push_result: dict | Non
         "signal_schema_version": signal_schema_version,
         "signal_meta_valid": signal_meta_valid,
         "signal_meta_reason": signal_meta_reason,
+        "used_structured_payload": bool((result or {}).get("used_structured_payload", False)),
+        "ai_parse_mode": _normalize_text((result or {}).get("ai_parse_mode", "")),
+        "ai_raw_response_logged": bool((result or {}).get("ai_raw_response_logged", False)),
+        "ai_raw_response_length": int((result or {}).get("ai_raw_response_length", 0) or 0),
+        "ai_raw_response_excerpt": str((result or {}).get("ai_raw_response_excerpt", "") or "")[:500],
         "rulebook_summary_text": _normalize_text((result or {}).get("rulebook_summary_text", "")),
         "snapshot_time": str((snapshot or {}).get("last_refresh_text", "") or "").strip(),
         "status_hint": _normalize_text((snapshot or {}).get("status_hint", "")),
@@ -104,7 +117,7 @@ def append_ai_history_entry(entry: dict, history_file: Path | None = None) -> in
     try:
         lines = [line for line in target.read_text(encoding="utf-8").splitlines() if line.strip()]
         if len(lines) > MAX_AI_HISTORY_LINES:
-            target.write_text("\n".join(lines[-MAX_AI_HISTORY_LINES:]) + "\n", encoding="utf-8")
+            _atomic_write_text(target, "\n".join(lines[-MAX_AI_HISTORY_LINES:]) + "\n")
     except OSError:
         pass
 

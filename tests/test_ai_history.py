@@ -12,6 +12,7 @@ from ai_history import (
     read_recent_ai_history,
     summarize_recent_ai_history,
 )
+import ai_history
 
 
 def test_build_ai_history_entry_keeps_summary_and_push_state():
@@ -82,3 +83,37 @@ def test_append_and_summarize_ai_history():
     assert "最近 7 天共记录 1 次 AI 研判" in stats["summary_text"]
 
     shutil.rmtree(history_dir)
+
+
+def test_ai_history_trim_uses_atomic_replace(monkeypatch, tmp_path):
+    history_file = tmp_path / "ai_brief_history.jsonl"
+    replaced = {"called": False}
+    original_limit = ai_history.MAX_AI_HISTORY_LINES
+    original_replace = Path.replace
+
+    def spy_replace(self, target):
+        if str(self).endswith(".tmp"):
+            replaced["called"] = True
+        return original_replace(self, target)
+
+    monkeypatch.setattr(ai_history, "MAX_AI_HISTORY_LINES", 2)
+    monkeypatch.setattr(Path, "replace", spy_replace)
+    try:
+        for index in range(3):
+            assert append_ai_history_entry(
+                {
+                    "occurred_at": f"2026-04-12 18:0{index}:00",
+                    "model": "deepseek-chat",
+                    "summary_line": f"方向判断：{index}",
+                    "content": f"方向判断：{index}",
+                    "push_sent": False,
+                    "signature": f"ai-{index}",
+                },
+                history_file=history_file,
+            ) == 1
+    finally:
+        monkeypatch.setattr(ai_history, "MAX_AI_HISTORY_LINES", original_limit)
+
+    assert replaced["called"] is True
+    lines = [line for line in history_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(lines) == 2

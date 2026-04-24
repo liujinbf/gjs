@@ -14,6 +14,23 @@ from signal_enums import QuoteStatus
 PROMPT_VERSION = "metal-monitor-v2.2"
 ADVISOR_PROMPT_VERSION = "metal-monitor-advisor-v2.2"
 
+JSON_SIGNAL_SCHEMA_TEXT = """{{
+  "summary_text": "这里放转义后的完整 Markdown 正文",
+  "signal_meta": {{
+    "symbol": "XAUUSD",
+    "action": "long",
+    "price": 2000.50,
+    "sl": 1990.00,
+    "tp": 2020.00
+  }}
+}}""".strip()
+
+JSON_OUTPUT_GUARDRAILS_TEXT = """\
+summary_text 内的所有换行符必须严格使用 \\n 转义，双引号必须使用 \\\" 转义，绝对禁止出现原生换行符。
+若当前只适合观察且没有明确候选方向，action 必须为 neutral，price/sl/tp 全部填 0。
+若系统分级为“可轻仓试仓”或“早期动能候选”，且止损/目标价完整，action 必须输出 long 或 short；这代表候选级跟踪方向，不代表重仓满仓。
+若你输出的 JSON 无法被标准 json.loads 直接解析，这次回答视为无效；宁可内容更短，也不能破坏 JSON 合法性。""".strip()
+
 
 def _format_quote_status_text(item: dict) -> str:
     status_code = str(item.get("quote_status_code", "") or "").strip().lower()
@@ -74,7 +91,7 @@ AI_BRIEF_TASK_TEMPLATE = """\
 
 核心逻辑（必含精确价格 + 盈亏比评估）：
 价格 $[当前实际价格]$ 位于 [均线/布林带实际状态]，[一句话核心技术定性]。
-当前风险收益比 $1:[直接读取下方快照中「系统预算盈亏比」字段的具体数字，它是系统已總计算好的，不要重新计算]$
+当前风险收益比 $1:[直接读取下方快照中「系统预算盈亏比」字段的具体数字，它是系统已计算好的，不要重新计算]$
 [根据系统提供的盈亏比评价(优质/及格/假)桥接相应的语言输出，盈亏比差时必须建议观望]
 
 🤖 机器人判定：
@@ -105,21 +122,15 @@ AI_BRIEF_TASK_TEMPLATE = """\
 4. 盈亏比精确计算：(目标价 - 当前价) ÷ (当前价 - 止损价)，低于 1.0 则直接建议观望。
 5. 遵守"当前有效规则集"与已淘汰规则，不得违背。
 6. 最终输出必须是一个纯 JSON 对象，且只能输出 JSON 本身，禁止再输出 Markdown 围栏、HTML 注释、补充说明。
-7. JSON 对象结构固定如下：
-{{
-  "summary_text": "这里放完整 Markdown 正文，正文内容严格遵守上面的排版结构",
-  "signal_meta": {{
-    "symbol": "资产代码(如XAUUSD)",
-    "action": "long/short/neutral",
-    "price": 参考入场价数字,
-    "sl": 止损价数字,
-    "tp": 目标价数字
-  }}
-}}
-8. 若当前结论是观望，action 必须填 neutral，price/sl/tp 一律填 0。
-9. summary_text 内禁止再嵌入 TRACKER_META、HTML 注释或额外 JSON。
-10. 若“本地概率模型”模块提供了参考胜率，必须在正文里明确说明它与当前结论是"一致"还是"冲突"。
-11. 当本地模型参考胜率低于 50% 时，禁止把该机会写成明确进场建议，最多只能写成观察或等待确认。
+7. JSON 对象结构固定如下（注意：{json_guardrails}）：
+{json_schema}
+8. signal_meta.action 是“机器可跟踪的候选方向”，不是重仓指令；若系统分级为“可轻仓试仓”或“早期动能候选”，且系统预算盈亏比>=1.3、止损/目标价完整、报价状态活跃，则必须按快照方向填 long/short，并使用快照给出的现价/止损/目标价。
+9. 若只是“等待更优执行位/等待回踩”，但系统分级仍为“可轻仓试仓”，不要把 action 改成 neutral；正文写清“等执行位”，signal_meta 仍保留候选方向。
+10. 只有在系统分级为“只适合观察/当前不宜出手/等待事件落地”、方向不清、盈亏比不可用、报价非活跃或止损目标缺失时，action 才填 neutral，price/sl/tp 一律填 0。
+11. summary_text 内禁止再嵌入 TRACKER_META、HTML 注释或额外 JSON。
+12. 若“本地概率模型”模块提供了参考胜率，必须在正文里明确说明它与当前结论是"一致"还是"冲突"。
+13. 当本地模型参考胜率低于 50% 但系统分级已给出“可轻仓试仓”时，不要自动改成 neutral；请写成“轻仓候选 + 风险提示”，让规则层和模拟盘继续做二次执行审计。
+14. {json_strictness}
 
 运行概览：
 {summary_text}
@@ -247,18 +258,9 @@ METAL_ADVISOR_TEMPLATE = """\
 [有前值/预期值时：预期值 [实际数] / 前值 [实际数]，偏差超过[基于数据判断的合理阈值]%时对当前区间有[具体影响判断]]
 [风控：高敏事件⚡ → 挂好止损不新开仓；低波动事件💤 → 正常参考即可]
 
-最后必须返回一个纯 JSON 对象，且只能输出 JSON 本身，结构固定如下：
-{{
-  "summary_text": "这里放完整 Markdown 正文",
-  "signal_meta": {{
-    "symbol": "品种代码",
-    "action": "long/short/neutral",
-    "price": 参考入场价或0,
-    "sl": 止损价或0,
-    "tp": 目标价或0
-  }}
-}}
-若当前只适合观察，action 必须为 neutral，price/sl/tp 全部填 0。
+最后必须返回一个纯 JSON 对象，且只能输出 JSON 本身；{json_guardrails}
+结构固定如下：
+{json_schema}
 """
 
 METAL_BATCH_TEMPLATE = """\
@@ -295,14 +297,27 @@ def _build_item_lines(snapshot: dict) -> str:
         macro_focus = str(item.get("macro_focus", "--") or "--").strip()
         execution_note = str(item.get("execution_note", "--") or "--").strip()
         tech_summary = str(item.get("tech_summary", "") or "").strip()
+        trade_grade = str(item.get("trade_grade", "") or "").strip() or "未分级"
+        trade_grade_source = str(item.get("trade_grade_source", "") or "").strip() or "unknown"
+        trade_grade_detail = str(item.get("trade_grade_detail", "") or "").strip()
+        signal_side = str(item.get("signal_side", "") or "").strip().lower() or "neutral"
+        setup_kind = str(item.get("setup_kind", "") or "").strip()
         model_text = "暂无"
         if bool(item.get("model_ready", False)):
             model_text = f"{float(item.get('model_win_probability', 0.0) or 0.0) * 100:.0f}%"
+        execution_model_text = "暂无"
+        if bool(item.get("execution_model_ready", False)):
+            execution_model_text = f"{float(item.get('execution_open_probability', 0.0) or 0.0) * 100:.0f}%"
         line = (
             f"- {symbol} | 最新价 {latest_text} | 报价结构 {quote_text} | "
             f"报价状态 {status_text} | 市场环境 {str(item.get('regime_text', '--') or '--').strip()} | "
-            f"模型胜率 {model_text} | 宏观提醒 {macro_focus} | 执行提醒 {execution_note}"
+            f"系统出手分级 {trade_grade}({trade_grade_source}) | 系统候选方向 {signal_side} | "
+            f"模型胜率 {model_text} | 执行就绪度 {execution_model_text} | 宏观提醒 {macro_focus} | 执行提醒 {execution_note}"
         )
+        if trade_grade_detail:
+            line += f"\n  系统分级理由: {trade_grade_detail}"
+        if setup_kind:
+            line += f"\n  系统候选形态: {setup_kind}"
         if tech_summary:
             line += f"\n  技术指标(H1节奏): {tech_summary}"
         tech_summary_h4 = str(item.get("tech_summary_h4", "") or "").strip()
@@ -401,6 +416,12 @@ def _build_local_model_lines(snapshot: dict) -> str:
 def build_metal_brief_prompt(snapshot: dict, rulebook: dict | None = None) -> str:
     rulebook = dict(rulebook or {})
     return AI_BRIEF_TASK_TEMPLATE.format(
+        json_guardrails=JSON_OUTPUT_GUARDRAILS_TEXT.splitlines()[0],
+        json_schema=JSON_SIGNAL_SCHEMA_TEXT.replace("品种代码", "资产代码(如XAUUSD)").replace(
+            "这里放转义后的完整 Markdown 正文",
+            "这里放转义后的完整 Markdown 正文，正文内容严格遵守上面的排版结构",
+        ),
+        json_strictness=JSON_OUTPUT_GUARDRAILS_TEXT.splitlines()[-1],
         summary_text=str(snapshot.get("summary_text", "") or "").strip() or "暂无运行概览",
         alert_text=str(snapshot.get("alert_text", "") or "").strip() or "暂无提醒横条",
         market_text=str(snapshot.get("market_text", "") or "").strip() or "暂无市场提示",
@@ -418,6 +439,8 @@ def build_metal_brief_prompt(snapshot: dict, rulebook: dict | None = None) -> st
 
 def build_metal_advisor_prompt(snapshot: dict) -> str:
     return METAL_ADVISOR_TEMPLATE.format(
+        json_guardrails=JSON_OUTPUT_GUARDRAILS_TEXT,
+        json_schema=JSON_SIGNAL_SCHEMA_TEXT,
         iron_laws=METAL_IRON_LAWS,
         decision_discipline=METAL_DECISION_DISCIPLINE,
         summary_text=str(snapshot.get("summary_text", "") or "").strip() or "暂无运行概览",

@@ -59,7 +59,7 @@ def _infer_quote_status_code(source: dict[str, Any]) -> str:
         return QuoteStatus.NOT_SELECTED.value
     if "异常" in status_text:
         return QuoteStatus.ERROR.value
-    if "休市" in status_text or "暂无" in status_text:
+    if "休市" in status_text or "非活跃" in status_text or "暂无" in status_text:
         return QuoteStatus.INACTIVE.value
     return QuoteStatus.INACTIVE.value if not has_live_quote else QuoteStatus.LIVE.value
 
@@ -196,6 +196,7 @@ class SnapshotItem:
     risk_reward_state: str = ""
     risk_reward_state_text: str = ""
     risk_reward_ratio: float = 0.0
+    risk_reward_direction: str = ""
     risk_reward_stop_price: float = 0.0
     risk_reward_target_price: float = 0.0
     risk_reward_target_price_2: float = 0.0
@@ -282,6 +283,7 @@ class SnapshotItem:
             "risk_reward_state",
             "risk_reward_state_text",
             "risk_reward_ratio",
+            "risk_reward_direction",
             "risk_reward_stop_price",
             "risk_reward_target_price",
             "risk_reward_target_price_2",
@@ -367,6 +369,7 @@ class SnapshotItem:
             risk_reward_state=_safe_text(source.get("risk_reward_state", "")),
             risk_reward_state_text=_safe_text(source.get("risk_reward_state_text", "")),
             risk_reward_ratio=_safe_float(source.get("risk_reward_ratio", 0.0)),
+            risk_reward_direction=_safe_text(source.get("risk_reward_direction", "")),
             risk_reward_stop_price=_safe_float(source.get("risk_reward_stop_price", 0.0)),
             risk_reward_target_price=_safe_float(source.get("risk_reward_target_price", 0.0)),
             risk_reward_target_price_2=_safe_float(source.get("risk_reward_target_price_2", 0.0)),
@@ -450,6 +453,7 @@ class SnapshotItem:
             "risk_reward_state": self.risk_reward_state,
             "risk_reward_state_text": self.risk_reward_state_text,
             "risk_reward_ratio": self.risk_reward_ratio,
+            "risk_reward_direction": self.risk_reward_direction,
             "risk_reward_stop_price": self.risk_reward_stop_price,
             "risk_reward_target_price": self.risk_reward_target_price,
             "risk_reward_target_price_2": self.risk_reward_target_price_2,

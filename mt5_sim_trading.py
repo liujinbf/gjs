@@ -6,6 +6,8 @@ mt5_sim_trading.py - MT5 外汇/黄金专属模拟盘引擎
 3. 严格的多空双向计算机制。
 4. 实时计算浮游盈亏与强平监测。
 """
+from contextlib import contextmanager
+import json
 import sqlite3
 import logging
 import math
@@ -13,7 +15,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Any
 
-from app_config import PROJECT_DIR
+from app_config import (
+    PROJECT_DIR,
+    get_runtime_config,
+    get_sim_strategy_cooldown_min,
+    get_sim_strategy_daily_limit,
+    get_sim_strategy_min_rr,
+)
+from trade_learning import record_trade_learning_close, record_trade_learning_open
+from trade_contracts import RiskDecision, StrategySignal
 
 SIM_DB_PATH = PROJECT_DIR / ".runtime" / "mt5_sim_trading.sqlite"
 
@@ -23,6 +33,40 @@ class SimTradingEngine:
         self.default_leverage = 100.0  # 默认 100 倍杠杆
         self.max_risk_pct = 0.02       # 单笔最大风险暴露：本金的 2%
         self.init_database()
+
+    def _sync_meta_payload(self, original_meta: dict | None, payload: dict) -> None:
+        if isinstance(original_meta, dict):
+            original_meta.clear()
+            original_meta.update(dict(payload or {}))
+
+    def _get_no_tp2_lock_settings(self) -> tuple[float, float]:
+        try:
+            config = get_runtime_config()
+            lock_r = max(0.10, min(5.0, float(config.sim_no_tp2_lock_r)))
+            partial_ratio = max(0.10, min(0.90, float(config.sim_no_tp2_partial_close_ratio)))
+            return lock_r, partial_ratio
+        except Exception as exc:
+            logging.exception(f"读取无 TP2 锁盈配置失败，回退默认值：{exc}")
+            return 0.5, 0.5
+
+    def _get_initial_balance(self) -> float:
+        try:
+            config = get_runtime_config()
+            return max(100.0, min(1000000.0, float(config.sim_initial_balance)))
+        except Exception as exc:
+            logging.exception(f"读取模拟盘起始本金配置失败，回退默认值：{exc}")
+            return 1000.0
+
+    def _get_exploratory_base_balance(self) -> float:
+        try:
+            config = get_runtime_config()
+            configured = float(getattr(config, "sim_exploratory_base_balance", 0.0) or 0.0)
+            if configured > 0:
+                return max(100.0, min(1000000.0, configured))
+            return self._get_initial_balance()
+        except Exception as exc:
+            logging.exception(f"读取探索试仓基准本金失败，回退默认值：{exc}")
+            return self._get_initial_balance()
 
     def _get_baseline_atr_ratio(self, symbol: str) -> float:
         sym = str(symbol or "").upper()
@@ -65,6 +109,48 @@ class SimTradingEngine:
                 return value
         return 0.0
 
+    def _build_strategy_param_snapshot(self, meta: dict) -> tuple[dict, str]:
+        config = get_runtime_config()
+        family = str(
+            meta.get("strategy_family", "") or meta.get("setup_kind", "") or meta.get("trade_grade_source", "") or ""
+        ).strip().lower()
+        execution_profile = str(meta.get("execution_profile", "standard") or "standard").strip().lower()
+        snapshot = {
+            "strategy_family": family,
+            "execution_profile": execution_profile,
+            "min_rr": float(get_sim_strategy_min_rr(family, default=float(getattr(config, "sim_min_rr", 1.6) or 1.6), config=config)),
+            "daily_limit": int(get_sim_strategy_daily_limit(family, default=int(getattr(config, "sim_exploratory_daily_limit", 3) or 3), config=config)),
+            "cooldown_min": int(get_sim_strategy_cooldown_min(family, default=int(getattr(config, "sim_exploratory_cooldown_min", 10) or 10), config=config)),
+        }
+        family_label_map = {
+            "pullback_sniper_probe": "回调狙击",
+            "directional_probe": "方向试仓",
+            "direct_momentum": "直线动能",
+            "early_momentum": "早期动能",
+            "structure": "结构候选",
+            "setup": "Setup",
+        }
+        family_label = family_label_map.get(family, family or "未分类")
+        summary = (
+            f"{family_label} / {'探索' if execution_profile == 'exploratory' else '标准'}"
+            f" / RR {snapshot['min_rr']:.2f}R"
+            f" / 日上限 {snapshot['daily_limit']} 次"
+            f" / 冷却 {snapshot['cooldown_min']} 分钟"
+        )
+        return snapshot, summary
+
+    def _calculate_favorable_r_multiple(self, action: str, entry_price: float, stop_loss: float, trigger_price: float) -> float:
+        initial_risk = abs(float(entry_price or 0.0) - float(stop_loss or 0.0))
+        if initial_risk <= 1e-6:
+            return 0.0
+        if str(action or "").strip().lower() == "long":
+            favorable_move = float(trigger_price or 0.0) - float(entry_price or 0.0)
+        else:
+            favorable_move = float(entry_price or 0.0) - float(trigger_price or 0.0)
+        if favorable_move <= 0:
+            return 0.0
+        return favorable_move / initial_risk
+
     def init_database(self):
         Path(self.db_file).parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
@@ -98,6 +184,9 @@ class SimTradingEngine:
                     break_even_armed INTEGER DEFAULT 0,
                     partial_closed_quantity REAL DEFAULT 0.0,
                     partial_realized_profit REAL DEFAULT 0.0,
+                    execution_profile TEXT DEFAULT 'standard',
+                    strategy_family TEXT DEFAULT '',
+                    strategy_param_json TEXT DEFAULT '',
                     opened_at TEXT,
                     status TEXT DEFAULT 'open'
                 )
@@ -105,6 +194,7 @@ class SimTradingEngine:
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS sim_trades (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sim_position_id INTEGER DEFAULT 0,
                     user_id TEXT,
                     symbol TEXT,
                     action TEXT,
@@ -113,7 +203,10 @@ class SimTradingEngine:
                     quantity REAL,
                     profit REAL,
                     closed_at TEXT,
-                    reason TEXT
+                    reason TEXT,
+                    execution_profile TEXT DEFAULT 'standard',
+                    strategy_family TEXT DEFAULT '',
+                    strategy_param_json TEXT DEFAULT ''
                 )
             ''')
             cursor.execute(
@@ -127,6 +220,14 @@ class SimTradingEngine:
             self._ensure_column(conn, "sim_positions", "break_even_armed", "INTEGER DEFAULT 0")
             self._ensure_column(conn, "sim_positions", "partial_closed_quantity", "REAL DEFAULT 0.0")
             self._ensure_column(conn, "sim_positions", "partial_realized_profit", "REAL DEFAULT 0.0")
+            self._ensure_column(conn, "sim_positions", "snapshot_id", "INTEGER DEFAULT 0")
+            self._ensure_column(conn, "sim_positions", "execution_profile", "TEXT DEFAULT 'standard'")
+            self._ensure_column(conn, "sim_positions", "strategy_family", "TEXT DEFAULT ''")
+            self._ensure_column(conn, "sim_positions", "strategy_param_json", "TEXT DEFAULT ''")
+            self._ensure_column(conn, "sim_trades", "sim_position_id", "INTEGER DEFAULT 0")
+            self._ensure_column(conn, "sim_trades", "execution_profile", "TEXT DEFAULT 'standard'")
+            self._ensure_column(conn, "sim_trades", "strategy_family", "TEXT DEFAULT ''")
+            self._ensure_column(conn, "sim_trades", "strategy_param_json", "TEXT DEFAULT ''")
             conn.commit()
 
     def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_sql: str) -> None:
@@ -138,25 +239,86 @@ class SimTradingEngine:
             return
         conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
         conn = sqlite3.connect(self.db_file, timeout=15.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        return conn
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            yield conn
+        finally:
+            conn.close()
+
+    def _normalize_volume_meta(
+        self,
+        volume_step: float | None = None,
+        volume_min: float | None = None,
+    ) -> tuple[float, float, int]:
+        step = float(volume_step or 0.0)
+        if step <= 0:
+            step = 0.01
+        minimum = float(volume_min or 0.0)
+        if minimum <= 0:
+            minimum = step
+        minimum = max(minimum, step)
+        step_text = f"{step:.10f}".rstrip("0").rstrip(".")
+        decimals = 0
+        if "." in step_text:
+            decimals = len(step_text.split(".")[1])
+        return step, minimum, decimals
 
     def get_account(self, user_id: str = "system") -> dict:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM sim_accounts WHERE user_id = ?", (user_id,)).fetchone()
             if not row:
+                initial_balance = self._get_initial_balance()
                 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 conn.execute(
                     "INSERT OR IGNORE INTO sim_accounts (user_id, balance, equity, updated_at) VALUES (?, ?, ?, ?)",
-                    (user_id, 100000.0, 100000.0, now)
+                    (user_id, initial_balance, initial_balance, now)
                 )
                 conn.commit()
                 row = conn.execute("SELECT * FROM sim_accounts WHERE user_id = ?", (user_id,)).fetchone()
             return dict(row)
+
+    def reset_account(
+        self,
+        user_id: str = "system",
+        initial_balance: float | None = None,
+        clear_history: bool = True,
+    ) -> dict:
+        target_balance = max(100.0, min(1000000.0, float(initial_balance or self._get_initial_balance())))
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if clear_history:
+                conn.execute("DELETE FROM sim_positions WHERE user_id = ?", (user_id,))
+                conn.execute("DELETE FROM sim_trades WHERE user_id = ?", (user_id,))
+            else:
+                conn.execute(
+                    "UPDATE sim_positions SET status='closed', floating_pnl=0.0 WHERE user_id=? AND status='open'",
+                    (user_id,),
+                )
+            conn.execute(
+                """
+                INSERT INTO sim_accounts (
+                    user_id, balance, equity, used_margin, total_profit, win_count, loss_count, updated_at
+                ) VALUES (?, ?, ?, 0.0, 0.0, 0, 0, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    balance=excluded.balance,
+                    equity=excluded.equity,
+                    used_margin=0.0,
+                    total_profit=0.0,
+                    win_count=0,
+                    loss_count=0,
+                    updated_at=excluded.updated_at
+                """,
+                (user_id, target_balance, target_balance, now),
+            )
+            conn.commit()
+        logging.info(f"🔄 模拟盘账户已重置：user={user_id}，起始本金=${target_balance:,.2f}")
+        return self.get_account(user_id)
 
     def _get_contract_size(self, symbol: str) -> float:
         """获取合约乘数，XAUUSD通常是100盎司/手，外汇通常是100000基础货币/手"""
@@ -240,13 +402,17 @@ class SimTradingEngine:
         stop_loss: float,
         symbol: str,
         risk_pct: float | None = None,
+        volume_step: float | None = None,
+        volume_min: float | None = None,
     ) -> float:
         """
         根据2%固定风险法，计算能够开仓的最优手数。
         BUG-010 修复：loss_per_lot 须折算为 USD，与 risk_amount（USD）量纲一致。
+        额外修复：按品种的 volume_step / volume_min 动态对齐手数，避免跨品种出现无效手数。
         """
         if stop_loss <= 0 or entry_price <= 0 or abs(entry_price - stop_loss) < 0.0001:
-            return 0.1  # 遇到异常值，给个低保 0.1 手
+            volume_step_value, minimum_lot, _decimals = self._normalize_volume_meta(volume_step, volume_min)
+            return max(minimum_lot, volume_step_value)
 
         effective_risk_pct = float(risk_pct if risk_pct is not None else self.max_risk_pct)
         effective_risk_pct = max(0.002, min(effective_risk_pct, 0.05))
@@ -257,7 +423,8 @@ class SimTradingEngine:
         # 计价货币维度的每手亏损
         raw_loss_per_lot = abs(entry_price - stop_loss) * contract_size
         if raw_loss_per_lot <= 0:
-            return 0.1
+            volume_step_value, minimum_lot, _decimals = self._normalize_volume_meta(volume_step, volume_min)
+            return max(minimum_lot, volume_step_value)
 
         # 折算为 USD 维度
         if sym.endswith("USD"):
@@ -269,20 +436,34 @@ class SimTradingEngine:
             loss_per_lot_usd = raw_loss_per_lot
 
         exact_lots = risk_amount / loss_per_lot_usd
-        # 向下取整到 0.01 手
-        lots = math.floor(exact_lots * 100) / 100.0
+        volume_step_value, minimum_lot, decimals = self._normalize_volume_meta(volume_step, volume_min)
+        lots = math.floor(exact_lots / volume_step_value) * volume_step_value
+        lots = round(lots, decimals)
+        if lots < minimum_lot:
+            lots = minimum_lot
 
         # 限制在合理区间
-        return max(0.01, min(lots, 50.0))
+        return max(minimum_lot, min(lots, 50.0))
 
     def execute_signal(self, meta: dict, user_id: str = "system") -> Tuple[bool, str]:
         """将 AI 给出的机器信号转化为真实虚拟挂单"""
+        original_meta = meta if isinstance(meta, dict) else None
+        meta = StrategySignal.from_payload(meta).to_signal_meta()
+        self._sync_meta_payload(original_meta, meta)
         symbol = meta.get("symbol", "").upper()
         action = meta.get("action", "").lower()
         entry_price = float(meta.get("price", 0.0))
         sl = float(meta.get("sl", 0.0))
         tp = float(meta.get("tp", 0.0))
         tp2 = self._resolve_take_profit_2(meta)
+        execution_profile = str(meta.get("execution_profile", "standard") or "standard").strip().lower()
+        if execution_profile not in {"standard", "exploratory"}:
+            execution_profile = "standard"
+        strategy_family = str(meta.get("strategy_family", "") or meta.get("setup_kind", "") or meta.get("trade_grade_source", "") or "").strip()
+        strategy_param_snapshot, strategy_param_summary = self._build_strategy_param_snapshot(meta)
+        meta["strategy_family"] = strategy_family
+        meta["strategy_param_snapshot"] = dict(strategy_param_snapshot)
+        meta["strategy_param_summary"] = strategy_param_summary
 
         if action not in ("long", "short"):
             return False, "非明确执行信号"
@@ -294,8 +475,33 @@ class SimTradingEngine:
         # 根据 2% 资金管理法则计算最优手数
         equity = float(account["equity"])
         risk_pct_used, risk_note = self._resolve_dynamic_risk_pct(meta, symbol, entry_price)
-        lots = self.calculate_optimal_lots(equity, entry_price, sl, symbol, risk_pct=risk_pct_used)
-        
+        sizing_reference_balance = equity
+        if execution_profile == "exploratory":
+            risk_pct_used = min(risk_pct_used, 0.005)
+            sizing_reference_balance = self._get_exploratory_base_balance()
+            risk_note = (
+                f"探索试仓模式，风险预算已压低至 {risk_pct_used:.2%}，"
+                f"并锁定按基准本金 ${sizing_reference_balance:,.2f} 计算仓位。"
+            )
+        meta["risk_budget_pct"] = float(risk_pct_used)
+        meta["sizing_reference_balance"] = float(sizing_reference_balance)
+        meta["risk_decision"] = RiskDecision(
+            allowed=True,
+            reason=risk_note,
+            risk_budget_pct=float(risk_pct_used),
+            sizing_reference_balance=float(sizing_reference_balance),
+        ).to_dict()
+        self._sync_meta_payload(original_meta, meta)
+        lots = self.calculate_optimal_lots(
+            sizing_reference_balance,
+            entry_price,
+            sl,
+            symbol,
+            risk_pct=risk_pct_used,
+            volume_step=float(meta.get("volume_step", 0.0) or 0.0),
+            volume_min=float(meta.get("volume_min", 0.0) or 0.0),
+        )
+
         # BUG-010 修复：用汇率感知函数计算正确的 USD 保证金
         # current_price = entry_price（开仓瞬间，浮动为零）
         required_margin, _ = self._calculate_margin_and_pnl(
@@ -329,20 +535,48 @@ class SimTradingEngine:
                     INSERT INTO sim_positions
                     (
                         user_id, symbol, action, entry_price, quantity, margin,
-                        stop_loss, take_profit, take_profit_2, opened_at
+                        stop_loss, take_profit, take_profit_2, opened_at, snapshot_id, execution_profile, strategy_family, strategy_param_json
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (user_id, symbol, action, entry_price, lots, required_margin, sl, tp, tp2, now),
+                    (
+                        user_id,
+                        symbol,
+                        action,
+                        entry_price,
+                        lots,
+                        required_margin,
+                        sl,
+                        tp,
+                        tp2,
+                        now,
+                        int(meta.get("snapshot_id", 0)),
+                        execution_profile,
+                        strategy_family,
+                        json.dumps(strategy_param_snapshot, ensure_ascii=False),
+                    ),
                 )
+                position_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0] or 0)
                 conn.commit()
             except sqlite3.IntegrityError:
                 conn.rollback()
                 return False, f"{symbol} 已有活跃持仓，跳过"
+        try:
+            record_trade_learning_open(
+                sim_position_id=position_id,
+                user_id=user_id,
+                meta=meta,
+                quantity=lots,
+                required_margin=required_margin,
+                sizing_balance=sizing_reference_balance,
+                risk_budget_pct=risk_pct_used,
+            )
+        except Exception as exc:
+            logging.exception(f"探索/标准试仓开仓学习日志写入失败：{exc}")
 
         logging.info(
             f"🟢 模拟盘已开仓: {action.upper()} {symbol} "
-            f"(手数: {lots:.2f}, 风险预算: {risk_pct_used:.2%}, 止损: {sl}, 止盈1: {tp}, 止盈2: {tp2 or 0})"
+            f"(手数: {lots:.2f}, 风险预算: {risk_pct_used:.2%}, 基准资金: ${sizing_reference_balance:,.2f}, 止损: {sl}, 止盈1: {tp}, 止盈2: {tp2 or 0})"
         )
         return True, f"成功开仓 {lots:.2f} 手 {symbol}（{risk_note}）"
 
@@ -371,6 +605,9 @@ class SimTradingEngine:
         margin = float(pos["margin"] or 0.0)
         partial_realized_profit = float(pos["partial_realized_profit"] or 0.0)
         symbol = pos["symbol"]
+        execution_profile = str(pos["execution_profile"] or "standard").strip().lower() if "execution_profile" in pos.keys() else "standard"
+        strategy_family = str(pos["strategy_family"] or "").strip() if "strategy_family" in pos.keys() else ""
+        strategy_param_json = str(pos["strategy_param_json"] or "").strip() if "strategy_param_json" in pos.keys() else ""
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         # BUG-010 修复：使用汇率感知函数计算正确的 USD 盈亏
@@ -380,9 +617,13 @@ class SimTradingEngine:
 
         conn.execute("UPDATE sim_positions SET status='closed', floating_pnl=? WHERE id=?", (pnl, position_id))
         conn.execute(
-            "INSERT INTO sim_trades (user_id, symbol, action, entry_price, exit_price, quantity, profit, closed_at, reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (user_id, symbol, action, entry, exit_price, quantity, pnl, now, reason),
+            """
+            INSERT INTO sim_trades (
+                sim_position_id, user_id, symbol, action, entry_price, exit_price, quantity, profit,
+                closed_at, reason, execution_profile, strategy_family, strategy_param_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (int(position_id), user_id, symbol, action, entry, exit_price, quantity, pnl, now, reason, execution_profile, strategy_family, strategy_param_json),
         )
         total_position_pnl = partial_realized_profit + pnl
         win_add = 1 if total_position_pnl > 0 else 0
@@ -402,7 +643,108 @@ class SimTradingEngine:
         )
         emoji = "🟢" if pnl > 0 else "🔴"
         logging.info(f"{emoji} 模拟盘平仓通知：{action.upper()} {symbol} 以 {exit_price:.2f} 平仓。盈亏: ${pnl:.2f} ({reason})")
+
+        try:
+            from execution_audit import record_execution_audit
+
+            record_execution_audit(
+                source_kind="sim_engine",
+                decision_status="closed",
+                snapshot_id=int(pos["snapshot_id"] or 0),
+                meta={
+                    "symbol": symbol,
+                    "action": action,
+                    "price": exit_price,
+                    "sl": float(pos["stop_loss"] or 0.0),
+                    "tp": float(pos["take_profit"] or 0.0),
+                },
+                result_message=f"{reason}；本次盈亏 {pnl:.2f} 美元",
+                trade_mode="simulation",
+                user_id=user_id,
+            )
+        except Exception as exc:
+            logging.exception(f"模拟盘平仓审计写入失败：{exc}")
+
+        # 反哺知识库
+        snapshot_id = int(pos["snapshot_id"]) if "snapshot_id" in pos.keys() and pos["snapshot_id"] else 0
+        if snapshot_id > 0:
+            self._feedback_to_knowledge_base(
+                snapshot_id=snapshot_id,
+                symbol=symbol,
+                action=action,
+                entry_price=entry,
+                exit_price=exit_price,
+                reason=reason
+            )
+        try:
+            record_trade_learning_close(
+                sim_position_id=int(position_id),
+                exit_price=exit_price,
+                profit=total_position_pnl,
+                reason=reason,
+            )
+        except Exception as exc:
+            logging.exception(f"交易学习日志平仓更新失败：{exc}")
+
         return pnl
+
+    def _feedback_to_knowledge_base(
+        self,
+        snapshot_id: int,
+        symbol: str,
+        action: str,
+        entry_price: float,
+        exit_price: float,
+        reason: str,
+    ) -> None:
+        if snapshot_id <= 0:
+            return
+
+        outcome_label = "mixed"
+        if "爆仓" in reason or "保护止损" in reason or "止损" in reason:
+            outcome_label = "fail"
+        elif "止盈" in reason:
+            outcome_label = "success"
+
+        price_change_pct = (exit_price - entry_price) / entry_price * 100.0
+        if action == "short":
+            price_change_pct = -price_change_pct
+
+        try:
+            from knowledge_base import open_knowledge_connection, KNOWLEDGE_DB_FILE
+
+            with open_knowledge_connection(KNOWLEDGE_DB_FILE) as kb_conn:
+                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                kb_conn.execute(
+                    """
+                    INSERT OR IGNORE INTO snapshot_outcomes (
+                        snapshot_id, symbol, snapshot_time, horizon_min, future_snapshot_time,
+                        future_price, future_spread_points, price_change_pct, max_price, min_price,
+                        mfe_pct, mae_pct, outcome_label, signal_quality, labeled_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_id,
+                        symbol,
+                        now_str,
+                        888,  # 用 888 作为模拟盘真实成交的独立周期类型
+                        now_str,
+                        exit_price,
+                        0.0,
+                        price_change_pct,
+                        exit_price,
+                        exit_price,
+                        price_change_pct if price_change_pct > 0 else 0.0,
+                        -price_change_pct if price_change_pct < 0 else 0.0,
+                        outcome_label,
+                        "sim_trade",
+                        now_str
+                    )
+                )
+                kb_conn.commit()
+                logging.info(f"✅ 模拟盘反哺：将交易结果直接回标给知识库 (ID: {snapshot_id}, 结果: {outcome_label})")
+        except Exception as exc:
+            logging.exception(f"模拟盘反哺知识库失败：{exc}")
 
     def close_position(self, position_id: int, exit_price: float, reason: str, user_id: str = "system") -> None:
         """平仓结算逻辑（独立打开连接，供外部直接调用）。"""
@@ -433,6 +775,9 @@ class SimTradingEngine:
         symbol = str(pos["symbol"] or "").strip().upper()
         entry = float(pos["entry_price"] or 0.0)
         margin = float(pos["margin"] or 0.0)
+        execution_profile = str(pos["execution_profile"] or "standard").strip().lower() if "execution_profile" in pos.keys() else "standard"
+        strategy_family = str(pos["strategy_family"] or "").strip() if "strategy_family" in pos.keys() else ""
+        strategy_param_json = str(pos["strategy_param_json"] or "").strip() if "strategy_param_json" in pos.keys() else ""
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         close_ratio = close_quantity / total_quantity
@@ -463,9 +808,13 @@ class SimTradingEngine:
             (remaining_quantity, remaining_margin, partial_closed_quantity, partial_realized_profit, position_id),
         )
         conn.execute(
-            "INSERT INTO sim_trades (user_id, symbol, action, entry_price, exit_price, quantity, profit, closed_at, reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (user_id, symbol, action, entry, exit_price, close_quantity, pnl, now, reason),
+            """
+            INSERT INTO sim_trades (
+                sim_position_id, user_id, symbol, action, entry_price, exit_price, quantity, profit,
+                closed_at, reason, execution_profile, strategy_family, strategy_param_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (int(position_id), user_id, symbol, action, entry, exit_price, close_quantity, pnl, now, reason, execution_profile, strategy_family, strategy_param_json),
         )
         conn.execute(
             """
@@ -482,7 +831,50 @@ class SimTradingEngine:
             f"🟡 模拟盘分批止盈：{action.upper()} {symbol} 以 {exit_price:.2f} 减仓 {close_quantity:.2f} 手，"
             f"已实现盈亏 ${pnl:.2f}，剩余 {remaining_quantity:.2f} 手并上移保本止损。"
         )
+        try:
+            from execution_audit import record_execution_audit
+
+            record_execution_audit(
+                source_kind="sim_engine",
+                decision_status="closed",
+                snapshot_id=int(pos["snapshot_id"] or 0),
+                meta={
+                    "symbol": symbol,
+                    "action": action,
+                    "price": exit_price,
+                    "sl": float(pos["stop_loss"] or 0.0),
+                    "tp": float(pos["take_profit"] or 0.0),
+                },
+                result_message=f"{reason}；本次减仓盈亏 {pnl:.2f} 美元",
+                trade_mode="simulation",
+                user_id=user_id,
+            )
+        except Exception as exc:
+            logging.exception(f"模拟盘分批止盈审计写入失败：{exc}")
         return pnl
+
+    def _arm_break_even_only_with_conn(self, conn: sqlite3.Connection, position_id: int) -> bool:
+        """不上移分批止盈时，也允许把止损抬到保本，避免盈利单重新变大亏。"""
+        conn.row_factory = sqlite3.Row
+        pos = conn.execute("SELECT * FROM sim_positions WHERE id=? AND status='open'", (position_id,)).fetchone()
+        if not pos:
+            return False
+        if bool(int(pos["break_even_armed"] or 0)):
+            return False
+        conn.execute(
+            """
+            UPDATE sim_positions
+            SET break_even_armed = 1,
+                stop_loss = entry_price
+            WHERE id = ?
+            """,
+            (position_id,),
+        )
+        logging.info(
+            f"🟦 模拟盘保本保护：{str(pos['action']).upper()} {str(pos['symbol']).upper()} "
+            f"已将止损上移到保本位 {float(pos['entry_price'] or 0.0):.2f}。"
+        )
+        return True
 
     def _normalize_price_quote(self, value: Any) -> dict:
         if isinstance(value, dict):
@@ -510,19 +902,16 @@ class SimTradingEngine:
         根据实时最新价刷新所有未平仓头寸。
         如果触及止损止盈，则自动触发平仓。
         如果净值跌破已用保证金的50%（爆仓线），强制平掉所有亏损持仓。
-        price_map = {'XAUUSD': 2000.5, 'EURUSD': ...}
-        或 {'XAUUSD': {'latest': 2000.5, 'bid': 2000.2, 'ask': 2000.8}}
+        price_map = {'XAUUSD': 2000.5, ...}
         """
         positions = self.get_open_positions(user_id)
         if not positions:
             return
 
-        total_floating_pnl = 0.0
         with self._connect() as conn:
             for pos in positions:
                 symbol = pos["symbol"]
                 if symbol not in price_map:
-                    total_floating_pnl += float(pos["floating_pnl"] or 0.0)
                     continue
 
                 quote = self._normalize_price_quote(price_map[symbol])
@@ -554,24 +943,48 @@ class SimTradingEngine:
                     symbol, qty, entry, mark_price, action == "long"
                 )
 
-                total_floating_pnl += pnl
+                # 风控判断必须使用本轮实时浮盈，不能等节流写库。
                 conn.execute("UPDATE sim_positions SET floating_pnl=? WHERE id=?", (pnl, pos["id"]))
 
-                if tp2 > 0 and not break_even_armed:
-                    partial_qty = math.floor((qty / 2.0) * 100) / 100.0
-                    if partial_qty >= 0.01 and (qty - partial_qty) >= 0.01:
-                        tp1_hit = (action == "long" and trigger_price >= tp) or (action == "short" and trigger_price <= tp)
-                        if tp1_hit:
-                            self._partially_close_position_with_conn(
-                                conn,
-                                pos["id"],
-                                trigger_price,
-                                partial_qty,
-                                "命中目标1止盈（分批减仓并上移保本止损）",
-                                user_id,
-                            )
-                            conn.commit()
-                            continue
+                if not break_even_armed:
+                    lock_r_threshold, partial_close_ratio = self._get_no_tp2_lock_settings()
+                    partial_qty = math.floor((qty * partial_close_ratio) * 100) / 100.0
+                    can_partial_close = partial_qty >= 0.01 and (qty - partial_qty) >= 0.01
+                    if tp2 > 0:
+                        if can_partial_close:
+                            tp1_hit = (action == "long" and trigger_price >= tp) or (action == "short" and trigger_price <= tp)
+                            if tp1_hit:
+                                self._partially_close_position_with_conn(
+                                    conn,
+                                    pos["id"],
+                                    trigger_price,
+                                    partial_qty,
+                                    "命中目标1止盈（分批减仓并上移保本止损）",
+                                    user_id,
+                                )
+                                conn.commit()
+                                continue
+                    else:
+                        favorable_r = self._calculate_favorable_r_multiple(action, entry, sl, trigger_price)
+                        tp_hit_without_tp2 = (action == "long" and trigger_price >= tp) or (action == "short" and trigger_price <= tp)
+                        if favorable_r >= lock_r_threshold and not tp_hit_without_tp2:
+                            if can_partial_close:
+                                self._partially_close_position_with_conn(
+                                    conn,
+                                    pos["id"],
+                                    trigger_price,
+                                    partial_qty,
+                                    (
+                                        f"浮盈达到 {favorable_r:.2f}R（阈值 {lock_r_threshold:.2f}R），"
+                                        "先减仓并上移保本止损"
+                                    ),
+                                    user_id,
+                                )
+                                conn.commit()
+                                continue
+                            if self._arm_break_even_only_with_conn(conn, pos["id"]):
+                                conn.commit()
+                                continue
 
                 # 检测 SL / TP 触发（共享连接，不再嵌套 connect）
                 trigger_close = False

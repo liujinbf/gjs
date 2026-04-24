@@ -202,6 +202,28 @@ def _replace_summary_line(summary_text: str, prefix: str, line: str) -> str:
     return "\n".join(current for current in lines if _normalize_text(current))
 
 
+def _sync_execution_note_with_trade_grade(item: dict) -> None:
+    """外部宏观链改写分级后，同步执行建议首句，避免留下旧候选文案。"""
+    grade = _normalize_text(item.get("trade_grade", ""))
+    detail = _normalize_text(item.get("trade_grade_detail", ""))
+    execution_note = _normalize_text(item.get("execution_note", ""))
+    if not grade or not detail:
+        return
+
+    current_note = f"{grade}：{detail}"
+    known_prefixes = tuple(f"{candidate.value}：" for candidate in TradeGrade)
+    current_prefix = f"{grade}："
+    if not execution_note:
+        item["execution_note"] = current_note
+        return
+    if execution_note.startswith(current_prefix):
+        if detail not in execution_note:
+            item["execution_note"] = current_note
+        return
+    if execution_note.startswith(known_prefixes):
+        item["execution_note"] = current_note
+
+
 def apply_external_signal_context(snapshot: dict, event_context: dict | None = None) -> dict:
     payload = dict(snapshot or {})
     items = []
@@ -278,6 +300,7 @@ def apply_external_signal_context(snapshot: dict, event_context: dict | None = N
                 item["trade_grade_detail"] = f"{detail} 同时，{strongest_alignment_note}。".strip()
             alignment_notes.append(f"{symbol} 外部背景与当前结构同向。")
 
+        _sync_execution_note_with_trade_grade(item)
         items.append(item)
 
     payload["items"] = items

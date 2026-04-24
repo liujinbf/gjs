@@ -68,7 +68,7 @@ def test_rule_scoring_marks_runtime_rule_as_validated(tmp_path):
 """,
         encoding="utf-8",
     )
-    import_markdown_source(file_path, db_path=db_path)
+    import_markdown_source(file_path, db_path=db_path, source_type="auto_miner")
 
     record_snapshot(_build_snapshot("2026-04-13 10:00:00", 100.00, "回调至关键支撑位后企稳，等待回踩确认后介入"), db_path=db_path)
     record_snapshot(_build_snapshot("2026-04-13 10:10:00", 100.18, "结构延续"), db_path=db_path)
@@ -86,7 +86,7 @@ def test_rule_scoring_marks_runtime_rule_as_validated(tmp_path):
     assert match_result["matched_count"] >= 2
     assert score_result["updated_count"] >= 1
     assert summary["validated_count"] >= 1
-    assert summary["manual_review_count"] >= 1
+    assert summary["archived_count"] >= 1
     assert any("回调至关键支撑位企稳后介入" in item["rule_text"] for item in summary["top_rules"])
 
 
@@ -100,7 +100,7 @@ def test_rule_scoring_keeps_negative_rule_as_rejected_or_insufficient(tmp_path):
 """,
         encoding="utf-8",
     )
-    import_markdown_source(file_path, db_path=db_path)
+    import_markdown_source(file_path, db_path=db_path, source_type="auto_miner")
 
     record_snapshot(_build_snapshot("2026-04-13 11:00:00", 100.00, "回调至关键支撑位后企稳，考虑介入"), db_path=db_path)
     record_snapshot(_build_snapshot("2026-04-13 11:10:00", 99.70, "结构失败"), db_path=db_path)
@@ -130,7 +130,7 @@ def test_new_rule_can_backfill_historical_matches_after_state_advanced(tmp_path)
 """,
         encoding="utf-8",
     )
-    import_markdown_source(base_rules, db_path=db_path)
+    import_markdown_source(base_rules, db_path=db_path, source_type="auto_miner")
 
     snapshots = []
     for idx, price in enumerate([100.00, 100.18, 100.35, 100.42, 100.55, 100.70, 100.85], start=0):
@@ -156,7 +156,7 @@ def test_new_rule_can_backfill_historical_matches_after_state_advanced(tmp_path)
 """,
         encoding="utf-8",
     )
-    import_markdown_source(new_rules, db_path=db_path)
+    import_markdown_source(new_rules, db_path=db_path, source_type="auto_miner")
 
     latest_result = record_snapshot(
         _build_snapshot("2026-04-13 11:10:00", 101.00, "回踩确认后再考虑介入"),
@@ -191,3 +191,30 @@ def test_new_rule_can_backfill_historical_matches_after_state_advanced(tmp_path)
     assert score_row is not None
     assert int(score_row["sample_count"] or 0) >= 1
     assert int(score_row["last_processed_outcome_id"] or 0) > 0
+
+
+def test_local_markdown_rules_are_kept_as_reference_background(tmp_path):
+    db_path = tmp_path / "knowledge.db"
+    file_path = tmp_path / "rules.md"
+    file_path.write_text(
+        """
+# 入场逻辑
+- 回调至关键支撑位企稳后介入
+""",
+        encoding="utf-8",
+    )
+    import_markdown_source(file_path, db_path=db_path)
+
+    record_snapshot(_build_snapshot("2026-04-13 10:00:00", 100.00, "回调至关键支撑位后企稳"), db_path=db_path)
+    record_snapshot(_build_snapshot("2026-04-13 10:10:00", 100.20, "结构延续"), db_path=db_path)
+    record_snapshot(_build_snapshot("2026-04-13 10:20:00", 100.35, "结构延续"), db_path=db_path)
+    record_snapshot(_build_snapshot("2026-04-13 10:30:00", 100.45, "结构延续"), db_path=db_path)
+    backfill_snapshot_outcomes(db_path=db_path, now=datetime(2026, 4, 13, 11, 0, 0), horizons_min=(30,))
+
+    match_result = match_rules_to_snapshots(db_path=db_path)
+    refresh_rule_scores(db_path=db_path, horizon_min=30)
+    summary = summarize_rule_scores(db_path=db_path, horizon_min=30)
+
+    assert match_result["matched_count"] == 0
+    assert summary["reference_count"] >= 1
+    assert summary["validated_count"] == 0

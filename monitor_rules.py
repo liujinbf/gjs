@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app_config import get_quote_risk_thresholds
 from signal_enums import AlertTone, QuoteStatus, TradeGrade
+from app_config import get_sim_strategy_min_rr
 
 
 def format_quote_price(value: float, point: float = 0.0) -> str:
@@ -45,6 +46,31 @@ def _risk_reward_context_text(row: dict) -> str:
     return str(row.get("risk_reward_context_text", "") or "").strip()
 
 
+def _normalize_risk_reward_state(value: str) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"good", "excellent"}:
+        return "favorable"
+    if text in {"favorable", "acceptable", "poor", "unknown"}:
+        return text
+    return "unknown" if not text else text
+
+
+def _resolve_risk_reward_state(row: dict) -> str:
+    state = _normalize_risk_reward_state(row.get("risk_reward_state", "unknown"))
+    if state != "unknown":
+        return state
+    state_text = str(row.get("risk_reward_state_text", "") or "").strip()
+    if "优秀" in state_text:
+        return "favorable"
+    if "可接受" in state_text:
+        return "acceptable"
+    if "偏差" in state_text:
+        return "poor"
+    if "未知" in state_text:
+        return "unknown"
+    return state
+
+
 def _normalize_event_importance(value: str) -> str:
     text = str(value or "").strip().lower()
     if text == "high":
@@ -69,7 +95,454 @@ def _event_targets_symbol(event_context: dict | None, symbol: str) -> bool:
     return str(symbol or "").strip().upper() in targets
 
 
-def _build_event_mode_adjustment(event_risk_mode: str, event_context: dict | None = None, symbol: str = "") -> dict[str, str] | None:
+def _is_directional_confirmation_ready(direction: str, breakout_state: str, retest_state: str) -> bool:
+    if direction == "bullish":
+        return breakout_state == "confirmed_above" or retest_state == "confirmed_support"
+    if direction == "bearish":
+        return breakout_state == "confirmed_below" or retest_state == "confirmed_resistance"
+    return False
+
+
+def _build_early_momentum_candidate(symbol_key: str, family: str, row: dict) -> dict[str, str] | None:
+    if family != "metal":
+        return None
+
+    intraday_ready = bool(row.get("intraday_context_ready", False))
+    intraday_bias = str(row.get("intraday_bias", "unknown") or "unknown").strip()
+    intraday_volatility = str(row.get("intraday_volatility", "unknown") or "unknown").strip()
+    multi_ready = bool(row.get("multi_timeframe_context_ready", False))
+    multi_alignment = str(row.get("multi_timeframe_alignment", "unknown") or "unknown").strip()
+    multi_bias = str(row.get("multi_timeframe_bias", "unknown") or "unknown").strip()
+    key_level_ready = bool(row.get("key_level_ready", False))
+    key_level_state = str(row.get("key_level_state", "unknown") or "unknown").strip()
+    breakout_ready = bool(row.get("breakout_ready", False))
+    breakout_state = str(row.get("breakout_state", "unknown") or "unknown").strip()
+    breakout_direction = str(row.get("breakout_direction", "unknown") or "unknown").strip()
+    retest_ready = bool(row.get("retest_ready", False))
+    retest_state = str(row.get("retest_state", "unknown") or "unknown").strip()
+    risk_reward_ready = bool(row.get("risk_reward_ready", False))
+    risk_reward_state = _resolve_risk_reward_state(row)
+    risk_reward_ratio = float(row.get("risk_reward_ratio", 0.0) or 0.0)
+    risk_reward_direction = str(row.get("risk_reward_direction", "unknown") or "unknown").strip()
+    risk_reward_basis = str(row.get("risk_reward_basis", "unknown") or "unknown").strip()
+
+    if not intraday_ready or intraday_bias not in {"bullish", "bearish"}:
+        return None
+    if intraday_volatility in {"low", "unknown"}:
+        return None
+    if not multi_ready or multi_alignment not in {"aligned", "partial"} or multi_bias != intraday_bias:
+        return None
+    if not risk_reward_ready or risk_reward_state not in {"acceptable", "favorable"}:
+        return None
+    if risk_reward_ratio < 1.3:
+        return None
+    if risk_reward_direction not in {"unknown", "", "neutral", intraday_bias}:
+        return None
+    if breakout_direction not in {"unknown", "", "neutral", intraday_bias}:
+        return None
+    if breakout_state in {"none", "unknown"} and retest_state in {"none", "unknown"}:
+        return None
+    if _is_directional_confirmation_ready(intraday_bias, breakout_state, retest_state):
+        return None
+    if retest_ready and retest_state in {"failed_support", "failed_resistance"}:
+        return None
+    if breakout_ready and breakout_state in {"failed_above", "failed_below"}:
+        return None
+
+    pending_breakout = (
+        (intraday_bias == "bullish" and breakout_state == "pending_above")
+        or (intraday_bias == "bearish" and breakout_state == "pending_below")
+    )
+    near_trigger_zone = (
+        key_level_ready
+        and (
+            (intraday_bias == "bullish" and key_level_state in {"near_high", "breakout_above"})
+            or (intraday_bias == "bearish" and key_level_state in {"near_low", "breakout_below"})
+        )
+    )
+    if not pending_breakout and not near_trigger_zone:
+        return None
+
+    intraday_text = _intraday_context_text(row)
+    multi_text = _multi_timeframe_context_text(row)
+    breakout_text = _breakout_context_text(row)
+    key_level_text = _key_level_context_text(row)
+    risk_reward_text = _risk_reward_context_text(row)
+    direction_text = "偏多" if intraday_bias == "bullish" else "偏空"
+    alignment_text = "多周期同向" if multi_alignment == "aligned" else "M5/M15 已先同向，较大周期仍在跟随"
+
+    detail_parts = [
+        f"{symbol_key} 当前先进入早期动能候选：短线{direction_text}、{alignment_text}，执行面允许先轻仓跟踪。"
+    ]
+    if pending_breakout:
+        detail_parts.append(breakout_text or "价格正在试探关键位，属于未完全确认前的第一段动能。")
+    elif near_trigger_zone:
+        detail_parts.append(key_level_text or "价格已经逼近关键触发位，但还没走出完整突破/回踩确认。")
+    if intraday_text:
+        detail_parts.append(intraday_text)
+    if multi_text:
+        detail_parts.append(multi_text)
+    if risk_reward_text:
+        detail_parts.append(risk_reward_text)
+    if risk_reward_basis == "atr_fallback":
+        detail_parts.append("当前盈亏比仍带临时估算成分，只能按低置信轻仓候选看待。")
+
+    return {
+        "grade": TradeGrade.LIGHT_POSITION.value,
+        "detail": " ".join(part for part in detail_parts if part),
+        "next_review": "把它当早期动能候选处理：优先盯下一到两根 M5 是否确认突破/回踩；一旦失守关键位就立即取消。",
+        "tone": AlertTone.SUCCESS.value,
+        "source": "setup",
+        "setup_kind": "early_momentum",
+    }
+
+
+def _build_direct_momentum_candidate(symbol_key: str, family: str, row: dict) -> dict[str, str] | None:
+    if family != "metal":
+        return None
+
+    intraday_ready = bool(row.get("intraday_context_ready", False))
+    intraday_bias = str(row.get("intraday_bias", "unknown") or "unknown").strip()
+    intraday_location = str(row.get("intraday_location", "unknown") or "unknown").strip()
+    intraday_volatility = str(row.get("intraday_volatility", "unknown") or "unknown").strip()
+    multi_ready = bool(row.get("multi_timeframe_context_ready", False))
+    multi_alignment = str(row.get("multi_timeframe_alignment", "unknown") or "unknown").strip()
+    multi_bias = str(row.get("multi_timeframe_bias", "unknown") or "unknown").strip()
+    key_level_ready = bool(row.get("key_level_ready", False))
+    key_level_state = str(row.get("key_level_state", "unknown") or "unknown").strip()
+    breakout_ready = bool(row.get("breakout_ready", False))
+    breakout_state = str(row.get("breakout_state", "unknown") or "unknown").strip()
+    breakout_direction = str(row.get("breakout_direction", "unknown") or "unknown").strip()
+    retest_ready = bool(row.get("retest_ready", False))
+    retest_state = str(row.get("retest_state", "unknown") or "unknown").strip()
+    risk_reward_ready = bool(row.get("risk_reward_ready", False))
+    risk_reward_state = _resolve_risk_reward_state(row)
+    risk_reward_ratio = float(row.get("risk_reward_ratio", 0.0) or 0.0)
+    risk_reward_direction = str(row.get("risk_reward_direction", "unknown") or "unknown").strip()
+    risk_reward_basis = str(row.get("risk_reward_basis", "unknown") or "unknown").strip()
+
+    if not intraday_ready or intraday_bias not in {"bullish", "bearish"}:
+        return None
+    if intraday_volatility not in {"elevated", "high"}:
+        return None
+    if not multi_ready or multi_alignment not in {"aligned", "partial"} or multi_bias != intraday_bias:
+        return None
+    if not risk_reward_ready or risk_reward_state not in {"acceptable", "favorable"}:
+        return None
+    if risk_reward_ratio < (1.6 if multi_alignment == "partial" else 1.4):
+        return None
+    if breakout_direction not in {"unknown", "", "neutral", intraday_bias}:
+        return None
+    if risk_reward_direction not in {"unknown", "", "neutral", intraday_bias}:
+        return None
+    if breakout_ready and breakout_state not in {"none", "unknown"}:
+        return None
+    if retest_ready and retest_state not in {"none", "unknown"}:
+        return None
+
+    directional_edge = (
+        (intraday_bias == "bullish" and intraday_location == "upper")
+        or (intraday_bias == "bearish" and intraday_location == "lower")
+    )
+    near_trigger_zone = (
+        key_level_ready
+        and (
+            (intraday_bias == "bullish" and key_level_state in {"near_high", "breakout_above"})
+            or (intraday_bias == "bearish" and key_level_state in {"near_low", "breakout_below"})
+        )
+    )
+    mid_range_launch = (
+        key_level_ready
+        and key_level_state == "mid_range"
+        and multi_alignment == "aligned"
+        and risk_reward_ratio >= 1.8
+    )
+    if not directional_edge and not near_trigger_zone and not mid_range_launch:
+        return None
+
+    intraday_text = _intraday_context_text(row)
+    multi_text = _multi_timeframe_context_text(row)
+    key_level_text = _key_level_context_text(row)
+    risk_reward_text = _risk_reward_context_text(row)
+    direction_text = "偏多" if intraday_bias == "bullish" else "偏空"
+    alignment_text = "多周期同向" if multi_alignment == "aligned" else "M5/M15 已先同向，较大周期仍在跟随"
+
+    detail_parts = [
+        f"{symbol_key} 当前进入直线动能候选：短线{direction_text}且波动正在扩张，{alignment_text}，暂时不必死等回踩才跟踪。"
+    ]
+    if intraday_text:
+        detail_parts.append(intraday_text)
+    if key_level_text:
+        detail_parts.append(key_level_text)
+    elif mid_range_launch:
+        detail_parts.append("价格虽然还在区间中段，但当前更像是中段起动后的直线扩张，不适合再死等完整回踩。")
+    if multi_text:
+        detail_parts.append(multi_text)
+    if risk_reward_text:
+        detail_parts.append(risk_reward_text)
+    detail_parts.append("当前属于无回踩动能延续场景，只能轻仓跟，不能把它当成熟回踩结构。")
+    if risk_reward_basis == "atr_fallback":
+        detail_parts.append("盈亏比仍带临时估算成分，失速时要更快退出。")
+
+    return {
+        "grade": TradeGrade.LIGHT_POSITION.value,
+        "detail": " ".join(part for part in detail_parts if part),
+        "next_review": "按直线动能候选处理：盯下一根到两根 M5 是否继续加速；一旦转入横盘或跌回关键位，立即取消。",
+        "tone": AlertTone.SUCCESS.value,
+        "source": "setup",
+        "setup_kind": "direct_momentum",
+    }
+
+
+def _build_directional_probe_candidate(symbol_key: str, family: str, row: dict) -> dict[str, str] | None:
+    if family != "metal":
+        return None
+
+    intraday_ready = bool(row.get("intraday_context_ready", False))
+    intraday_bias = str(row.get("intraday_bias", "unknown") or "unknown").strip()
+    intraday_volatility = str(row.get("intraday_volatility", "unknown") or "unknown").strip()
+    multi_ready = bool(row.get("multi_timeframe_context_ready", False))
+    multi_alignment = str(row.get("multi_timeframe_alignment", "unknown") or "unknown").strip()
+    multi_bias = str(row.get("multi_timeframe_bias", "unknown") or "unknown").strip()
+    key_level_ready = bool(row.get("key_level_ready", False))
+    key_level_state = str(row.get("key_level_state", "unknown") or "unknown").strip()
+    breakout_ready = bool(row.get("breakout_ready", False))
+    breakout_state = str(row.get("breakout_state", "unknown") or "unknown").strip()
+    retest_ready = bool(row.get("retest_ready", False))
+    retest_state = str(row.get("retest_state", "unknown") or "unknown").strip()
+    risk_reward_ready = bool(row.get("risk_reward_ready", False))
+    risk_reward_state = _resolve_risk_reward_state(row)
+    risk_reward_ratio = float(row.get("risk_reward_ratio", 0.0) or 0.0)
+    risk_reward_direction = str(row.get("risk_reward_direction", "unknown") or "unknown").strip()
+    risk_reward_basis = str(row.get("risk_reward_basis", "unknown") or "unknown").strip()
+
+    if not intraday_ready or intraday_bias not in {"bullish", "bearish"}:
+        return None
+    if intraday_volatility not in {"elevated", "high"}:
+        return None
+    if not multi_ready or multi_alignment != "mixed" or multi_bias not in {"mixed", "unknown", ""}:
+        return None
+    if not key_level_ready or key_level_state != "mid_range":
+        return None
+    if not risk_reward_ready or risk_reward_state not in {"acceptable", "favorable"}:
+        return None
+    if risk_reward_ratio < 1.8:
+        return None
+    if breakout_ready and breakout_state not in {"none", "unknown"}:
+        return None
+    if retest_ready and retest_state not in {"none", "unknown"}:
+        return None
+    if risk_reward_direction not in {"unknown", "", "neutral", intraday_bias}:
+        return None
+
+    intraday_text = _intraday_context_text(row)
+    multi_text = _multi_timeframe_context_text(row)
+    key_level_text = _key_level_context_text(row)
+    risk_reward_text = _risk_reward_context_text(row)
+    direction_text = "偏多" if intraday_bias == "bullish" else "偏空"
+
+    detail_parts = [
+        f"{symbol_key} 当前进入方向试仓候选：短线{direction_text}、波动放大、盈亏比达标，虽然多周期还没完全共振，但已经具备轻仓试探价值。"
+    ]
+    if intraday_text:
+        detail_parts.append(intraday_text)
+    if multi_text:
+        detail_parts.append(f"{multi_text}，说明更大级别还在跟随，仓位必须更轻。")
+    else:
+        detail_parts.append("当前大级别仍未完全跟上，所以这里只能按探索式轻仓处理。")
+    if key_level_text:
+        detail_parts.append(key_level_text)
+    else:
+        detail_parts.append("价格仍处于区间中段，更像是中段起动后的第一段方向性试探。")
+    if risk_reward_text:
+        detail_parts.append(risk_reward_text)
+    if risk_reward_basis == "atr_fallback":
+        detail_parts.append("止损目标仍带临时估算成分，失速时要更快撤退。")
+
+    return {
+        "grade": TradeGrade.LIGHT_POSITION.value,
+        "detail": " ".join(part for part in detail_parts if part),
+        "next_review": "按方向试仓候选处理：轻仓试探，盯下一到两根 M5 是否继续顺着方向扩张；一旦重新转回横盘就立即取消。",
+        "tone": AlertTone.SUCCESS.value,
+        "source": "setup",
+        "setup_kind": "directional_probe",
+    }
+
+
+def _build_pullback_sniper_candidate(symbol_key: str, family: str, row: dict) -> dict[str, str] | None:
+    if family != "metal":
+        return None
+
+    latest_price = float(row.get("latest_price", 0.0) or 0.0)
+    ma20 = float(row.get("ma20", 0.0) or 0.0)
+    ma50 = float(row.get("ma50", 0.0) or 0.0)
+    ma20_h4 = float(row.get("ma20_h4", 0.0) or 0.0)
+    ma50_h4 = float(row.get("ma50_h4", 0.0) or 0.0)
+    rsi14 = float(row.get("rsi14", 0.0) or 0.0)
+    atr14 = float(row.get("atr14", 0.0) or 0.0)
+    macd_histogram = float(row.get("macd_histogram", 0.0) or 0.0)
+    intraday_ready = bool(row.get("intraday_context_ready", False))
+    intraday_bias = str(row.get("intraday_bias", "unknown") or "unknown").strip()
+    intraday_location = str(row.get("intraday_location", "unknown") or "unknown").strip()
+    intraday_volatility = str(row.get("intraday_volatility", "unknown") or "unknown").strip()
+    multi_ready = bool(row.get("multi_timeframe_context_ready", False))
+    multi_alignment = str(row.get("multi_timeframe_alignment", "unknown") or "unknown").strip()
+    multi_bias = str(row.get("multi_timeframe_bias", "unknown") or "unknown").strip()
+    key_level_state = str(row.get("key_level_state", "unknown") or "unknown").strip()
+    breakout_ready = bool(row.get("breakout_ready", False))
+    breakout_state = str(row.get("breakout_state", "unknown") or "unknown").strip()
+    retest_ready = bool(row.get("retest_ready", False))
+    retest_state = str(row.get("retest_state", "unknown") or "unknown").strip()
+    risk_reward_ready = bool(row.get("risk_reward_ready", False))
+    risk_reward_state = _resolve_risk_reward_state(row)
+    risk_reward_ratio = float(row.get("risk_reward_ratio", 0.0) or 0.0)
+    risk_reward_direction = str(row.get("risk_reward_direction", "unknown") or "unknown").strip()
+    risk_reward_basis = str(row.get("risk_reward_basis", "unknown") or "unknown").strip()
+
+    if min(latest_price, ma20, ma50, atr14) <= 0:
+        return None
+    if not intraday_ready or intraday_bias not in {"bullish", "bearish"}:
+        return None
+    if intraday_volatility in {"low", "unknown"}:
+        return None
+    if not multi_ready or multi_alignment not in {"aligned", "partial"} or multi_bias != intraday_bias:
+        return None
+    if not risk_reward_ready or risk_reward_state not in {"acceptable", "favorable"}:
+        return None
+    min_rr = get_sim_strategy_min_rr("pullback_sniper_probe", default=1.45)
+    if risk_reward_ratio < min_rr:
+        return None
+    if risk_reward_direction not in {"unknown", "", "neutral", intraday_bias}:
+        return None
+    if breakout_ready and breakout_state in {"failed_above", "failed_below"}:
+        return None
+    if retest_ready and retest_state in {"failed_support", "failed_resistance"}:
+        return None
+
+    near_value_ma = abs(latest_price - ma20) <= max(atr14 * 0.6, latest_price * 0.0008)
+    if not near_value_ma:
+        return None
+
+    if intraday_bias == "bullish":
+        h1_trend_ok = latest_price > ma50 and ma20 > ma50
+        h4_trend_ok = ma20_h4 <= 0 or ma50_h4 <= 0 or ma20_h4 >= ma50_h4
+        momentum_ok = macd_histogram >= 0
+        not_chasing = intraday_location not in {"upper"} and key_level_state not in {"near_high", "breakout_above"}
+        value_zone_text = "回踩到 H1 MA20 价值区后仍守在 MA50 上方"
+    else:
+        h1_trend_ok = latest_price < ma50 and ma20 < ma50
+        h4_trend_ok = ma20_h4 <= 0 or ma50_h4 <= 0 or ma20_h4 <= ma50_h4
+        momentum_ok = macd_histogram <= 0
+        not_chasing = intraday_location not in {"lower"} and key_level_state not in {"near_low", "breakout_below"}
+        value_zone_text = "反抽到 H1 MA20 价值区后仍压在 MA50 下方"
+    if not h1_trend_ok or not h4_trend_ok or not momentum_ok or not not_chasing:
+        return None
+    if not 35 <= rsi14 <= 65:
+        return None
+
+    intraday_text = _intraday_context_text(row)
+    multi_text = _multi_timeframe_context_text(row)
+    risk_reward_text = _risk_reward_context_text(row)
+    direction_text = "偏多" if intraday_bias == "bullish" else "偏空"
+    rr_text = f"盈亏比约 {risk_reward_ratio:.2f}:1"
+    detail_parts = [
+        (
+            f"{symbol_key} 当前进入回调狙击候选：短线{direction_text}，{value_zone_text}，"
+            f"RSI={rsi14:.1f} 未过热，{rr_text}，适合按探索试仓采样。"
+        )
+    ]
+    if multi_text:
+        detail_parts.append(multi_text)
+    if intraday_text:
+        detail_parts.append(intraday_text)
+    if risk_reward_text:
+        detail_parts.append(risk_reward_text)
+    if risk_reward_basis == "atr_fallback":
+        detail_parts.append("止损目标仍含 ATR 临时估算，必须小仓位、快复核。")
+
+    return {
+        "grade": TradeGrade.LIGHT_POSITION.value,
+        "detail": " ".join(part for part in detail_parts if part),
+        "next_review": "按回调狙击候选处理：只做固定本金探索试仓；若价格重新远离 MA20 价值区或 RSI 快速过热，下一轮取消。",
+        "tone": AlertTone.SUCCESS.value,
+        "source": "setup",
+        "setup_kind": "pullback_sniper_probe",
+    }
+
+
+def _can_release_post_event_continuation(
+    symbol: str,
+    family: str,
+    row: dict,
+    tone: str,
+    event_risk_mode: str,
+    event_context: dict | None = None,
+) -> dict[str, str] | None:
+    mode = str(event_risk_mode or "normal").strip().lower()
+    context = dict(event_context or {})
+    if mode != "post_event" or family != "metal":
+        return None
+    if not _event_targets_symbol(context, symbol):
+        return None
+
+    importance = _normalize_event_importance(str(context.get("active_event_importance", "") or "").strip())
+    if importance != "high":
+        return None
+    if tone != AlertTone.SUCCESS.value:
+        return None
+    if not bool(row.get("has_live_quote", False)):
+        return None
+
+    multi_ready = bool(row.get("multi_timeframe_context_ready", False))
+    multi_alignment = str(row.get("multi_timeframe_alignment", "unknown") or "unknown").strip()
+    multi_bias = str(row.get("multi_timeframe_bias", "unknown") or "unknown").strip()
+    intraday_ready = bool(row.get("intraday_context_ready", False))
+    intraday_bias = str(row.get("intraday_bias", "unknown") or "unknown").strip()
+    intraday_volatility = str(row.get("intraday_volatility", "unknown") or "unknown").strip()
+    breakout_state = str(row.get("breakout_state", "unknown") or "unknown").strip()
+    retest_state = str(row.get("retest_state", "unknown") or "unknown").strip()
+    breakout_direction = str(row.get("breakout_direction", "unknown") or "unknown").strip()
+    risk_reward_ready = bool(row.get("risk_reward_ready", False))
+    risk_reward_state = _resolve_risk_reward_state(row)
+    risk_reward_direction = str(row.get("risk_reward_direction", "unknown") or "unknown").strip()
+    risk_reward_ratio = float(row.get("risk_reward_ratio", 0.0) or 0.0)
+
+    if not multi_ready or multi_alignment != "aligned" or multi_bias not in {"bullish", "bearish"}:
+        return None
+    if not intraday_ready or intraday_bias != multi_bias or intraday_volatility in {"low", "unknown"}:
+        return None
+    if not risk_reward_ready or risk_reward_state not in {"acceptable", "favorable"}:
+        return None
+    if risk_reward_ratio < 1.6:
+        return None
+    if breakout_direction not in {"unknown", "", "neutral", multi_bias}:
+        return None
+    if risk_reward_direction not in {"unknown", "", "neutral", multi_bias}:
+        return None
+    if not _is_directional_confirmation_ready(multi_bias, breakout_state, retest_state):
+        return None
+
+    active_name = str(context.get("active_event_name", "") or "").strip()
+    importance_text = str(context.get("active_event_importance_text", "") or "").strip() or "高影响"
+    return {
+        "event_override_kind": "post_event_continuation",
+        "event_override_note": (
+            f"{importance_text}事件 {active_name or '当前数据'} 已落地，且报价、结构、盈亏比已重新同步，"
+            "当前按事件后延续候选处理，但仍需快进快出、短周期复核。"
+        ),
+        "detail_prefix": (
+            f"{importance_text}事件后已出现二次确认，当前不再按第一脚重定价处理。"
+        ),
+        "next_review_prefix": "建议 3-5 分钟内复核一次关键位、点差和回踩是否继续成立。",
+    }
+
+
+def _build_event_mode_adjustment(
+    event_risk_mode: str,
+    event_context: dict | None = None,
+    symbol: str = "",
+    allow_post_event_continuation: bool = False,
+) -> dict[str, str] | None:
     mode = str(event_risk_mode or "normal").strip().lower()
     context = dict(event_context or {})
     active_name = str(context.get("active_event_name", "") or "").strip()
@@ -129,6 +602,8 @@ def _build_event_mode_adjustment(event_risk_mode: str, event_context: dict | Non
     if mode == "post_event":
         if active_name:
             if importance == "high":
+                if allow_post_event_continuation:
+                    return None
                 return {
                     "grade": TradeGrade.NO_TRADE.value,
                     "detail": (
@@ -200,7 +675,7 @@ def _build_clean_quote_grade_with_context(symbol_key: str, family: str, row: dic
     retest_ready = bool(row.get("retest_ready", False))
     retest_state = str(row.get("retest_state", "unknown") or "unknown").strip()
     risk_reward_ready = bool(row.get("risk_reward_ready", False))
-    risk_reward_state = str(row.get("risk_reward_state", "unknown") or "unknown").strip()
+    risk_reward_state = _resolve_risk_reward_state(row)
 
     bullish_pressure = multi_bias == "bullish" or intraday_bias == "bullish"
     bearish_pressure = multi_bias == "bearish" or intraday_bias == "bearish"
@@ -226,6 +701,22 @@ def _build_clean_quote_grade_with_context(symbol_key: str, family: str, row: dic
             "next_review": "优先等下一到两根 M5 收线确认，别在假突破后第一时间反手硬追。",
             "tone": AlertTone.ACCENT.value,
         }
+
+    pullback_sniper_candidate = _build_pullback_sniper_candidate(symbol_key, family, row)
+    if pullback_sniper_candidate is not None:
+        return pullback_sniper_candidate
+
+    early_momentum_candidate = _build_early_momentum_candidate(symbol_key, family, row)
+    if early_momentum_candidate is not None:
+        return early_momentum_candidate
+
+    direct_momentum_candidate = _build_direct_momentum_candidate(symbol_key, family, row)
+    if direct_momentum_candidate is not None:
+        return direct_momentum_candidate
+
+    directional_probe_candidate = _build_directional_probe_candidate(symbol_key, family, row)
+    if directional_probe_candidate is not None:
+        return directional_probe_candidate
 
     if breakout_ready and breakout_state in {"pending_above", "pending_below"}:
         detail = breakout_text or "价格正在尝试突破关键位，但当前还没确认。"
@@ -335,7 +826,7 @@ def _build_clean_quote_grade_with_context(symbol_key: str, family: str, row: dic
         detail = f"外汇报价当前不差，但{context_text or '短线方向刚形成'}，仍建议先等美元方向和二次确认。"
     if key_level_text and key_level_state == "mid_range":
         detail += f" {key_level_text}。"
-    if risk_reward_text and risk_reward_state == "acceptable":
+    if risk_reward_text and risk_reward_state in {"acceptable", "favorable"}:
         detail += f" {risk_reward_text}。"
     return {
         "grade": TradeGrade.OBSERVE_ONLY.value,
@@ -422,15 +913,32 @@ def build_trade_grade(
         QuoteStatus.NOT_SELECTED.value,
         QuoteStatus.ERROR.value,
     }:
+        diagnostic_text = str(row.get("quote_live_diagnostic_text", "") or "").strip()
         return {
             "grade": TradeGrade.NO_TRADE.value,
-            "detail": f"{symbol_key} 当前没有活跃报价，静态价格不适合做临场判断。",
+            "detail": (
+                f"{symbol_key} 当前没有活跃报价，静态价格不适合做临场判断。"
+                f"{(' ' + diagnostic_text) if diagnostic_text else ''}"
+            ),
             "next_review": "等待下一个活跃时段或 MT5 报价恢复后再看。",
             "tone": AlertTone.WARNING.value,
             "source": "inactive",
         }
 
-    event_adjustment = _build_event_mode_adjustment(event_risk_mode, event_context=event_context, symbol=symbol_key)
+    post_event_continuation = _can_release_post_event_continuation(
+        symbol_key,
+        family,
+        row,
+        tone,
+        event_risk_mode=event_risk_mode,
+        event_context=event_context,
+    )
+    event_adjustment = _build_event_mode_adjustment(
+        event_risk_mode,
+        event_context=event_context,
+        symbol=symbol_key,
+        allow_post_event_continuation=post_event_continuation is not None,
+    )
     if event_adjustment is not None:
         return event_adjustment
 
@@ -473,6 +981,15 @@ def build_trade_grade(
             "source": "spread",
         }
     result = _build_clean_quote_grade_with_context(symbol_key, family, row)
+    if post_event_continuation is not None and str(result.get("grade", "") or "").strip() == TradeGrade.LIGHT_POSITION.value:
+        detail_prefix = str(post_event_continuation.get("detail_prefix", "") or "").strip()
+        if detail_prefix:
+            result["detail"] = f"{detail_prefix} {result['detail']}".strip()
+        next_review_prefix = str(post_event_continuation.get("next_review_prefix", "") or "").strip()
+        if next_review_prefix:
+            result["next_review"] = next_review_prefix
+        result["event_override_kind"] = str(post_event_continuation.get("event_override_kind", "") or "").strip()
+        result["event_override_note"] = str(post_event_continuation.get("event_override_note", "") or "").strip()
     result.setdefault("source", "structure")
     return result
 

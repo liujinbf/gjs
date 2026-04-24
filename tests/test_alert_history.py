@@ -1,3 +1,4 @@
+import json
 import shutil
 import sys
 from datetime import datetime
@@ -13,6 +14,7 @@ from alert_history import (
     summarize_effectiveness,
     summarize_recent_history,
 )
+import alert_history_store
 from quote_models import SnapshotItem
 
 
@@ -66,6 +68,42 @@ def test_build_snapshot_history_entries_collects_spread_macro_and_session_items(
     assert macro_entry["trade_grade"] == "当前不宜出手"
     assert macro_entry["symbol"] == "XAUUSD"
     assert macro_entry["baseline_latest_price"] == 4759.82
+
+
+def test_alert_history_trim_uses_atomic_replace(monkeypatch, tmp_path):
+    history_file = tmp_path / "alert_history.jsonl"
+    replaced = {"called": False}
+    original_limit = alert_history_store.MAX_HISTORY_LINES
+    original_replace = Path.replace
+
+    def spy_replace(self, target):
+        if str(self).endswith(".tmp"):
+            replaced["called"] = True
+        return original_replace(self, target)
+
+    monkeypatch.setattr(alert_history_store, "MAX_HISTORY_LINES", 2)
+    monkeypatch.setattr(Path, "replace", spy_replace)
+    try:
+        append_history_entries(
+            [
+                {
+                    "occurred_at": f"2026-04-12 12:0{index}:00",
+                    "category": "structure",
+                    "title": f"提醒 {index}",
+                    "detail": "测试",
+                    "tone": "success",
+                    "signature": f"sig-{index}",
+                }
+                for index in range(3)
+            ],
+            history_file=history_file,
+        )
+    finally:
+        monkeypatch.setattr(alert_history_store, "MAX_HISTORY_LINES", original_limit)
+
+    assert replaced["called"] is True
+    lines = [line for line in history_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(lines) == 2
 
 
 def test_build_snapshot_history_entries_skips_generic_macro_broadcast_without_actionable_event():
@@ -259,6 +297,78 @@ def test_build_snapshot_history_entries_marks_structure_near_zone_upper_side():
     assert structure_entry["entry_zone_side"] == "upper"
     assert structure_entry["entry_zone_side_text"] == "上沿"
     assert "距离观察区间上沿约" in structure_entry["detail"]
+
+
+def test_build_snapshot_history_entries_adds_structure_cancel_when_previous_entry_becomes_invalid():
+    history_dir = ROOT / ".runtime_test_structure_cancel"
+    if history_dir.exists():
+        import shutil
+        shutil.rmtree(history_dir)
+    history_dir.mkdir(parents=True, exist_ok=True)
+    history_file = history_dir / "alert_history.jsonl"
+    history_file.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "occurred_at": "2026-04-12 12:00:00",
+                        "category": "structure",
+                        "title": "XAUUSD 进入观察区间（下沿）",
+                        "detail": "已进入观察区间，可重点盯执行。",
+                        "tone": "success",
+                        "signature": "structure-prev-1",
+                        "symbol": "XAUUSD",
+                        "risk_reward_ratio": 1.8,
+                        "structure_entry_stage": "inside_zone",
+                        "entry_zone_side_text": "下沿",
+                        "signal_side": "long",
+                    },
+                    ensure_ascii=False,
+                )
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = {
+        "last_refresh_text": "2026-04-12 12:05:00",
+        "trade_grade": "可轻仓试仓",
+        "trade_grade_detail": "结构观察中。",
+        "trade_next_review": "稍后再看。",
+        "runtime_status_cards": [],
+        "spread_focus_cards": [],
+        "items": [
+            {
+                "symbol": "XAUUSD",
+                "latest_price": 4766.0,
+                "spread_points": 17.0,
+                "point": 0.01,
+                "has_live_quote": True,
+                "tone": "success",
+                "trade_grade": "可轻仓试仓",
+                "trade_grade_source": "structure",
+                "trade_grade_detail": "结构还在，但位置不再理想。",
+                "signal_side": "long",
+                "risk_reward_ready": True,
+                "risk_reward_state": "favorable",
+                "risk_reward_ratio": 1.8,
+                "risk_reward_entry_zone_low": 4760.0,
+                "risk_reward_entry_zone_high": 4770.0,
+                "risk_reward_entry_zone_text": "观察进场区间 4760.00 - 4770.00",
+            }
+        ],
+        "alert_text": "",
+    }
+
+    entries = build_snapshot_history_entries(snapshot, history_file=history_file)
+    cancel_entry = next(item for item in entries if item["category"] == "structure_cancel")
+    assert cancel_entry["title"] == "XAUUSD 本次机会失效"
+    assert "不要再按原计划动手" not in cancel_entry["detail"]
+    assert "位置不再漂亮" in cancel_entry["detail"]
+    assert cancel_entry["invalidated_from_title"] == "XAUUSD 进入观察区间（下沿）"
+
+    import shutil
+    shutil.rmtree(history_dir)
 
 
 def test_build_snapshot_history_entries_adds_external_source_alerts():

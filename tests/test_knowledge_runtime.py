@@ -1,4 +1,5 @@
 import sys
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -162,3 +163,71 @@ def test_record_snapshot_accepts_quote_row_items(tmp_path):
 
     assert result["inserted_count"] == 1
     assert result["snapshot_bindings"]["XAUUSD"] > 0
+
+
+def test_record_snapshot_persists_numeric_risk_features(tmp_path):
+    db_path = tmp_path / "knowledge.db"
+    snapshot = _build_snapshot("2026-04-13 13:00:00", 100.00)
+    snapshot["items"][0].update(
+        {
+            "risk_reward_ready": True,
+            "risk_reward_ratio": 2.4,
+            "risk_reward_direction": "bullish",
+            "risk_reward_stop_price": 98.0,
+            "risk_reward_target_price": 104.8,
+            "risk_reward_entry_zone_low": 99.5,
+            "risk_reward_entry_zone_high": 100.2,
+            "model_ready": True,
+            "model_win_probability": 0.71,
+            "execution_model_ready": True,
+            "execution_open_probability": 0.63,
+        }
+    )
+
+    result = record_snapshot(snapshot, db_path=db_path)
+
+    import sqlite3
+
+    conn = sqlite3.connect(str(db_path))
+    raw_json = conn.execute(
+        "SELECT feature_json FROM market_snapshots WHERE id = ?",
+        (result["inserted_snapshot_ids"][0],),
+    ).fetchone()[0]
+    conn.close()
+    payload = json.loads(raw_json)
+    assert payload["risk_reward_ready"] is True
+    assert payload["risk_reward_ratio"] == 2.4
+    assert payload["risk_reward_stop_price"] == 98.0
+    assert payload["model_win_probability"] == 0.71
+    assert payload["execution_open_probability"] == 0.63
+
+
+def test_record_snapshot_persists_direction_for_observe_grade(tmp_path):
+    db_path = tmp_path / "knowledge.db"
+    snapshot = _build_snapshot("2026-04-13 14:00:00", 100.00, trade_grade="只适合观察")
+    snapshot["items"][0].update(
+        {
+            "signal_side": "",
+            "signal_side_text": "",
+            "risk_reward_ready": False,
+            "risk_reward_ratio": 0.0,
+        }
+    )
+
+    result = record_snapshot(snapshot, db_path=db_path)
+
+    import sqlite3
+
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute(
+        "SELECT signal_side, feature_json FROM market_snapshots WHERE id = ?",
+        (result["inserted_snapshot_ids"][0],),
+    ).fetchone()
+    conn.close()
+
+    payload = json.loads(row[1])
+    assert row[0] == "long"
+    assert payload["signal_side"] == "long"
+    assert payload["signal_side_text"] == "【↑ 多头参考】"
+    assert payload["signal_side_basis"] == "结构投票"
+    assert payload["signal_side_long_votes"] >= 3

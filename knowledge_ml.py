@@ -17,6 +17,7 @@ from quote_models import SnapshotItem
 from signal_enums import AlertTone, SignalSide, TradeGrade
 
 MODEL_NAME = "naive-edge-v1"
+EXECUTION_MODEL_NAME = "execution-readiness-v1"
 MIN_TRAIN_SAMPLES = 20
 MIN_FEATURE_SAMPLES = 4
 LOW_PROBABILITY_BLOCK = 0.48
@@ -67,6 +68,8 @@ def _extract_row_features(row: sqlite3.Row) -> dict[str, str]:
     atr14_h4 = float(payload.get("atr14_h4", 0.0) or 0.0)
     latest_price = float(row["latest_price"] or 0.0)
     spread_points = float(row["spread_points"] or 0.0)
+    rr_ratio = float(payload.get("risk_reward_ratio", 0.0) or 0.0)
+    model_probability = float(payload.get("model_win_probability", 0.0) or 0.0)
     atr_pct = (atr14 / latest_price * 100.0) if latest_price > 0 and atr14 > 0 else 0.0
     features = {
         "symbol": _normalize_text(row["symbol"]).upper(),
@@ -77,6 +80,8 @@ def _extract_row_features(row: sqlite3.Row) -> dict[str, str]:
         "tone": _normalize_text(row["tone"]).lower() or AlertTone.NEUTRAL.value,
         "event_importance": _normalize_text(row["event_importance_text"]) or "none",
         "alert_state": _normalize_text(row["alert_state_text"]) or "none",
+        "risk_reward_ready": "yes" if bool(payload.get("risk_reward_ready", False)) else "no",
+        "risk_reward_direction": _normalize_text(payload.get("risk_reward_direction", "")).lower() or "unknown",
         "risk_reward_state": _normalize_text(payload.get("risk_reward_state_text", "")) or "unknown",
         "intraday_bias": _normalize_text(payload.get("intraday_bias_text", "")) or "unknown",
         "multi_timeframe_bias": _normalize_text(payload.get("multi_timeframe_bias_text", "")) or "unknown",
@@ -85,6 +90,9 @@ def _extract_row_features(row: sqlite3.Row) -> dict[str, str]:
         "spread_bucket": _bucket_numeric(spread_points, 10.0 if spread_points >= 1 else 1.0),
         "atr_pct_bucket": _bucket_numeric(atr_pct, 0.2),
         "atr_h4_bucket": _bucket_numeric(atr14_h4, 5.0 if atr14_h4 >= 1 else 1.0),
+        "rr_ratio_bucket": _bucket_numeric(rr_ratio, 0.5) if rr_ratio > 0 else "missing",
+        "model_probability_bucket": _bucket_numeric(model_probability, 0.1) if model_probability > 0 else "missing",
+        "sample_source": _normalize_text(payload.get("sample_source", "")) or "runtime",
     }
     return {key: value for key, value in features.items() if value and value != "unknown"}
 
@@ -94,6 +102,8 @@ def _extract_item_features(snapshot: dict, item: dict) -> dict[str, str]:
     atr14 = float(item.get("atr14", 0.0) or 0.0)
     atr14_h4 = float(item.get("atr14_h4", 0.0) or 0.0)
     spread_points = float(item.get("spread_points", 0.0) or 0.0)
+    rr_ratio = float(item.get("risk_reward_ratio", 0.0) or 0.0)
+    model_probability = float(item.get("model_win_probability", 0.0) or 0.0)
     atr_pct = (atr14 / latest_price * 100.0) if latest_price > 0 and atr14 > 0 else 0.0
     return {
         "symbol": _normalize_text(item.get("symbol", "")).upper(),
@@ -104,6 +114,8 @@ def _extract_item_features(snapshot: dict, item: dict) -> dict[str, str]:
         "tone": _normalize_text(item.get("tone", "")).lower() or AlertTone.NEUTRAL.value,
         "event_importance": _normalize_text(item.get("event_importance_text", "")) or "none",
         "alert_state": _normalize_text(item.get("alert_state_text", "")) or "none",
+        "risk_reward_ready": "yes" if bool(item.get("risk_reward_ready", False)) else "no",
+        "risk_reward_direction": _normalize_text(item.get("risk_reward_direction", "")).lower() or "unknown",
         "risk_reward_state": _normalize_text(item.get("risk_reward_state_text", "")) or "unknown",
         "intraday_bias": _normalize_text(item.get("intraday_bias_text", "")) or "unknown",
         "multi_timeframe_bias": _normalize_text(item.get("multi_timeframe_bias_text", "")) or "unknown",
@@ -112,6 +124,121 @@ def _extract_item_features(snapshot: dict, item: dict) -> dict[str, str]:
         "spread_bucket": _bucket_numeric(spread_points, 10.0 if spread_points >= 1 else 1.0),
         "atr_pct_bucket": _bucket_numeric(atr_pct, 0.2),
         "atr_h4_bucket": _bucket_numeric(atr14_h4, 5.0 if atr14_h4 >= 1 else 1.0),
+        "rr_ratio_bucket": _bucket_numeric(rr_ratio, 0.5) if rr_ratio > 0 else "missing",
+        "model_probability_bucket": _bucket_numeric(model_probability, 0.1) if model_probability > 0 else "missing",
+    }
+
+
+def _train_feature_stats(
+    *,
+    conn: sqlite3.Connection,
+    rows: list[sqlite3.Row],
+    model_name: str,
+    horizon_min: int,
+    min_train_samples: int,
+    positive_label_weights: dict[str, float],
+    insufficient_note: str,
+    trained_note: str,
+) -> dict:
+    sample_count = len(rows)
+    required_samples = max(8, int(min_train_samples))
+    if sample_count < required_samples:
+        conn.execute(
+            """
+            INSERT INTO ml_model_runs (
+                model_name, horizon_min, sample_count, base_win_probability,
+                feature_count, status, notes, created_at
+            ) VALUES (?, ?, ?, 0, 0, 'insufficient', ?, ?)
+            """,
+            (
+                model_name,
+                int(horizon_min),
+                sample_count,
+                insufficient_note.format(required_samples=required_samples),
+                _now_text(),
+            ),
+        )
+        return {
+            "model_name": model_name,
+            "horizon_min": int(horizon_min),
+            "sample_count": sample_count,
+            "status": "insufficient",
+            "base_win_probability": 0.0,
+            "feature_count": 0,
+        }
+
+    base_weight = sum(float(positive_label_weights.get(str(row["outcome_label"]), 0.0) or 0.0) for row in rows)
+    base_probability = base_weight / sample_count if sample_count > 0 else 0.0
+
+    feature_stats: dict[tuple[str, str], dict[str, float]] = {}
+    for row in rows:
+        outcome_label = str(row["outcome_label"] or "").strip().lower()
+        success_weight = float(positive_label_weights.get(outcome_label, 0.0) or 0.0)
+        features = _extract_row_features(row)
+        for feature_name, feature_value in features.items():
+            key = (feature_name, feature_value)
+            stat = feature_stats.setdefault(
+                key,
+                {"sample_count": 0.0, "success_weight": 0.0, "mixed_count": 0.0, "fail_count": 0.0},
+            )
+            stat["sample_count"] += 1.0
+            stat["success_weight"] += success_weight
+            if outcome_label == "mixed":
+                stat["mixed_count"] += 1.0
+            elif outcome_label == "fail":
+                stat["fail_count"] += 1.0
+
+    conn.execute(
+        "DELETE FROM ml_feature_stats WHERE model_name = ? AND horizon_min = ?",
+        (model_name, int(horizon_min)),
+    )
+    for (feature_name, feature_value), stat in feature_stats.items():
+        feature_sample_count = int(stat["sample_count"])
+        win_probability = float(stat["success_weight"]) / float(stat["sample_count"])
+        conn.execute(
+            """
+            INSERT INTO ml_feature_stats (
+                model_name, horizon_min, feature_name, feature_value, sample_count,
+                success_weight, mixed_count, fail_count, win_probability, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                model_name,
+                int(horizon_min),
+                feature_name,
+                feature_value,
+                feature_sample_count,
+                float(stat["success_weight"]),
+                int(stat["mixed_count"]),
+                int(stat["fail_count"]),
+                float(win_probability),
+                _now_text(),
+            ),
+        )
+    conn.execute(
+        """
+        INSERT INTO ml_model_runs (
+            model_name, horizon_min, sample_count, base_win_probability,
+            feature_count, status, notes, created_at
+        ) VALUES (?, ?, ?, ?, ?, 'trained', ?, ?)
+        """,
+        (
+            model_name,
+            int(horizon_min),
+            sample_count,
+            float(base_probability),
+            len(feature_stats),
+            trained_note,
+            _now_text(),
+        ),
+    )
+    return {
+        "model_name": model_name,
+        "horizon_min": int(horizon_min),
+        "sample_count": sample_count,
+        "status": "trained",
+        "base_win_probability": float(base_probability),
+        "feature_count": len(feature_stats),
     }
 
 
@@ -124,6 +251,7 @@ def train_probability_model(
         rows = conn.execute(
             """
             SELECT
+                ms.id,
                 ms.symbol,
                 ms.latest_price,
                 ms.spread_points,
@@ -138,115 +266,82 @@ def train_probability_model(
                 so.outcome_label
             FROM snapshot_outcomes so
             JOIN market_snapshots ms ON ms.id = so.snapshot_id
-            WHERE so.horizon_min = ?
+            WHERE so.horizon_min IN (?, 888)
               AND so.outcome_label IN ('success', 'mixed', 'fail')
-            ORDER BY so.id ASC
+            ORDER BY so.horizon_min DESC, so.id ASC
             """,
             (int(horizon_min),),
         ).fetchall()
 
-        sample_count = len(rows)
-        if sample_count < max(8, int(min_train_samples)):
-            conn.execute(
-                """
-                INSERT INTO ml_model_runs (
-                    model_name, horizon_min, sample_count, base_win_probability,
-                    feature_count, status, notes, created_at
-                ) VALUES (?, ?, ?, 0, 0, 'insufficient', ?, ?)
-                """,
-                (
-                    MODEL_NAME,
-                    int(horizon_min),
-                    sample_count,
-                    f"样本不足，至少需要 {max(8, int(min_train_samples))} 条有效结果样本。",
-                    _now_text(),
-                ),
-            )
-            return {
-                "model_name": MODEL_NAME,
-                "horizon_min": int(horizon_min),
-                "sample_count": sample_count,
-                "status": "insufficient",
-                "base_win_probability": 0.0,
-                "feature_count": 0,
-            }
-
-        label_weight = {"success": 1.0, "mixed": 0.5, "fail": 0.0}
-        base_weight = sum(label_weight.get(str(row["outcome_label"]), 0.0) for row in rows)
-        base_probability = base_weight / sample_count if sample_count > 0 else 0.0
-
-        feature_stats: dict[tuple[str, str], dict[str, float]] = {}
+        processed_rows = []
+        processed_snapshots = set()
         for row in rows:
-            outcome_label = str(row["outcome_label"] or "").strip().lower()
-            success_weight = float(label_weight.get(outcome_label, 0.0))
-            features = _extract_row_features(row)
-            for feature_name, feature_value in features.items():
-                key = (feature_name, feature_value)
-                stat = feature_stats.setdefault(
-                    key,
-                    {"sample_count": 0.0, "success_weight": 0.0, "mixed_count": 0.0, "fail_count": 0.0},
-                )
-                stat["sample_count"] += 1.0
-                stat["success_weight"] += success_weight
-                if outcome_label == "mixed":
-                    stat["mixed_count"] += 1.0
-                elif outcome_label == "fail":
-                    stat["fail_count"] += 1.0
+            snapshot_id = int(row["id"])
+            if snapshot_id in processed_snapshots:
+                continue
+            processed_snapshots.add(snapshot_id)
+            processed_rows.append(row)
 
         with conn:
-            conn.execute(
-                "DELETE FROM ml_feature_stats WHERE model_name = ? AND horizon_min = ?",
-                (MODEL_NAME, int(horizon_min)),
-            )
-            for (feature_name, feature_value), stat in feature_stats.items():
-                feature_sample_count = int(stat["sample_count"])
-                win_probability = float(stat["success_weight"]) / float(stat["sample_count"])
-                conn.execute(
-                    """
-                    INSERT INTO ml_feature_stats (
-                        model_name, horizon_min, feature_name, feature_value, sample_count,
-                        success_weight, mixed_count, fail_count, win_probability, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        MODEL_NAME,
-                        int(horizon_min),
-                        feature_name,
-                        feature_value,
-                        feature_sample_count,
-                        float(stat["success_weight"]),
-                        int(stat["mixed_count"]),
-                        int(stat["fail_count"]),
-                        float(win_probability),
-                        _now_text(),
-                    ),
-                )
-            conn.execute(
-                """
-                INSERT INTO ml_model_runs (
-                    model_name, horizon_min, sample_count, base_win_probability,
-                    feature_count, status, notes, created_at
-                ) VALUES (?, ?, ?, ?, ?, 'trained', ?, ?)
-                """,
-                (
-                    MODEL_NAME,
-                    int(horizon_min),
-                    sample_count,
-                    float(base_probability),
-                    len(feature_stats),
-                    "已完成轻量胜率模型训练。",
-                    _now_text(),
-                ),
+            return _train_feature_stats(
+                conn=conn,
+                rows=processed_rows,
+                model_name=MODEL_NAME,
+                horizon_min=int(horizon_min),
+                min_train_samples=min_train_samples,
+                positive_label_weights={"success": 1.0, "mixed": 0.5, "fail": 0.0},
+                insufficient_note="样本不足，至少需要 {required_samples} 条有效结果样本。",
+                trained_note="已完成轻量胜率模型训练。",
             )
 
-    return {
-        "model_name": MODEL_NAME,
-        "horizon_min": int(horizon_min),
-        "sample_count": sample_count,
-        "status": "trained",
-        "base_win_probability": float(base_probability),
-        "feature_count": len(feature_stats),
-    }
+
+def train_execution_model(
+    db_path: Path | str | None = None,
+    horizon_min: int = 888,
+    min_train_samples: int = 12,
+) -> dict:
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                ea.id,
+                ms.id AS snapshot_id,
+                ms.symbol,
+                ms.latest_price,
+                ms.spread_points,
+                ms.tone,
+                ms.trade_grade,
+                ms.trade_grade_source,
+                ms.alert_state_text,
+                ms.event_importance_text,
+                ms.signal_side,
+                ms.regime_tag,
+                ms.feature_json,
+                CASE
+                    WHEN ea.decision_status = 'opened' THEN 'success'
+                    WHEN ea.decision_status = 'closed' THEN 'success'
+                    WHEN ea.decision_status IN ('blocked', 'rejected', 'skipped') THEN 'fail'
+                    ELSE 'mixed'
+                END AS outcome_label
+            FROM execution_audits ea
+            JOIN market_snapshots ms ON ms.id = ea.snapshot_id
+            WHERE ea.snapshot_id > 0
+              AND ea.decision_status IN ('opened', 'closed', 'blocked', 'rejected', 'skipped')
+            ORDER BY ea.id ASC
+            """
+        ).fetchall()
+
+        with conn:
+            return _train_feature_stats(
+                conn=conn,
+                rows=rows,
+                model_name=EXECUTION_MODEL_NAME,
+                horizon_min=int(horizon_min),
+                min_train_samples=min_train_samples,
+                positive_label_weights={"success": 1.0, "mixed": 0.5, "fail": 0.0},
+                insufficient_note="执行样本不足，至少需要 {required_samples} 条执行留痕样本。",
+                trained_note="已完成轻量执行就绪模型训练。",
+            )
 
 
 def _load_latest_model_meta(conn: sqlite3.Connection, horizon_min: int) -> sqlite3.Row | None:
@@ -267,14 +362,24 @@ def predict_item_probability(
     item: dict,
     db_path: Path | str | None = None,
     horizon_min: int = 30,
+    model_name: str = MODEL_NAME,
 ) -> dict:
     features = _extract_item_features(snapshot, item)
     with _connect(db_path) as conn:
-        model_meta = _load_latest_model_meta(conn, horizon_min=int(horizon_min))
+        model_meta = conn.execute(
+            """
+            SELECT model_name, sample_count, base_win_probability, feature_count, status, created_at
+            FROM ml_model_runs
+            WHERE horizon_min = ? AND model_name = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (int(horizon_min), str(model_name or MODEL_NAME)),
+        ).fetchone()
         if model_meta is None or str(model_meta["status"] or "") != "trained":
             return {
                 "model_ready": False,
-                "model_name": MODEL_NAME,
+                "model_name": str(model_name or MODEL_NAME),
                 "win_probability": 0.0,
                 "confidence_text": "未训练",
                 "model_note": "本地胜率模型尚未形成有效样本。",
@@ -295,7 +400,7 @@ def predict_item_probability(
                 WHERE model_name = ? AND horizon_min = ? AND feature_name = ? AND feature_value = ?
                 LIMIT 1
                 """,
-                (MODEL_NAME, int(horizon_min), feature_name, feature_value),
+                (str(model_name or MODEL_NAME), int(horizon_min), feature_name, feature_value),
             ).fetchone()
             if row is None:
                 continue
@@ -329,33 +434,71 @@ def predict_item_probability(
         note_parts.append(f"主要依据：{explain}")
     return {
         "model_ready": True,
-        "model_name": MODEL_NAME,
+        "model_name": str(model_name or MODEL_NAME),
         "win_probability": win_probability,
+        "base_win_probability": float(base_probability),
         "confidence_text": confidence_text,
         "model_note": "。".join(note_parts) + "。",
         "supporting_features": supporting_features[:3],
     }
 
 
+def predict_item_execution_probability(
+    snapshot: dict,
+    item: dict,
+    db_path: Path | str | None = None,
+    horizon_min: int = 888,
+) -> dict:
+    result = predict_item_probability(
+        snapshot,
+        item,
+        db_path=db_path,
+        horizon_min=horizon_min,
+        model_name=EXECUTION_MODEL_NAME,
+    )
+    if not bool(result.get("model_ready", False)):
+        result["model_note"] = "本地执行模型样本仍不足，暂不提供执行就绪概率。"
+        return result
+
+    probability = float(result.get("win_probability", 0.0) or 0.0)
+    result["model_note"] = (
+        f"本地执行模型参考就绪度约 {probability * 100:.0f}%。"
+        f"{str(result.get('model_note', '') or '')}"
+    ).strip()
+    return result
+
+
 def annotate_snapshot_with_model(snapshot: dict, db_path: Path | str | None = None, horizon_min: int = 30) -> dict:
     result = dict(snapshot or {})
     items = []
     probabilities = []
+    execution_probabilities = []
     for item in [_normalize_snapshot_item(item) for item in list(result.get("items", []) or [])]:
         enriched = dict(item or {})
         prediction = predict_item_probability(result, enriched, db_path=db_path, horizon_min=horizon_min)
+        execution_prediction = predict_item_execution_probability(result, enriched, db_path=db_path, horizon_min=888)
         enriched.update(
             {
                 "model_ready": bool(prediction.get("model_ready", False)),
                 "model_name": str(prediction.get("model_name", "") or "").strip(),
                 "model_win_probability": float(prediction.get("win_probability", 0.0) or 0.0),
+                "model_base_win_probability": float(prediction.get("base_win_probability", 0.0) or 0.0),
                 "model_confidence_text": str(prediction.get("confidence_text", "") or "").strip(),
                 "model_note": str(prediction.get("model_note", "") or "").strip(),
                 "model_supporting_features": list(prediction.get("supporting_features", []) or []),
+                "execution_model_ready": bool(execution_prediction.get("model_ready", False)),
+                "execution_model_name": str(execution_prediction.get("model_name", "") or "").strip(),
+                "execution_open_probability": float(execution_prediction.get("win_probability", 0.0) or 0.0),
+                "execution_model_base_probability": float(execution_prediction.get("base_win_probability", 0.0) or 0.0),
+                "execution_model_confidence_text": str(execution_prediction.get("confidence_text", "") or "").strip(),
+                "execution_model_note": str(execution_prediction.get("model_note", "") or "").strip(),
+                "execution_model_supporting_features": list(execution_prediction.get("supporting_features", []) or []),
             }
         )
         if enriched["model_ready"]:
             probabilities.append(enriched["model_win_probability"])
+        if enriched["execution_model_ready"]:
+            execution_probabilities.append(enriched["execution_open_probability"])
         items.append(enriched)
 
     result["items"] = items
@@ -364,6 +507,11 @@ def annotate_snapshot_with_model(snapshot: dict, db_path: Path | str | None = No
         result["model_probability_summary_text"] = f"本地模型平均参考胜率约 {avg_probability * 100:.0f}%。"
     else:
         result["model_probability_summary_text"] = "本地模型样本仍不足，暂不提供胜率概率。"
+    if execution_probabilities:
+        avg_execution_probability = sum(execution_probabilities) / len(execution_probabilities)
+        result["execution_probability_summary_text"] = f"本地执行模型平均就绪度约 {avg_execution_probability * 100:.0f}%。"
+    else:
+        result["execution_probability_summary_text"] = "本地执行模型样本仍不足，暂不提供执行就绪概率。"
     return result
 
 
@@ -380,6 +528,28 @@ def _replace_summary_line(summary_text: str, prefix: str, line: str) -> str:
     return "\n".join(current for current in lines if _normalize_text(current))
 
 
+def _sync_execution_note_with_trade_grade(item: dict) -> None:
+    """同步执行建议首句，避免 trade_grade 变更后 UI 仍显示旧等级。"""
+    grade = _normalize_text(item.get("trade_grade", ""))
+    detail = _normalize_text(item.get("trade_grade_detail", ""))
+    execution_note = _normalize_text(item.get("execution_note", ""))
+    if not grade or not detail:
+        return
+
+    synced_note = f"{grade}：{detail}"
+    known_prefixes = tuple(f"{candidate.value}：" for candidate in TradeGrade)
+    current_prefix = f"{grade}："
+    if not execution_note:
+        item["execution_note"] = synced_note
+        return
+    if execution_note.startswith(current_prefix):
+        if detail not in execution_note:
+            item["execution_note"] = synced_note
+        return
+    if execution_note.startswith(known_prefixes):
+        item["execution_note"] = synced_note
+
+
 def apply_model_probability_context(snapshot: dict) -> dict:
     payload = dict(snapshot or {})
     items = []
@@ -388,11 +558,21 @@ def apply_model_probability_context(snapshot: dict) -> dict:
     for raw_item in [_normalize_snapshot_item(item) for item in list(payload.get("items", []) or [])]:
         item = dict(raw_item or {})
         probability = float(item.get("model_win_probability", 0.0) or 0.0)
+        base_probability = float(item.get("model_base_win_probability", 0.0) or 0.0)
+        execution_probability = float(item.get("execution_open_probability", 0.0) or 0.0)
+        execution_ready = bool(item.get("execution_model_ready", False))
         model_ready = bool(item.get("model_ready", False))
         grade = _normalize_text(item.get("trade_grade", ""))
         symbol = _normalize_text(item.get("symbol", "")).upper()
+        relative_block_threshold = max(0.05, base_probability - 0.08) if base_probability > 0 else LOW_PROBABILITY_BLOCK
+        should_hard_block = (
+            model_ready
+            and grade == TradeGrade.LIGHT_POSITION
+            and probability < LOW_PROBABILITY_BLOCK
+            and probability <= relative_block_threshold
+        )
 
-        if model_ready and grade == TradeGrade.LIGHT_POSITION and probability < LOW_PROBABILITY_BLOCK:
+        if should_hard_block:
             item["trade_grade"] = TradeGrade.OBSERVE_ONLY.value
             item["trade_grade_source"] = "model"
             detail = _normalize_text(item.get("trade_grade_detail", ""))
@@ -406,6 +586,15 @@ def apply_model_probability_context(snapshot: dict) -> dict:
             item["alert_state_tone"] = AlertTone.ACCENT.value
             item["alert_state_rank"] = max(int(item.get("alert_state_rank", 0) or 0), 3)
             model_notes.append(f"{symbol} 模型参考胜率约 {probability * 100:.0f}%，已从候选机会降级为观察。")
+        elif model_ready and grade == TradeGrade.LIGHT_POSITION and probability < LOW_PROBABILITY_BLOCK:
+            detail = _normalize_text(item.get("trade_grade_detail", ""))
+            item["trade_grade_detail"] = (
+                f"{detail} 本地模型参考胜率约 {probability * 100:.0f}%，"
+                "但当前整体模型基线本身偏低，因此这里只记为风险提示，不单独否决规则候选。"
+            ).strip()
+            model_notes.append(
+                f"{symbol} 模型参考胜率约 {probability * 100:.0f}%，但与当前模型整体基线接近，本轮仅作风险提示。"
+            )
         elif model_ready and grade == TradeGrade.LIGHT_POSITION and probability >= HIGH_PROBABILITY_CONFIRM:
             detail = _normalize_text(item.get("trade_grade_detail", ""))
             item["trade_grade_detail"] = (
@@ -414,6 +603,15 @@ def apply_model_probability_context(snapshot: dict) -> dict:
             ).strip()
             model_notes.append(f"{symbol} 模型参考胜率约 {probability * 100:.0f}%，与当前候选结构基本一致。")
 
+        if execution_ready and grade == TradeGrade.LIGHT_POSITION:
+            detail = _normalize_text(item.get("trade_grade_detail", ""))
+            item["trade_grade_detail"] = (
+                f"{detail} 执行模型参考就绪度约 {execution_probability * 100:.0f}%，"
+                "主要用于提示这类结构历史上是更容易成交，还是更常被执行链挡住。"
+            ).strip()
+            model_notes.append(f"{symbol} 执行就绪度约 {execution_probability * 100:.0f}%。")
+
+        _sync_execution_note_with_trade_grade(item)
         items.append(item)
 
     payload["items"] = items

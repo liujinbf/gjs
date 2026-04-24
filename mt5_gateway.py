@@ -1,6 +1,7 @@
 """
 MT5 终端连接与报价获取。
 """
+from datetime import datetime, timezone
 import logging
 import os
 import threading
@@ -8,6 +9,7 @@ import time
 from pathlib import Path
 
 from app_config import load_project_env
+from broker_gateway import resolve_broker_symbol
 from breakout_context import analyze_breakout_signal, build_empty_breakout_context
 from intraday_context import analyze_intraday_bars, analyze_multi_timeframe_context, build_empty_intraday_context
 from key_levels import analyze_key_levels, build_empty_key_level_context
@@ -30,6 +32,11 @@ _mt5_lock = threading.Lock()
 _mt5_initialized = False
 _mt5_terminal_path = None
 LIVE_TICK_MAX_AGE_SEC = 180
+
+
+def get_mt5_call_lock() -> threading.Lock:
+    """返回 MT5 C 扩展调用共享锁，供报价、实盘等链路统一串行访问。"""
+    return _mt5_lock
 
 # M-001 修复：断线指标，用于计数和告警
 _disconnect_count: int = 0            # 连续断线次数
@@ -116,36 +123,115 @@ def _estimate_broker_utc_offset(tick_time: int, now_ts: float) -> float:
     return max(-50400.0, min(50400.0, snapped))
 
 
+def _format_utc_text(ts: float) -> str:
+    if float(ts or 0.0) <= 0:
+        return ""
+    return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _inspect_tick_activity(tick, now_ts: float | None = None, max_age_sec: int = LIVE_TICK_MAX_AGE_SEC) -> dict:
+    """返回 tick 活跃性诊断，并在必要时自动纠正经纪商时差估算。"""
+    global _broker_utc_offset_sec
+
+    current_ts = float(now_ts if now_ts is not None else time.time())
+    activity = {
+        "is_live": False,
+        "reason": "no_tick",
+        "reason_text": "MT5 未返回 tick",
+        "diagnostic_text": "MT5 当前没有返回可用 tick。",
+        "tick_time": 0,
+        "tick_utc_ts": 0.0,
+        "tick_utc_text": "",
+        "now_utc_text": _format_utc_text(current_ts),
+        "delta_sec": 0.0,
+        "max_age_sec": float(max(5, int(max_age_sec))),
+        "broker_offset_sec": float(_broker_utc_offset_sec or 0.0),
+        "offset_recalibrated": False,
+        "price_available": False,
+    }
+
+    if tick is None:
+        return activity
+
+    tick_time = int(getattr(tick, "time", 0) or 0)
+    bid = float(getattr(tick, "bid", 0.0) or 0.0)
+    ask = float(getattr(tick, "ask", 0.0) or 0.0)
+    last = float(getattr(tick, "last", 0.0) or 0.0)
+    activity["tick_time"] = tick_time
+
+    if tick_time <= 0:
+        activity.update(
+            {
+                "reason": "no_tick_time",
+                "reason_text": "tick 时间戳无效",
+                "diagnostic_text": "MT5 返回了 tick，但没有有效时间戳。",
+            }
+        )
+        return activity
+
+    if max(bid, ask, last) <= 0:
+        activity.update(
+            {
+                "reason": "no_price",
+                "reason_text": "tick 缺少价格",
+                "diagnostic_text": "MT5 返回了 tick，但 bid/ask/last 都为空。",
+            }
+        )
+        return activity
+
+    activity["price_available"] = True
+    candidate_offset = _estimate_broker_utc_offset(tick_time, current_ts)
+    if _broker_utc_offset_sec is None:
+        _broker_utc_offset_sec = candidate_offset
+
+    used_offset = float(_broker_utc_offset_sec or 0.0)
+    tick_utc = float(tick_time) - used_offset
+    delta_sec = abs(current_ts - tick_utc)
+    candidate_tick_utc = float(tick_time) - candidate_offset
+    candidate_delta_sec = abs(current_ts - candidate_tick_utc)
+
+    if (
+        candidate_delta_sec <= max(5, int(max_age_sec))
+        and candidate_delta_sec + 5 < delta_sec
+    ):
+        _broker_utc_offset_sec = candidate_offset
+        used_offset = candidate_offset
+        tick_utc = candidate_tick_utc
+        delta_sec = candidate_delta_sec
+        activity["offset_recalibrated"] = True
+
+    is_live = delta_sec <= max(5, int(max_age_sec))
+    if is_live:
+        reason = "live"
+        reason_text = "报价活跃"
+        diagnostic_text = f"最新 tick 约延迟 {delta_sec:.0f} 秒，仍在活跃阈值 {max(5, int(max_age_sec))} 秒内。"
+    else:
+        reason = "stale_tick"
+        reason_text = "tick 已过旧"
+        diagnostic_text = f"最新 tick 约延迟 {delta_sec:.0f} 秒，超过活跃阈值 {max(5, int(max_age_sec))} 秒。"
+
+    activity.update(
+        {
+            "is_live": is_live,
+            "reason": reason,
+            "reason_text": reason_text,
+            "diagnostic_text": diagnostic_text,
+            "tick_utc_ts": tick_utc,
+            "tick_utc_text": _format_utc_text(tick_utc),
+            "delta_sec": float(delta_sec),
+            "broker_offset_sec": float(used_offset),
+        }
+    )
+    return activity
+
+
 def _is_live_tick(tick, now_ts: float | None = None, max_age_sec: int = LIVE_TICK_MAX_AGE_SEC) -> bool:
     """判断 MT5 tick 是否为活跃报价（新鲜度验证）。
 
     TZ-001 修复：通过 _broker_utc_offset_sec 将经纪商本地时间戳换算为 UTC，
     再与 time.time() 比较，消除之前 delta > 3600 的 hardfix。
     """
-    global _broker_utc_offset_sec
-
-    if tick is None:
-        return False
-    tick_time = int(getattr(tick, "time", 0) or 0)
-    bid = float(getattr(tick, "bid", 0.0) or 0.0)
-    ask = float(getattr(tick, "ask", 0.0) or 0.0)
-    last = float(getattr(tick, "last", 0.0) or 0.0)
-    if tick_time <= 0 or max(bid, ask, last) <= 0:
-        return False
-    current_ts = float(now_ts if now_ts is not None else time.time())
-
-    # 首次调用时通过真实 tick 自动校准经纪商时差
-    if _broker_utc_offset_sec is None:
-        _broker_utc_offset_sec = _estimate_broker_utc_offset(tick_time, current_ts)
-        logging.info(
-            f"[TZ-001] 经纪商时差自动校准完成：offset={_broker_utc_offset_sec/3600:+.1f}h "
-            f"（tick_time={tick_time}, now_utc={current_ts:.0f}）"
-        )
-
-    # 将经纪商时间戳转换为 UTC 后计算新鲜度
-    tick_utc = float(tick_time) - _broker_utc_offset_sec
-    delta = abs(current_ts - tick_utc)
-    return delta <= max(5, int(max_age_sec))
+    return bool(_inspect_tick_activity(tick, now_ts=now_ts, max_age_sec=max_age_sec).get("is_live", False))
 
 
 
@@ -338,6 +424,7 @@ def shutdown_connection() -> None:
 
 
 def fetch_quotes(symbols: list[str], include_inactive: bool = True) -> list[dict]:
+    global _mt5_initialized
     # initialize_connection() 已负责一次完整的连接探测：
     # - 从未连接时尝试初始化
     # - 已连接但心跳失败时执行 shutdown -> reinitialize
@@ -348,17 +435,28 @@ def fetch_quotes(symbols: list[str], include_inactive: bool = True) -> list[dict
         ok = _force_reconnect_if_needed()
         if not ok:
             return []
+    elif not _mt5_initialized:
+        # 防御性自愈：只要 initialize_connection() 已明确返回成功，
+        # 本轮报价拉取就应视为连接可用，避免状态位与真实连接结果短暂失同步。
+        _mt5_initialized = True
 
     rows = []
     for symbol in symbols or []:
-        symbol_key = str(symbol or "").strip().upper()
+        resolved_symbol = resolve_broker_symbol(str(symbol or ""))
+        symbol_key = resolved_symbol.internal
+        broker_symbol = resolved_symbol.broker
         if not symbol_key:
             continue
         try:
-            selected = mt5.symbol_select(symbol_key, True)
-            info = mt5.symbol_info(symbol_key)
-            tick = mt5.symbol_info_tick(symbol_key)
-            has_live_quote = _is_live_tick(tick)
+            with _mt5_lock:
+                # 必须在锁内调用 C 扩展，防止 shutdown 并发导致 Segfault
+                if not _mt5_initialized:
+                    raise RuntimeError("MT5 connection was shut down")
+                selected = mt5.symbol_select(broker_symbol, True)
+                info = mt5.symbol_info(broker_symbol)
+                tick = mt5.symbol_info_tick(broker_symbol)
+            tick_activity = _inspect_tick_activity(tick)
+            has_live_quote = bool(tick_activity.get("is_live", False))
 
             if not include_inactive and not has_live_quote:
                 continue
@@ -396,7 +494,10 @@ def fetch_quotes(symbols: list[str], include_inactive: bool = True) -> list[dict
                     if timeframe_value is None:
                         continue
                     try:
-                        recent_rates = mt5.copy_rates_from_pos(symbol_key, timeframe_value, 1, count)
+                        with _mt5_lock:
+                            if not _mt5_initialized:
+                                raise RuntimeError("MT5 connection was shut down")
+                            recent_rates = mt5.copy_rates_from_pos(broker_symbol, timeframe_value, 1, count)
                         timeframe_rates[key] = recent_rates
                         timeframe_contexts[key] = analyze_intraday_bars(symbol_key, recent_rates, lookback_label=label)
                     except Exception:  # noqa: BLE001
@@ -432,7 +533,15 @@ def fetch_quotes(symbols: list[str], include_inactive: bool = True) -> list[dict
                 status = "实时报价"
                 status_code = "live"
             else:
-                status = "休市或暂无实时报价"
+                inactive_reason = str(tick_activity.get("reason", "") or "").strip().lower()
+                if inactive_reason == "stale_tick":
+                    status = f"报价延迟（{float(tick_activity.get('delta_sec', 0.0) or 0.0):.0f}秒）"
+                elif inactive_reason == "no_price":
+                    status = "MT5 返回空报价"
+                elif inactive_reason == "no_tick_time":
+                    status = "tick 时间异常"
+                else:
+                    status = "非活跃或暂无实时报价"
                 status_code = "inactive"
 
             rows.append(
@@ -448,6 +557,20 @@ def fetch_quotes(symbols: list[str], include_inactive: bool = True) -> list[dict
                     quote_status_code=status_code,
                     has_live_quote=has_live_quote,
                     extra={
+                        "broker_symbol": broker_symbol,
+                        "broker_symbol_mapped": bool(resolved_symbol.is_mapped),
+                        "volume_step": float(getattr(info, "volume_step", 0.0) or 0.0) if info is not None else 0.0,
+                        "volume_min": float(getattr(info, "volume_min", 0.0) or 0.0) if info is not None else 0.0,
+                        "quote_live_reason": str(tick_activity.get("reason", "") or "").strip(),
+                        "quote_live_reason_text": str(tick_activity.get("reason_text", "") or "").strip(),
+                        "quote_live_diagnostic_text": str(tick_activity.get("diagnostic_text", "") or "").strip(),
+                        "quote_live_delta_sec": float(tick_activity.get("delta_sec", 0.0) or 0.0),
+                        "quote_live_max_age_sec": float(tick_activity.get("max_age_sec", 0.0) or 0.0),
+                        "quote_tick_utc_text": str(tick_activity.get("tick_utc_text", "") or "").strip(),
+                        "quote_now_utc_text": str(tick_activity.get("now_utc_text", "") or "").strip(),
+                        "quote_broker_offset_sec": float(tick_activity.get("broker_offset_sec", 0.0) or 0.0),
+                        "quote_offset_recalibrated": bool(tick_activity.get("offset_recalibrated", False)),
+                        "quote_price_available": bool(tick_activity.get("price_available", False)),
                         **intraday_context,
                         **multi_timeframe_context,
                         **key_level_context,
@@ -457,7 +580,7 @@ def fetch_quotes(symbols: list[str], include_inactive: bool = True) -> list[dict
                 ).to_dict()
             )
         except Exception as exc:  # noqa: BLE001
-            logging.exception(f"MT5 拉取 {symbol_key} 报价异常：{exc}")
+            logging.exception(f"MT5 拉取 {symbol_key}({broker_symbol}) 报价异常：{exc}")
             if not include_inactive:
                 continue
             rows.append(
@@ -467,6 +590,8 @@ def fetch_quotes(symbols: list[str], include_inactive: bool = True) -> list[dict
                     quote_status_code="error",
                     has_live_quote=False,
                     extra={
+                        "broker_symbol": broker_symbol,
+                        "broker_symbol_mapped": bool(resolved_symbol.is_mapped),
                         **build_empty_intraday_context(),
                         **{
                             "multi_timeframe_context_ready": False,

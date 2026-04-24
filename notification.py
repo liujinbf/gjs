@@ -23,8 +23,18 @@ from notification_worker import get_notification_worker
 
 logger = logging.getLogger(__name__)
 
+_LEARNING_HEALTH_STATUS_COOLDOWN_HOURS = 24
+
 from app_config import MetalMonitorConfig
-from notification_payloads import _build_ai_brief_entry, _build_learning_report_entry, _build_markdown, _normalize_text
+from knowledge_feedback import get_feedback_push_policy
+from notification_payloads import (
+    _build_ai_brief_entry,
+    _build_learning_health_entry,
+    _build_learning_report_entry,
+    _build_markdown,
+    _build_user_facing_title,
+    _normalize_text,
+)
 from notification_state import (
     NOTIFY_STATE_FILE,
     RUNTIME_DIR,
@@ -36,8 +46,10 @@ from notification_state import (
     _is_within_cooldown,
     _mark_group_sent,
     _mark_learning_digest_sent,
+    _mark_learning_health_sent,
     _parse_time,
     _read_learning_digest_state,
+    _read_learning_health_state,
     _read_group_state,
     _read_state,
     _should_notify_entry,
@@ -45,9 +57,21 @@ from notification_state import (
     _write_state,
 )
 from signal_enums import AlertTone
+from signal_protocol import normalize_signal_meta
 
 
 _DND_ALLOWED_CATEGORIES = {"mt5", "source"}
+_TRANSITION_ONLY_WINDOW_MINUTES = {
+    "macro": 180,
+    "session": 240,
+    "source": 240,
+    "mt5": 240,
+}
+_STATE_TRANSITION_WINDOW_MINUTES = {
+    "spread": 180,
+    "recovery": 180,
+}
+_FEEDBACK_POLICY_CATEGORIES = {"structure", "opportunity", "ai"}
 
 
 def _is_hour_in_window(current: datetime, start_hour: int, end_hour: int) -> bool:
@@ -63,6 +87,17 @@ def _is_hour_in_window(current: datetime, start_hour: int, end_hour: int) -> boo
 
 def _entry_occured_at(entry: dict, now: datetime | None = None) -> datetime:
     return now or _parse_time(entry.get("occurred_at", "")) or datetime.now()
+
+
+def _is_structure_entry_expired(entry: dict, config: MetalMonitorConfig, evaluated_at: datetime) -> bool:
+    category = str(entry.get("category", "") or "").strip().lower()
+    if category != "structure":
+        return False
+    occurred_at = _parse_time(entry.get("occurred_at", ""))
+    if occurred_at is None:
+        return False
+    validity_sec = max(60, int(getattr(config, "refresh_interval_sec", 30) or 30) * 3)
+    return evaluated_at - occurred_at > timedelta(seconds=validity_sec)
 
 
 def _is_dnd_suppressed(entry: dict, config: MetalMonitorConfig, current: datetime) -> bool:
@@ -97,6 +132,160 @@ def _is_overnight_spread_suppressed(entry: dict, config: MetalMonitorConfig, cur
     return True
 
 
+def _is_transition_only_entry(entry: dict) -> bool:
+    category = str(entry.get("category", "") or "").strip().lower()
+    if category == "macro":
+        return not bool(entry.get("macro_has_result", False))
+    return category in {"session", "source", "mt5"}
+
+
+def _is_transition_only_suppressed(
+    entry: dict,
+    state: dict,
+    channel_key: str,
+    current: datetime,
+) -> bool:
+    if not _is_transition_only_entry(entry):
+        return False
+    category = str(entry.get("category", "") or "").strip().lower()
+    window_min = int(_TRANSITION_ONLY_WINDOW_MINUTES.get(category, 0) or 0)
+    if window_min <= 0:
+        return False
+    group_key = _build_notify_group_key(entry)
+    group_state = _read_group_state(state, channel_key, group_key)
+    last_time = group_state.get("last_time")
+    if last_time is None:
+        return False
+    if current - last_time >= timedelta(minutes=window_min):
+        return False
+    current_priority = int(_get_notify_priority(entry))
+    last_priority = int(group_state.get("last_priority", 0) or 0)
+    return current_priority <= last_priority
+
+
+def _build_state_fingerprint(entry: dict) -> str:
+    category = str(entry.get("category", "") or "").strip().lower()
+    title = _normalize_text(entry.get("title", ""))
+    detail = _normalize_text(entry.get("detail", ""))
+    tone = _normalize_text(entry.get("tone", ""))
+    trade_grade = _normalize_text(entry.get("trade_grade", ""))
+    alert_state_text = _normalize_text(entry.get("alert_state_text", ""))
+    event_note = _normalize_text(entry.get("event_note", ""))
+    return " | ".join(part for part in (category, title, detail, tone, trade_grade, alert_state_text, event_note) if part)
+
+
+def _is_same_state_transition_suppressed(
+    entry: dict,
+    state: dict,
+    channel_key: str,
+    current: datetime,
+) -> bool:
+    category = str(entry.get("category", "") or "").strip().lower()
+    window_min = int(_STATE_TRANSITION_WINDOW_MINUTES.get(category, 0) or 0)
+    if window_min <= 0:
+        return False
+    group_key = _build_notify_group_key(entry)
+    group_state = _read_group_state(state, channel_key, group_key)
+    last_time = group_state.get("last_time")
+    if last_time is None:
+        return False
+    if current - last_time >= timedelta(minutes=window_min):
+        return False
+    current_priority = int(_get_notify_priority(entry))
+    last_priority = int(group_state.get("last_priority", 0) or 0)
+    if current_priority > last_priority:
+        return False
+    current_fingerprint = _build_state_fingerprint(entry)
+    if not current_fingerprint:
+        return False
+    return current_fingerprint == str(group_state.get("last_fingerprint", "") or "").strip()
+
+
+def _to_float(value) -> float:
+    try:
+        if value in ("", None):
+            return 0.0
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _load_feedback_push_policy(state_file: Path | None = None) -> dict:
+    # 测试传入隔离 state_file 时不读取生产知识库，避免测试之间互相污染。
+    if state_file is not None:
+        return {}
+    try:
+        policy = get_feedback_push_policy()
+    except Exception:  # noqa: BLE001
+        return {}
+    return dict(policy) if isinstance(policy, dict) else {}
+
+
+def _entry_signal_score(entry: dict) -> float:
+    return max(
+        _to_float(entry.get("opportunity_score")),
+        _to_float(entry.get("signal_score")),
+        _to_float(entry.get("model_win_probability")) * 100.0,
+    )
+
+
+def _entry_rr(entry: dict) -> float:
+    return max(
+        _to_float(entry.get("opportunity_risk_reward_ratio")),
+        _to_float(entry.get("risk_reward_ratio")),
+    )
+
+
+def _has_feedback_policy_event_risk(entry: dict) -> bool:
+    importance = str(entry.get("event_importance_text", "") or "").strip()
+    return bool(entry.get("event_applies", False)) or importance in {"高影响", "high", "高"}
+
+
+def _is_feedback_policy_promoted(entry: dict, policy: dict) -> bool:
+    if not bool((policy or {}).get("advance_warning", False)):
+        return False
+    category = str(entry.get("category", "") or "").strip().lower()
+    if category != "structure":
+        return False
+    stage = str(entry.get("structure_entry_stage", "") or "").strip().lower()
+    side = str(entry.get("signal_side", "") or "").strip().lower()
+    if stage != "near_zone" or side not in {"long", "short"}:
+        return False
+    if _has_feedback_policy_event_risk(entry):
+        return False
+    rr = _entry_rr(entry)
+    score = _entry_signal_score(entry)
+    threshold = 82.0 + float((policy or {}).get("min_score_boost", 0) or 0)
+    return rr >= 1.6 and score >= max(72.0, threshold)
+
+
+def _is_feedback_policy_suppressed(entry: dict, policy: dict) -> bool:
+    if not bool((policy or {}).get("active", False)):
+        return False
+    category = str(entry.get("category", "") or "").strip().lower()
+    if category not in _FEEDBACK_POLICY_CATEGORIES:
+        return False
+    stage = str(entry.get("structure_entry_stage", "") or "").strip().lower()
+    score = _entry_signal_score(entry)
+    rr = _entry_rr(entry)
+    min_score = 72.0 + float((policy or {}).get("min_score_boost", 0) or 0)
+
+    if bool(policy.get("tighten_risk", False)):
+        if 0 < rr < 1.6:
+            return True
+        if _has_feedback_policy_event_risk(entry) and stage != "inside_zone":
+            return True
+
+    if bool(policy.get("reduce_noise", False)):
+        if category == "structure" and stage != "inside_zone" and score < min_score:
+            return True
+        if category == "opportunity" and score > 0 and score < min_score:
+            return True
+        if category == "ai" and entry.get("ai_rule_eligible") is False and score < min_score:
+            return True
+    return False
+
+
 def pick_notify_entries(
     entries: list[dict],
     config: MetalMonitorConfig,
@@ -107,11 +296,17 @@ def pick_notify_entries(
     if not channels:
         return []
     state = _read_state(state_file=state_file)
+    evaluated_at = now or datetime.now()
+    feedback_policy = _load_feedback_push_policy(state_file=state_file)
     result = []
     for entry in entries or []:
-        if not _should_notify_entry(entry):
+        if not _should_notify_entry(entry) and not _is_feedback_policy_promoted(entry, feedback_policy):
+            continue
+        if _is_feedback_policy_suppressed(entry, feedback_policy):
             continue
         current = _entry_occured_at(entry, now=now)
+        if _is_structure_entry_expired(entry, config, evaluated_at):
+            continue
         if _is_dnd_suppressed(entry, config, current):
             continue
         if _is_overnight_spread_suppressed(entry, config, current):
@@ -120,6 +315,8 @@ def pick_notify_entries(
             channel_key
             for channel_key, _channel_name, _channel_value in channels
             if not _is_within_cooldown(entry, state, config.notify_cooldown_min, now=current, channel_key=channel_key)
+            and not _is_transition_only_suppressed(entry, state, channel_key, current)
+            and not _is_same_state_transition_suppressed(entry, state, channel_key, current)
         ]
         if due_channels:
             result.append(entry)
@@ -180,7 +377,9 @@ def _build_send_entry(entry: dict, aggregate_count: int, notify_mode: str) -> di
     payload = dict(entry or {})
     safe_count = max(1, int(aggregate_count or payload.get("aggregate_count", 1) or 1))
     payload["aggregate_count"] = safe_count
-    title = _normalize_text(payload.get("title", "提醒"))
+    payload["raw_title"] = _normalize_text(payload.get("title", "提醒"))
+    title = _build_user_facing_title(payload)
+    payload["title"] = title
     detail = _normalize_text(payload.get("detail", ""))
     if notify_mode == "escalation":
         payload["title"] = f"{title}（升级提醒）"
@@ -241,7 +440,12 @@ def send_pushplus(entry: dict, token: str) -> tuple[bool, str]:
     return _post_json("https://www.pushplus.plus/send", payload)
 
 
-def send_notifications(entries: list[dict], config: MetalMonitorConfig, state_file: Path | None = None) -> dict:
+def send_notifications(
+    entries: list[dict],
+    config: MetalMonitorConfig,
+    state_file: Path | None = None,
+    now: datetime | None = None,
+) -> dict:
     """筛选、聚合并异步投递推送任务。
 
     冷却/去重状态在本函数内同步写入（乐观写入），HTTP 发送由
@@ -258,6 +462,10 @@ def send_notifications(entries: list[dict], config: MetalMonitorConfig, state_fi
     errors = []
     channels = _configured_channels(config)
     worker = get_notification_worker()
+    effective_now = now
+    if effective_now is None and pending:
+        effective_now = max((_entry_occured_at(entry) for entry in pending), default=datetime.now())
+    effective_now = effective_now or datetime.now()
 
     for entry in pending:
         entry_title = _normalize_text(entry.get("title", "提醒"))
@@ -265,7 +473,7 @@ def send_notifications(entries: list[dict], config: MetalMonitorConfig, state_fi
         entry_sent = False
         group_key = str(entry.get("group_key", "") or _build_notify_group_key(entry)).strip()
         current_priority = int(_get_notify_priority(entry))
-        current_occured_at = _parse_time(entry.get("occurred_at", "")) or datetime.now()
+        current_occured_at = now or _parse_time(entry.get("occurred_at", "")) or datetime.now()
         observed_count = int(entry.get("aggregate_count", 0) or 1)
         for channel_key, channel_name, channel_value in channels:
             if _is_within_cooldown(entry, state, config.notify_cooldown_min, channel_key=channel_key):
@@ -297,10 +505,17 @@ def send_notifications(entries: list[dict], config: MetalMonitorConfig, state_fi
             # 不等待 HTTP 实际完成，保证下一个刷新周期能正确判断冷却。
             # 若后台线程最终推送失败，仅记录日志，不回滚冷却状态
             # （冷却期内少推一次，优于因重试失败导致的刷屏）。
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now_str = current_occured_at.strftime("%Y-%m-%d %H:%M:%S")
             if signature:
                 state[_build_channel_state_key(channel_key, signature)] = now_str
-            _mark_group_sent(state, channel_key, group_key, current_priority)
+            _mark_group_sent(
+                state,
+                channel_key,
+                group_key,
+                current_priority,
+                fingerprint=_build_state_fingerprint(entry),
+                sent_at=current_occured_at,
+            )
             entry_sent = True
             sent_channel_count += 1
 
@@ -343,9 +558,9 @@ def send_notifications(entries: list[dict], config: MetalMonitorConfig, state_fi
             sent_count += 1
 
     if messages:
-        _update_last_result(state, "；".join(messages), _normalize_text)
+        _update_last_result(state, "；".join(messages), _normalize_text, now=effective_now)
 
-    _write_state(state, state_file=state_file)
+    _write_state(state, state_file=state_file, now=effective_now)
     return {"sent_count": sent_count, "sent_channel_count": sent_channel_count, "messages": messages, "errors": errors}
 
 
@@ -399,6 +614,10 @@ def send_ai_brief_notification(
     """
     if not bool(config.ai_push_enabled):
         return {"sent_count": 0, "messages": [], "errors": [], "skipped_reason": "ai_push_disabled"}
+
+    normalized_signal_meta = normalize_signal_meta((result or {}).get("signal_meta"))
+    if str(normalized_signal_meta.get("action", "neutral") or "neutral").strip().lower() == "neutral":
+        return {"sent_count": 0, "messages": [], "errors": [], "skipped_reason": "ai_neutral_suppressed"}
 
     # ── 机会快速通道 vs 普通冷却 ──────────────────────────────────────
     auto_interval_min = int(getattr(config, "ai_auto_interval_min", 60) or 60)
@@ -539,6 +758,88 @@ def send_learning_report_notification(
 
     _write_state(state, state_file=state_file)
     messages = [f"知识库学习摘要已投递到 {enqueued_count} 个渠道"] if enqueued_count > 0 else []
+    return {"sent_count": enqueued_count, "messages": messages, "errors": []}
+
+
+def _build_learning_health_hash(report: dict) -> str:
+    payload = {
+        "status_key": _normalize_text((report or {}).get("status_key", "") or ""),
+        "summary_text": _normalize_text((report or {}).get("summary_text", "") or ""),
+        "latest_rule_text": _normalize_text((report or {}).get("latest_rule_text", "") or ""),
+    }
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def _learning_health_group(status_key: str) -> str:
+    clean = _normalize_text(status_key)
+    if clean == "productive":
+        return "productive"
+    if clean == "deep_mining_error":
+        return "error"
+    return "degraded"
+
+
+def send_learning_health_notification(
+    report: dict,
+    config: MetalMonitorConfig,
+    state_file: Path | None = None,
+    now: datetime | None = None,
+) -> dict:
+    if not bool(getattr(config, "learning_push_enabled", False)):
+        return {"sent_count": 0, "messages": [], "errors": [], "skipped_reason": "learning_push_disabled"}
+
+    status_key = str((report or {}).get("status_key", "") or "").strip()
+    summary_text = _normalize_text((report or {}).get("summary_text", "") or "")
+    if not status_key or not summary_text:
+        return {"sent_count": 0, "messages": [], "errors": [], "skipped_reason": "learning_health_empty"}
+
+    state = _read_state(state_file=state_file)
+    digest_hash = _build_learning_health_hash(report)
+    health_state = _read_learning_health_state(state)
+    current = now or datetime.now()
+    last_hash = str(health_state.get("last_hash", "") or "").strip()
+    last_status_key = str(health_state.get("last_status_key", "") or "").strip()
+    last_time = health_state.get("last_time")
+    current_group = _learning_health_group(status_key)
+    last_group = _learning_health_group(last_status_key) if last_status_key else ""
+    if last_hash == digest_hash:
+        return {"sent_count": 0, "messages": [], "errors": [], "skipped_reason": "learning_health_unchanged"}
+    if last_status_key == status_key:
+        return {"sent_count": 0, "messages": [], "errors": [], "skipped_reason": "learning_health_same_status"}
+    if (
+        last_time is not None
+        and current - last_time < timedelta(hours=_LEARNING_HEALTH_STATUS_COOLDOWN_HOURS)
+        and current_group == "degraded"
+        and last_group == "degraded"
+    ):
+        return {"sent_count": 0, "messages": [], "errors": [], "skipped_reason": "learning_health_transition_cooldown"}
+
+    entry = _build_learning_health_entry(report)
+    entry["signature"] = f"learning_health::{digest_hash[:16]}"
+    worker = get_notification_worker()
+    enqueued_count = 0
+
+    def _make_lr_result_cb(channel_label: str) -> object:
+        def _cb(ok: bool, detail: str) -> None:
+            if ok:
+                logger.info("[学习状态] 已推送到%s", channel_label)
+            else:
+                logger.warning("[学习状态] 推送到%s失败：%s", channel_label, detail)
+        return _cb
+
+    if str(config.dingtalk_webhook or "").strip():
+        worker.enqueue({"send_fn": send_dingtalk, "args": (entry, config.dingtalk_webhook), "on_result": _make_lr_result_cb("钉钉")})
+        enqueued_count += 1
+    if str(config.pushplus_token or "").strip():
+        worker.enqueue({"send_fn": send_pushplus, "args": (entry, config.pushplus_token), "on_result": _make_lr_result_cb("PushPlus")})
+        enqueued_count += 1
+
+    if enqueued_count > 0:
+        _mark_learning_health_sent(state, digest_hash, status_key, sent_at=current)
+        _update_last_result(state, f"自动学习状态变化已投递：{status_key}", _normalize_text, now=current)
+    _write_state(state, state_file=state_file, now=current)
+    messages = [f"自动学习状态变化已投递到 {enqueued_count} 个渠道"] if enqueued_count > 0 else []
     return {"sent_count": enqueued_count, "messages": messages, "errors": []}
 
 

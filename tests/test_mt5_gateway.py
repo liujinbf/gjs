@@ -13,6 +13,7 @@ from quote_models import QuoteRow
 
 
 def test_is_live_tick_rejects_stale_tick():
+    mt5_gateway._broker_utc_offset_sec = None
     tick = SimpleNamespace(time=1_000, bid=1.1, ask=1.2, last=0.0)
     assert mt5_gateway._is_live_tick(tick, now_ts=1_050, max_age_sec=180) is True
     assert mt5_gateway._is_live_tick(tick, now_ts=1_400, max_age_sec=180) is False
@@ -24,6 +25,18 @@ def test_estimate_broker_utc_offset_supports_half_hour_alignment():
         now_ts=1_000_000,
     )
     assert offset == 19_800.0
+
+
+def test_inspect_tick_activity_recalibrates_offset_when_current_offset_is_wrong():
+    mt5_gateway._broker_utc_offset_sec = 1800.0
+    tick = SimpleNamespace(time=1_000, bid=1.1, ask=1.2, last=0.0)
+
+    payload = mt5_gateway._inspect_tick_activity(tick, now_ts=1_050, max_age_sec=180)
+
+    assert payload["is_live"] is True
+    assert payload["offset_recalibrated"] is True
+    assert payload["reason"] == "live"
+    assert mt5_gateway._broker_utc_offset_sec == 0.0
 
 
 def test_is_connection_alive_uses_terminal_info(monkeypatch):
@@ -144,7 +157,7 @@ def test_fetch_quotes_includes_intraday_context(monkeypatch):
 
         @staticmethod
         def symbol_info(symbol):
-            return SimpleNamespace(spread=17.0, point=0.01)
+            return SimpleNamespace(spread=17.0, point=0.01, volume_step=0.1, volume_min=0.1)
 
         @staticmethod
         def symbol_info_tick(symbol):
@@ -176,7 +189,23 @@ def test_fetch_quotes_includes_intraday_context(monkeypatch):
     monkeypatch.setattr(mt5_gateway, "mt5", FakeMt5)
     monkeypatch.setattr(mt5_gateway, "HAS_MT5", True)
     monkeypatch.setattr(mt5_gateway, "initialize_connection", lambda: (True, "ok"))
-    monkeypatch.setattr(mt5_gateway, "_is_live_tick", lambda tick, now_ts=None, max_age_sec=180: True)
+    monkeypatch.setattr(
+        mt5_gateway,
+        "_inspect_tick_activity",
+        lambda tick, now_ts=None, max_age_sec=180: {
+            "is_live": True,
+            "reason": "live",
+            "reason_text": "报价活跃",
+            "diagnostic_text": "最新 tick 约延迟 2 秒，仍在活跃阈值 180 秒内。",
+            "delta_sec": 2.0,
+            "max_age_sec": 180.0,
+            "tick_utc_text": "2026-04-22 12:00:00 UTC",
+            "now_utc_text": "2026-04-22 12:00:02 UTC",
+            "broker_offset_sec": 0.0,
+            "offset_recalibrated": False,
+            "price_available": True,
+        },
+    )
 
     rows = mt5_gateway.fetch_quotes(["XAUUSD"])
     assert len(rows) == 1
@@ -188,6 +217,10 @@ def test_fetch_quotes_includes_intraday_context(monkeypatch):
     assert rows[0]["key_level_state"] in {"near_high", "mid_range", "breakout_above"}
     assert rows[0]["breakout_ready"] is True
     assert "retest_state" in rows[0]
+    assert rows[0]["volume_step"] == 0.1
+    assert rows[0]["volume_min"] == 0.1
+    assert rows[0]["quote_live_reason"] == "live"
+    assert "阈值" in rows[0]["quote_live_diagnostic_text"]
 
 
 def test_fetch_quotes_prefers_live_bid_ask_spread_over_symbol_info(monkeypatch):
@@ -211,11 +244,78 @@ def test_fetch_quotes_prefers_live_bid_ask_spread_over_symbol_info(monkeypatch):
     monkeypatch.setattr(mt5_gateway, "mt5", FakeMt5)
     monkeypatch.setattr(mt5_gateway, "HAS_MT5", True)
     monkeypatch.setattr(mt5_gateway, "initialize_connection", lambda: (True, "ok"))
-    monkeypatch.setattr(mt5_gateway, "_is_live_tick", lambda tick, now_ts=None, max_age_sec=180: True)
+    monkeypatch.setattr(
+        mt5_gateway,
+        "_inspect_tick_activity",
+        lambda tick, now_ts=None, max_age_sec=180: {
+            "is_live": True,
+            "reason": "live",
+            "reason_text": "报价活跃",
+            "diagnostic_text": "最新 tick 约延迟 2 秒，仍在活跃阈值 180 秒内。",
+            "delta_sec": 2.0,
+            "max_age_sec": 180.0,
+            "tick_utc_text": "2026-04-22 12:00:00 UTC",
+            "now_utc_text": "2026-04-22 12:00:02 UTC",
+            "broker_offset_sec": 0.0,
+            "offset_recalibrated": False,
+            "price_available": True,
+        },
+    )
 
     rows = mt5_gateway.fetch_quotes(["XAUUSD"])
     assert len(rows) == 1
     assert rows[0]["spread_points"] == 17.0
+
+
+def test_fetch_quotes_uses_broker_symbol_mapping(monkeypatch):
+    calls = {"select": [], "info": [], "tick": []}
+
+    class FakeMt5:
+        @staticmethod
+        def symbol_select(symbol, enable):
+            calls["select"].append(symbol)
+            return False
+
+        @staticmethod
+        def symbol_info(symbol):
+            calls["info"].append(symbol)
+            return SimpleNamespace(spread=17.0, point=0.01)
+
+        @staticmethod
+        def symbol_info_tick(symbol):
+            calls["tick"].append(symbol)
+            return SimpleNamespace(time=1_000, bid=4759.74, ask=4759.91, last=4759.82)
+
+    monkeypatch.setenv("BROKER_SYMBOL_MAP_JSON", '{"XAUUSD":"GOLD"}')
+    monkeypatch.setattr(mt5_gateway, "mt5", FakeMt5)
+    monkeypatch.setattr(mt5_gateway, "HAS_MT5", True)
+    monkeypatch.setattr(mt5_gateway, "initialize_connection", lambda: (True, "ok"))
+    monkeypatch.setattr(
+        mt5_gateway,
+        "_inspect_tick_activity",
+        lambda tick, now_ts=None, max_age_sec=180: {
+            "is_live": True,
+            "reason": "live",
+            "reason_text": "报价活跃",
+            "diagnostic_text": "最新 tick 约延迟 2 秒，仍在活跃阈值 180 秒内。",
+            "delta_sec": 2.0,
+            "max_age_sec": 180.0,
+            "tick_utc_text": "2026-04-22 12:00:00 UTC",
+            "now_utc_text": "2026-04-22 12:00:02 UTC",
+            "broker_offset_sec": 0.0,
+            "offset_recalibrated": False,
+            "price_available": True,
+        },
+    )
+
+    rows = mt5_gateway.fetch_quotes(["XAUUSD"])
+
+    assert calls["select"] == ["GOLD"]
+    assert calls["info"] == ["GOLD"]
+    assert calls["tick"] == ["GOLD"]
+    assert rows[0]["symbol"] == "XAUUSD"
+    assert rows[0]["broker_symbol"] == "GOLD"
+    assert rows[0]["broker_symbol_mapped"] is True
 
 
 def test_shutdown_connection_resets_broker_offset(monkeypatch):
@@ -255,7 +355,23 @@ def test_fetch_quotes_keeps_other_symbols_alive_when_one_symbol_errors(monkeypat
     monkeypatch.setattr(mt5_gateway, "HAS_MT5", True)
     monkeypatch.setattr(mt5_gateway, "initialize_connection", lambda: (True, "ok"))
     monkeypatch.setattr(mt5_gateway, "_force_reconnect_if_needed", lambda: True)
-    monkeypatch.setattr(mt5_gateway, "_is_live_tick", lambda tick, now_ts=None, max_age_sec=180: True)
+    monkeypatch.setattr(
+        mt5_gateway,
+        "_inspect_tick_activity",
+        lambda tick, now_ts=None, max_age_sec=180: {
+            "is_live": True,
+            "reason": "live",
+            "reason_text": "报价活跃",
+            "diagnostic_text": "最新 tick 约延迟 2 秒，仍在活跃阈值 180 秒内。",
+            "delta_sec": 2.0,
+            "max_age_sec": 180.0,
+            "tick_utc_text": "2026-04-22 12:00:00 UTC",
+            "now_utc_text": "2026-04-22 12:00:02 UTC",
+            "broker_offset_sec": 0.0,
+            "offset_recalibrated": False,
+            "price_available": True,
+        },
+    )
 
     rows = mt5_gateway.fetch_quotes(["XAUUSD", "EURUSD"])
 
@@ -291,7 +407,23 @@ def test_fetch_quotes_does_not_force_double_heartbeat_probe_after_init_success(m
         "_force_reconnect_if_needed",
         lambda: calls.__setitem__("force_reconnect", calls["force_reconnect"] + 1) or True,
     )
-    monkeypatch.setattr(mt5_gateway, "_is_live_tick", lambda tick, now_ts=None, max_age_sec=180: True)
+    monkeypatch.setattr(
+        mt5_gateway,
+        "_inspect_tick_activity",
+        lambda tick, now_ts=None, max_age_sec=180: {
+            "is_live": True,
+            "reason": "live",
+            "reason_text": "报价活跃",
+            "diagnostic_text": "最新 tick 约延迟 2 秒，仍在活跃阈值 180 秒内。",
+            "delta_sec": 2.0,
+            "max_age_sec": 180.0,
+            "tick_utc_text": "2026-04-22 12:00:00 UTC",
+            "now_utc_text": "2026-04-22 12:00:02 UTC",
+            "broker_offset_sec": 0.0,
+            "offset_recalibrated": False,
+            "price_available": True,
+        },
+    )
 
     rows = mt5_gateway.fetch_quotes(["XAUUSD"])
 

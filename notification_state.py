@@ -49,28 +49,44 @@ def _read_state(state_file: Path | None = None) -> dict:
     return {}
 
 
-def _purge_expired_notify_records(state: dict, max_age_days: int = 7) -> int:
+def _purge_expired_notify_records(
+    state: dict,
+    max_age_days: int = 7,
+    now: datetime | None = None,
+) -> int:
     """M-006 修复：清理超过 max_age_days 天的 notified:: 冷却记录，防止无限增长。"""
-    cutoff = datetime.now() - timedelta(days=max(1, int(max_age_days)))
-    expired_keys = []
+    cutoff = (now or datetime.now()) - timedelta(days=max(1, int(max_age_days)))
+    expired_keys = set()
+    expired_group_prefixes = set()
     for key, value in list(state.items()):
         if not str(key).startswith("notified::") and not str(key).startswith("group::"):
             continue
-        # 判断 group:: 的特定字段
-        if str(key).endswith("::last_time") or str(key).startswith("notified::"):
+        if str(key).startswith("notified::"):
             last_time = _parse_time(str(value or ""))
             if last_time is not None and last_time < cutoff:
-                expired_keys.append(key)
-            elif last_time is None and isinstance(value, str):
-                # 字符串值但解析失败，可能是旧格式，保守跳过
-                pass
+                expired_keys.add(str(key))
+            continue
+        if str(key).endswith("::last_time"):
+            last_time = _parse_time(str(value or ""))
+            if last_time is not None and last_time < cutoff:
+                expired_group_prefixes.add(str(key).rsplit("::", 1)[0])
+
+    for prefix in expired_group_prefixes:
+        for key in list(state.keys()):
+            if str(key).startswith(f"{prefix}::"):
+                expired_keys.add(str(key))
+
     for key in expired_keys:
         del state[key]
     return len(expired_keys)
 
 
-def _write_state(state: dict, state_file: Path | None = None) -> None:
-    _purge_expired_notify_records(state, max_age_days=7)
+def _write_state(
+    state: dict,
+    state_file: Path | None = None,
+    now: datetime | None = None,
+) -> None:
+    _purge_expired_notify_records(state, max_age_days=7, now=now)
     if state_file is not None:
         # 显式传入 state_file 时写 JSON（测试隔离路径）
         target = Path(state_file)
@@ -88,9 +104,14 @@ def _write_state(state: dict, state_file: Path | None = None) -> None:
 
 
 
-def _update_last_result(state: dict, text: str, normalize_text) -> None:
+def _update_last_result(
+    state: dict,
+    text: str,
+    normalize_text,
+    now: datetime | None = None,
+) -> None:
     state["last_result_text"] = normalize_text(text)
-    state["last_result_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    state["last_result_time"] = (now or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _should_notify_entry(entry: dict) -> bool:
@@ -106,6 +127,55 @@ def _normalize_event_importance(value: str) -> str:
     return "medium"
 
 
+def _has_structure_model_conflict(entry: dict) -> bool:
+    if not bool(entry.get("model_ready", False)):
+        return False
+    try:
+        probability = float(entry.get("model_win_probability", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return 0.0 < probability < 0.55
+
+
+def _has_structure_event_block(entry: dict, importance: str) -> bool:
+    if importance != "high":
+        return False
+    event_note = str(entry.get("event_note", "") or "").strip()
+    detail = str(entry.get("detail", "") or "").strip()
+    combined = f"{event_note} {detail}".strip()
+    if not combined:
+        return False
+    block_phrases = (
+        "先别抢第一脚",
+        "等待事件落地",
+        "先等事件落地",
+        "先观望",
+        "先观察",
+        "不新开仓",
+    )
+    return any(phrase in combined for phrase in block_phrases)
+
+
+def _has_structure_external_conflict(entry: dict, signal_side: str) -> bool:
+    external_bias_note = str(entry.get("external_bias_note", "") or "").strip()
+    if not external_bias_note or signal_side not in {"long", "short"}:
+        return False
+    if signal_side == "long" and "偏空" in external_bias_note:
+        return True
+    if signal_side == "short" and "偏多" in external_bias_note:
+        return True
+    return False
+
+
+def _has_structure_spread_block(entry: dict) -> bool:
+    try:
+        spread_points = float(entry.get("baseline_spread_points", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    # 用户侧结构提醒只保留“真正能动手”的时机，点差明显放大时直接静默。
+    return spread_points >= 30.0
+
+
 def _get_notify_priority(entry: dict) -> int:
     category = str(entry.get("category", "") or "").strip()
     title = str(entry.get("title", "") or "").strip()
@@ -117,47 +187,51 @@ def _get_notify_priority(entry: dict) -> int:
     if category == "mt5":
         return 5
     if category == "session":
-        return 3
+        # 休市/静态报价更多属于系统状态，不直接产生交易动作，
+        # 留在界面即可，不再外推给用户，避免“现在也别动手”类提醒刷屏。
+        return 0
     if category == "source":
-        return 4 if tone == AlertTone.WARNING.value else 2
+        # 数据源告警只保留真正的 warning；普通降级/等待同步不再打扰用户。
+        return 4 if tone == AlertTone.WARNING.value else 0
+    if category == "structure_cancel":
+        return 4
     if category == "structure":
         rr_ratio = float(entry.get("risk_reward_ratio", 0.0) or 0.0)
         stage = str(entry.get("structure_entry_stage", "") or "").strip().lower()
+        signal_side = str(entry.get("signal_side", "") or "").strip().lower()
+        zone_side_text = str(entry.get("entry_zone_side_text", "") or "").strip()
         if stage == "inside_zone":
+            # 用户侧只收真正最漂亮的执行位：
+            # - 多单只推下沿承接
+            # - 空单只推上沿承压
+            # 其余（中段、反向边缘、方向缺失）均静默，留在系统内部留痕。
+            is_preferred_long = signal_side == "long" and zone_side_text == "下沿"
+            is_preferred_short = signal_side == "short" and zone_side_text == "上沿"
+            if not (is_preferred_long or is_preferred_short):
+                return 0
+            if _has_structure_model_conflict(entry):
+                return 0
+            if _has_structure_event_block(entry, importance):
+                return 0
+            if _has_structure_external_conflict(entry, signal_side):
+                return 0
+            if _has_structure_spread_block(entry):
+                return 0
             if rr_ratio >= 1.6:
                 return 4
             if rr_ratio >= 1.3:
                 return 3
             return 2
-        if stage == "near_zone":
-            if rr_ratio >= 1.6:
-                return 3
-            if rr_ratio >= 1.3:
-                return 2
-            return 1
-        if rr_ratio >= 2.0:
-            return 3
-        if rr_ratio >= 1.3:
-            return 2
+        # 普通结构候选、靠近观察区间均保留在留痕层，不再主动推给用户；
+        # 用户只需要收到真正进入执行位的提醒。
         return 0
     if category == "recovery":
         return 3 if importance == "high" else 2
     if category == "macro":
-        macro_actionable = bool(entry.get("macro_actionable", False))
-        macro_scope_bound = bool(entry.get("macro_scope_bound", False))
-        macro_has_result = bool(entry.get("macro_has_result", False))
-        has_explicit_scope_flag = "macro_scope_bound" in entry or "macro_has_result" in entry
-        event_name = str(entry.get("event_name", "") or "").strip()
-        event_note = str(entry.get("event_note", "") or "").strip()
-        result_summary = str(entry.get("event_result_summary_text", "") or "").strip()
-        if not (macro_actionable or event_name or event_note or result_summary):
-            return 0
-        if result_summary or macro_has_result:
-            return 4 if importance == "high" else 3
-        if importance == "high" and not has_explicit_scope_flag:
-            return 3
-        if importance == "high" and macro_scope_bound:
-            return 3
+        # 用户侧推送只保留真正能动手或需要立即处理的消息；
+        # 宏观类“继续观望/等待落地”会快速造成提醒疲劳，
+        # 即使标题改成“状态更新”，仍会稀释真正的出手提醒。
+        # 因此宏观提醒继续保留在系统留痕与界面中，但默认不再外推给用户。
         return 0
     if category == "spread" or "点差" in title:
         if tone == AlertTone.WARNING.value:
@@ -197,6 +271,8 @@ def _build_notify_group_key(entry: dict) -> str:
     if category == "structure":
         stage = str(entry.get("structure_entry_stage", "") or "").strip().lower() or "candidate"
         return f"structure::{stage}::{symbol or title or 'setup'}"
+    if category == "structure_cancel":
+        return f"structure_cancel::{symbol or title or 'cancel'}"
     if category == "source":
         source_name = str(entry.get("source_name", "") or "").strip().lower()
         return f"source::{source_name or title or 'source'}"
@@ -220,6 +296,7 @@ def _read_group_state(state: dict, channel_key: str, group_key: str) -> dict:
         "last_time": _parse_time(state.get(_build_group_state_key(channel_key, group_key, "last_time"), "")),
         "last_priority": int(state.get(_build_group_state_key(channel_key, group_key, "last_priority"), 0) or 0),
         "pending_count": int(state.get(_build_group_state_key(channel_key, group_key, "pending_count"), 0) or 0),
+        "last_fingerprint": str(state.get(_build_group_state_key(channel_key, group_key, "last_fingerprint"), "") or "").strip(),
     }
 
 
@@ -235,12 +312,14 @@ def _mark_group_sent(
     channel_key: str,
     group_key: str,
     priority: int,
+    fingerprint: str = "",
     sent_at: datetime | None = None,
 ) -> None:
     current = sent_at or datetime.now()
     state[_build_group_state_key(channel_key, group_key, "last_time")] = current.strftime("%Y-%m-%d %H:%M:%S")
     state[_build_group_state_key(channel_key, group_key, "last_priority")] = int(priority)
     state[_build_group_state_key(channel_key, group_key, "pending_count")] = 0
+    state[_build_group_state_key(channel_key, group_key, "last_fingerprint")] = str(fingerprint or "").strip()
 
 
 def _read_learning_digest_state(state: dict) -> dict:
@@ -254,6 +333,26 @@ def _mark_learning_digest_sent(state: dict, digest_hash: str, sent_at: datetime 
     current = sent_at or datetime.now()
     state["learning_digest::last_time"] = current.strftime("%Y-%m-%d %H:%M:%S")
     state["learning_digest::last_hash"] = str(digest_hash or "").strip()
+
+
+def _read_learning_health_state(state: dict) -> dict:
+    return {
+        "last_time": _parse_time(state.get("learning_health::last_time", "")),
+        "last_hash": str(state.get("learning_health::last_hash", "") or "").strip(),
+        "last_status_key": str(state.get("learning_health::last_status_key", "") or "").strip(),
+    }
+
+
+def _mark_learning_health_sent(
+    state: dict,
+    digest_hash: str,
+    status_key: str,
+    sent_at: datetime | None = None,
+) -> None:
+    current = sent_at or datetime.now()
+    state["learning_health::last_time"] = current.strftime("%Y-%m-%d %H:%M:%S")
+    state["learning_health::last_hash"] = str(digest_hash or "").strip()
+    state["learning_health::last_status_key"] = str(status_key or "").strip()
 
 
 def _configured_channels(config: MetalMonitorConfig) -> list[tuple[str, str, str]]:

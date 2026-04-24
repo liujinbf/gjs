@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from datetime import datetime
+from pathlib import Path
 from urllib import error, request
 
-from app_config import MetalMonitorConfig
+from app_config import MetalMonitorConfig, PROJECT_DIR
 from knowledge_rulebook import build_rulebook
 from prompt_templates import AI_BRIEF_SYSTEM_PROMPT, build_metal_brief_prompt
 from backtest_engine import extract_signal_meta, get_historical_win_rate
@@ -19,6 +22,12 @@ except ImportError:
     _json_repair_loads = None
 
 logger = logging.getLogger(__name__)
+
+JSON_CODE_BLOCK_PATTERN = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.IGNORECASE | re.DOTALL)
+RUNTIME_DIR = PROJECT_DIR / ".runtime"
+AI_RESPONSE_AUDIT_FILE = RUNTIME_DIR / "ai_response_audit.jsonl"
+MAX_AI_RESPONSE_AUDIT_LINES = 300
+MAX_AI_RESPONSE_TEXT_CHARS = 8000
 
 
 def build_snapshot_prompt(snapshot: dict, rulebook: dict | None = None) -> str:
@@ -125,23 +134,111 @@ def _extract_anthropic_content(response: dict) -> str:
     return content
 
 
-def _load_json_dict(text: str) -> dict | None:
-    raw_text = str(text or "").strip()
-    if not raw_text:
+def _atomic_write_text(target: Path, text: str) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_file = target.with_name(f"{target.name}.tmp")
+    temp_file.write_text(text, encoding="utf-8")
+    temp_file.replace(target)
+
+
+def _append_ai_response_audit(entry: dict, audit_file: Path | None = None) -> int:
+    target = Path(audit_file) if audit_file else AI_RESPONSE_AUDIT_FILE
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = dict(entry or {})
+    payload.setdefault("occurred_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    raw_content = str(payload.get("raw_content", "") or "")
+    payload["raw_content_length"] = len(raw_content)
+    if len(raw_content) > MAX_AI_RESPONSE_TEXT_CHARS:
+        payload["raw_content"] = raw_content[:MAX_AI_RESPONSE_TEXT_CHARS]
+        payload["raw_content_truncated"] = True
+    else:
+        payload["raw_content_truncated"] = False
+
+    with target.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    try:
+        lines = [line for line in target.read_text(encoding="utf-8").splitlines() if line.strip()]
+        if len(lines) > MAX_AI_RESPONSE_AUDIT_LINES:
+            _atomic_write_text(target, "\n".join(lines[-MAX_AI_RESPONSE_AUDIT_LINES:]) + "\n")
+    except OSError:
+        pass
+    return 1
+
+
+def _try_load_json_dict(raw_text: str) -> dict | None:
+    candidate = str(raw_text or "").strip()
+    if not candidate:
         return None
     try:
-        data = json.loads(raw_text)
+        data = json.loads(candidate)
         if isinstance(data, dict):
             return data
     except Exception:
         pass
     if _json_repair_loads is not None:
         try:
-            data = _json_repair_loads(raw_text)
+            data = _json_repair_loads(candidate)
             if isinstance(data, dict):
                 return data
         except Exception:
             pass
+    return None
+
+
+def _iter_json_object_candidates(text: str):
+    raw_text = str(text or "")
+    for match in JSON_CODE_BLOCK_PATTERN.finditer(raw_text):
+        candidate = str(match.group(1) or "").strip()
+        if candidate:
+            yield candidate
+
+    start = -1
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, char in enumerate(raw_text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+            continue
+        if char == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                candidate = raw_text[start:index + 1].strip()
+                if candidate:
+                    yield candidate
+                start = -1
+
+
+def _load_json_dict(text: str) -> dict | None:
+    raw_text = str(text or "").strip()
+    if not raw_text:
+        return None
+    direct = _try_load_json_dict(raw_text)
+    if isinstance(direct, dict):
+        return direct
+
+    seen = {raw_text}
+    for candidate in _iter_json_object_candidates(raw_text):
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        parsed = _try_load_json_dict(candidate)
+        if isinstance(parsed, dict):
+            return parsed
     return None
 
 def _normalize_brief_result(content_text: str) -> dict:
@@ -203,15 +300,67 @@ def _normalize_or_raise_structured(content_text: str) -> dict:
     return normalized
 
 
+def _finalize_ai_parse_result(
+    normalized: dict,
+    *,
+    raw_content: str,
+    provider: str,
+    api_base: str,
+    model: str,
+    parse_mode: str,
+    parse_error: str = "",
+) -> dict:
+    result = dict(normalized or {})
+    signal_meta = dict(result.get("signal_meta", {}) or {})
+    raw_text = str(raw_content or "")
+    audit_entry = {
+        "provider": str(provider or "").strip(),
+        "api_base": str(api_base or "").strip(),
+        "model": str(model or "").strip(),
+        "parse_mode": str(parse_mode or "").strip(),
+        "parse_ok": bool(result.get("used_structured_payload", False)),
+        "parse_error": str(parse_error or "").strip(),
+        "signal_action": str(signal_meta.get("action", "neutral") or "neutral").strip().lower(),
+        "signal_meta_valid": bool(result.get("signal_meta_valid", False)),
+        "signal_meta_reason": str(result.get("signal_meta_reason", "") or "").strip(),
+        "raw_content": raw_text,
+    }
+    try:
+        _append_ai_response_audit(audit_entry)
+        logged = True
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("AI 原始响应审计写入失败：%s", exc)
+        logged = False
+
+    result.update(
+        {
+            "ai_parse_mode": str(parse_mode or "").strip(),
+            "ai_raw_response_logged": logged,
+            "ai_raw_response_length": len(raw_text),
+            "ai_raw_response_excerpt": raw_text[:500],
+        }
+    )
+    return result
+
+
 def _request_openai_brief_result(api_base: str, payload: dict, api_key: str) -> dict:
     url = _build_chat_completions_url(api_base)
+    model = str(payload.get("model", "") or "").strip()
     structured_payload = dict(payload)
     structured_payload["response_format"] = {"type": "json_object"}
     try:
         response = _post_json(url, structured_payload, api_key=api_key)
         content = _extract_openai_content(response)
         try:
-            return _normalize_or_raise_structured(content)
+            normalized = _normalize_or_raise_structured(content)
+            return _finalize_ai_parse_result(
+                normalized,
+                raw_content=content,
+                provider="openai-compatible",
+                api_base=api_base,
+                model=model,
+                parse_mode="json_mode",
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("OpenAI-compatible JSON 结构校验失败，尝试一次自愈重试：%s", exc)
             retry_payload = dict(structured_payload)
@@ -225,15 +374,35 @@ def _request_openai_brief_result(api_base: str, payload: dict, api_key: str) -> 
             retry_payload["messages"] = retry_messages
             retry_response = _post_json(url, retry_payload, api_key=api_key)
             retry_content = _extract_openai_content(retry_response)
-            return _normalize_or_raise_structured(retry_content)
+            normalized = _normalize_or_raise_structured(retry_content)
+            return _finalize_ai_parse_result(
+                normalized,
+                raw_content=retry_content,
+                provider="openai-compatible",
+                api_base=api_base,
+                model=model,
+                parse_mode="json_retry",
+                parse_error=str(exc),
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning("OpenAI-compatible JSON mode 失败，回退普通文本模式：%s", exc)
         response = _post_json(url, payload, api_key=api_key)
-        return _normalize_brief_result(_extract_openai_content(response))
+        content = _extract_openai_content(response)
+        normalized = _normalize_brief_result(content)
+        return _finalize_ai_parse_result(
+            normalized,
+            raw_content=content,
+            provider="openai-compatible",
+            api_base=api_base,
+            model=model,
+            parse_mode="text_fallback",
+            parse_error=str(exc),
+        )
 
 
 def _request_anthropic_brief_result(api_base: str, payload: dict, api_key: str) -> dict:
     url = f"{api_base}/messages"
+    model = str(payload.get("model", "") or "").strip()
     headers = {
         "Content-Type": "application/json; charset=utf-8",
         "x-api-key": api_key,
@@ -242,7 +411,15 @@ def _request_anthropic_brief_result(api_base: str, payload: dict, api_key: str) 
     response = _post_json_with_headers(url, payload, headers=headers)
     content = _extract_anthropic_content(response)
     try:
-        return _normalize_or_raise_structured(content)
+        normalized = _normalize_or_raise_structured(content)
+        return _finalize_ai_parse_result(
+            normalized,
+            raw_content=content,
+            provider="anthropic",
+            api_base=api_base,
+            model=model,
+            parse_mode="json_mode",
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Anthropic JSON 结构校验失败，尝试一次自愈重试：%s", exc)
         retry_payload = dict(payload)
@@ -256,7 +433,16 @@ def _request_anthropic_brief_result(api_base: str, payload: dict, api_key: str) 
         retry_payload["messages"] = retry_messages
         retry_response = _post_json_with_headers(url, retry_payload, headers=headers)
         retry_content = _extract_anthropic_content(retry_response)
-        return _normalize_or_raise_structured(retry_content)
+        normalized = _normalize_or_raise_structured(retry_content)
+        return _finalize_ai_parse_result(
+            normalized,
+            raw_content=retry_content,
+            provider="anthropic",
+            api_base=api_base,
+            model=model,
+            parse_mode="json_retry",
+            parse_error=str(exc),
+        )
 
 
 def request_ai_brief(
@@ -314,6 +500,11 @@ def request_ai_brief(
             "signal_schema_version": normalized["signal_schema_version"],
             "signal_meta_valid": normalized["signal_meta_valid"],
             "signal_meta_reason": normalized["signal_meta_reason"],
+            "used_structured_payload": bool(normalized.get("used_structured_payload", False)),
+            "ai_parse_mode": str(normalized.get("ai_parse_mode", "") or "").strip(),
+            "ai_raw_response_logged": bool(normalized.get("ai_raw_response_logged", False)),
+            "ai_raw_response_length": int(normalized.get("ai_raw_response_length", 0) or 0),
+            "ai_raw_response_excerpt": str(normalized.get("ai_raw_response_excerpt", "") or ""),
             "model": model,
             "api_base": api_base,
             "rulebook_summary_text": str(rulebook.get("summary_text", "") or "").strip(),

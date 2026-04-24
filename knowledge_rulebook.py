@@ -118,6 +118,18 @@ def build_rulebook(
                 """,
                 (int(horizon_min), max(1, int(rejected_limit))),
             ).fetchall()
+            reference_rows = conn.execute(
+                """
+                SELECT kr.rule_text, kr.category, rs.sample_count, rs.success_rate, rs.score
+                FROM rule_governance rg
+                JOIN knowledge_rules kr ON kr.id = rg.rule_id
+                JOIN rule_scores rs ON rs.rule_id = rg.rule_id AND rs.horizon_min = rg.horizon_min
+                WHERE rg.horizon_min = ? AND rg.governance_status = 'reference'
+                ORDER BY kr.id ASC
+                LIMIT ?
+                """,
+                (int(horizon_min), max(1, int(validated_limit))),
+            ).fetchall()
         else:
             active_rows = conn.execute(
                 """
@@ -151,6 +163,17 @@ def build_rulebook(
                 LIMIT ?
                 """,
                 (int(horizon_min), max(1, int(rejected_limit))),
+            ).fetchall()
+            reference_rows = conn.execute(
+                """
+                SELECT kr.rule_text, kr.category, rs.sample_count, rs.success_rate, rs.score, rs.validation_status
+                FROM rule_scores rs
+                JOIN knowledge_rules kr ON kr.id = rs.rule_id
+                WHERE rs.horizon_min = ? AND rs.validation_status = 'reference'
+                ORDER BY kr.id ASC
+                LIMIT ?
+                """,
+                (int(horizon_min), max(1, int(validated_limit))),
             ).fetchall()
 
         regime_rows = []
@@ -191,6 +214,7 @@ def build_rulebook(
     validated_rules = [_format_rule_line(row, prefix="- ") for row in active_rows]
     candidate_rules = [_format_rule_line(row, prefix="- ") for row in watch_rows]
     rejected_rules = [_format_rule_line(row, prefix="- ") for row in frozen_rows]
+    reference_rules = [_format_rule_line(row, prefix="- ") for row in reference_rows]
     regime_preferred_rules = [
         _format_rule_line(row, prefix="- ")
         for row in regime_rows
@@ -214,12 +238,16 @@ def build_rulebook(
     elif candidate_rules:
         active_rules_text = "\n".join(candidate_rules)
         active_summary = "当前暂无已验证规则，先参考候选规则并严格服从当前快照风控。"
+    elif reference_rules:
+        active_rules_text = "\n".join(reference_rules)
+        active_summary = f"当前自动学习规则仍不足，先参考 {len(reference_rules)} 条基础知识规则并服从当前快照风控。"
     else:
         active_rules_text = "暂无已验证规则，优先服从当前快照、点差状态和事件窗口纪律。"
         active_summary = "当前规则库样本仍不足，先以当前快照和风控纪律为主。"
 
     candidate_rules_text = "\n".join(candidate_rules) if candidate_rules else "暂无候选规则。"
     rejected_rules_text = "\n".join(rejected_rules) if rejected_rules else "暂无明确淘汰规则。"
+    reference_rules_text = "\n".join(reference_rules) if reference_rules else "暂无基础参考规则。"
     regime_rules_text = (
         "\n".join(regime_preferred_rules)
         if regime_preferred_rules
@@ -234,6 +262,7 @@ def build_rulebook(
         "validated_rules": validated_rules,
         "candidate_rules": candidate_rules,
         "rejected_rules": rejected_rules,
+        "reference_rules": reference_rules,
         "regime_rules": regime_preferred_rules,
         "regime_preferred_rules": regime_preferred_rules,
         "regime_watch_rules": regime_watch_rules,
@@ -241,6 +270,7 @@ def build_rulebook(
         "active_rules_text": active_rules_text,
         "candidate_rules_text": candidate_rules_text,
         "rejected_rules_text": rejected_rules_text,
+        "reference_rules_text": reference_rules_text,
         "regime_rules_text": regime_rules_text,
         "regime_watch_rules_text": regime_watch_rules_text,
         "regime_avoid_rules_text": regime_avoid_rules_text,

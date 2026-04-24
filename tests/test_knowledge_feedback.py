@@ -6,7 +6,13 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from knowledge_base import import_markdown_source
-from knowledge_feedback import record_user_feedback, refresh_rule_feedback_scores, summarize_feedback_stats
+from knowledge_feedback import (
+    get_feedback_push_policy,
+    record_user_feedback,
+    refresh_feedback_push_policy,
+    refresh_rule_feedback_scores,
+    summarize_feedback_stats,
+)
 from knowledge_governance import refresh_rule_governance, summarize_rule_governance
 from knowledge_runtime import backfill_snapshot_outcomes, record_snapshot
 from knowledge_scoring import match_rules_to_snapshots, refresh_rule_scores
@@ -63,7 +69,7 @@ def _prepare_feedback_runtime(db_path: Path) -> None:
 """,
         encoding="utf-8",
     )
-    import_markdown_source(file_path, db_path=db_path)
+    import_markdown_source(file_path, db_path=db_path, source_type="auto_miner")
     for idx, price in enumerate([100.00, 100.18, 100.35, 100.48, 100.62, 100.78, 100.90]):
         note = "回调至关键支撑位后企稳，等待回踩确认" if idx < 4 else "连续冲高时直接追多"
         record_snapshot(
@@ -109,6 +115,40 @@ def test_refresh_rule_feedback_scores_and_summary(tmp_path):
     assert summary["too_late_count"] == 1
     assert summary["noise_count"] == 1
     assert isinstance(summary["top_negative_rules"], list)
+    assert isinstance(summary["action_suggestions"], list)
+
+
+def test_feedback_summary_translates_patterns_to_action_suggestions(tmp_path):
+    db_path = tmp_path / "knowledge.db"
+    _prepare_feedback_runtime(db_path)
+
+    record_user_feedback("XAUUSD", "太晚", snapshot_time="2026-04-13 10:00:00", feedback_text="提醒偏晚", db_path=db_path)
+    record_user_feedback("XAUUSD", "太晚了", snapshot_time="2026-04-13 10:10:00", feedback_text="已经冲出去了", db_path=db_path)
+    record_user_feedback("XAUUSD", "噪音", snapshot_time="2026-04-13 10:20:00", feedback_text="这类提醒太多", db_path=db_path)
+    record_user_feedback("XAUUSD", "噪音", snapshot_time="2026-04-13 10:30:00", feedback_text="不够干净", db_path=db_path)
+
+    summary = summarize_feedback_stats(db_path=db_path, days=30, now=datetime(2026, 4, 13, 13, 0, 0))
+    action_keys = {item["action_key"] for item in summary["action_suggestions"]}
+
+    assert "advance_warning" in action_keys
+    assert "reduce_noise" in action_keys
+
+
+def test_refresh_feedback_push_policy_persists_lightweight_notification_policy(tmp_path):
+    db_path = tmp_path / "knowledge.db"
+    _prepare_feedback_runtime(db_path)
+
+    record_user_feedback("XAUUSD", "噪音", snapshot_time="2026-04-13 10:00:00", feedback_text="提醒太多", db_path=db_path)
+    record_user_feedback("XAUUSD", "噪音", snapshot_time="2026-04-13 10:10:00", feedback_text="不够干净", db_path=db_path)
+    record_user_feedback("XAUUSD", "风险太高", snapshot_time="2026-04-13 10:20:00", feedback_text="这类信号风险大", db_path=db_path)
+
+    policy = refresh_feedback_push_policy(db_path=db_path, days=30, now=datetime(2026, 4, 13, 13, 0, 0))
+    stored_policy = get_feedback_push_policy(db_path=db_path)
+
+    assert policy["active"] is True
+    assert policy["reduce_noise"] is True
+    assert policy["tighten_risk"] is True
+    assert stored_policy["min_score_boost"] >= 15
 
 
 def test_negative_feedback_can_downgrade_validated_rule(tmp_path):

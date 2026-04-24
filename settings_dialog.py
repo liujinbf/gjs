@@ -1,8 +1,11 @@
+import threading
+
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -45,9 +48,14 @@ def _build_ai_test_request(base_url: str, api_key: str) -> tuple[str, dict[str, 
 
 
 class MetalSettingsDialog(QDialog):
+    ai_test_result_ready = Signal(dict)
+    notification_test_result_ready = Signal(dict)
+
     def __init__(self, config: MetalMonitorConfig, parent=None):
         super().__init__(parent)
         self._config = config
+        self.ai_test_result_ready.connect(self._on_ai_test_result)
+        self.notification_test_result_ready.connect(self._on_notification_test_result)
         self.setWindowTitle("贵金属监控设置")
         self.setMinimumWidth(560)
         self._build_ui()
@@ -223,12 +231,139 @@ class MetalSettingsDialog(QDialog):
 
         self.tabs.addTab(tab_ai, "AI与推送")
 
+        # --- Tab 4: 交易与风控 ---
+        tab_trading = QWidget()
+        form_trading = QFormLayout(tab_trading)
+        form_trading.setSpacing(10)
+
+        self.chk_live_trade = QCheckBox("🔴 开启全自动实盘量化交易 (真金白银模式)")
+        self.chk_live_trade.setStyleSheet("color: #dc2626; font-weight: bold;")
+        self.chk_live_trade.setChecked(self._config.trade_mode == "live")
+        self.chk_live_trade.clicked.connect(self._on_live_trade_clicked)
+        form_trading.addRow("交易模式：", self.chk_live_trade)
+
+        self.spin_max_drawdown = QSpinBox()
+        self.spin_max_drawdown.setRange(1, 100)
+        self.spin_max_drawdown.setValue(int(float(getattr(self._config, "live_max_drawdown_pct", 0.05)) * 100))
+        self.spin_max_drawdown.setSuffix(" %")
+        form_trading.addRow("日内最大亏损断电阈值：", self.spin_max_drawdown)
+
+        self.spin_sim_initial_balance = QDoubleSpinBox()
+        self.spin_sim_initial_balance.setRange(100.0, 1000000.0)
+        self.spin_sim_initial_balance.setDecimals(0)
+        self.spin_sim_initial_balance.setSingleStep(100.0)
+        self.spin_sim_initial_balance.setValue(float(getattr(self._config, "sim_initial_balance", 1000.0) or 1000.0))
+        self.spin_sim_initial_balance.setPrefix("$")
+        form_trading.addRow("模拟盘起始本金：", self.spin_sim_initial_balance)
+
+        self.spin_sim_exploratory_base_balance = QDoubleSpinBox()
+        self.spin_sim_exploratory_base_balance.setRange(100.0, 1000000.0)
+        self.spin_sim_exploratory_base_balance.setDecimals(0)
+        self.spin_sim_exploratory_base_balance.setSingleStep(100.0)
+        self.spin_sim_exploratory_base_balance.setValue(
+            float(getattr(self._config, "sim_exploratory_base_balance", 1000.0) or 1000.0)
+        )
+        self.spin_sim_exploratory_base_balance.setPrefix("$")
+        form_trading.addRow("探索试仓固定本金：", self.spin_sim_exploratory_base_balance)
+
+        self.spin_sim_no_tp2_lock_r = QDoubleSpinBox()
+        self.spin_sim_no_tp2_lock_r.setRange(0.10, 5.00)
+        self.spin_sim_no_tp2_lock_r.setDecimals(2)
+        self.spin_sim_no_tp2_lock_r.setSingleStep(0.05)
+        self.spin_sim_no_tp2_lock_r.setValue(float(getattr(self._config, "sim_no_tp2_lock_r", 0.5) or 0.5))
+        self.spin_sim_no_tp2_lock_r.setSuffix(" R")
+        form_trading.addRow("无 TP2 保本触发：", self.spin_sim_no_tp2_lock_r)
+
+        self.spin_sim_no_tp2_partial_close_ratio = QDoubleSpinBox()
+        self.spin_sim_no_tp2_partial_close_ratio.setRange(0.10, 0.90)
+        self.spin_sim_no_tp2_partial_close_ratio.setDecimals(2)
+        self.spin_sim_no_tp2_partial_close_ratio.setSingleStep(0.05)
+        self.spin_sim_no_tp2_partial_close_ratio.setValue(
+            float(getattr(self._config, "sim_no_tp2_partial_close_ratio", 0.5) or 0.5)
+        )
+        self.spin_sim_no_tp2_partial_close_ratio.setSuffix(" 仓")
+        form_trading.addRow("无 TP2 首次减仓：", self.spin_sim_no_tp2_partial_close_ratio)
+
+        self.spin_sim_min_rr = QDoubleSpinBox()
+        self.spin_sim_min_rr.setRange(0.50, 10.00)
+        self.spin_sim_min_rr.setDecimals(2)
+        self.spin_sim_min_rr.setSingleStep(0.05)
+        self.spin_sim_min_rr.setValue(float(getattr(self._config, "sim_min_rr", 1.6) or 1.6))
+        self.spin_sim_min_rr.setSuffix(" R")
+        form_trading.addRow("自动试仓标准 RR：", self.spin_sim_min_rr)
+
+        strategy_rr = dict(getattr(self._config, "sim_strategy_min_rr", {}) or {})
+        self.spin_sim_rr_early_momentum = self._build_rr_spin(strategy_rr.get("early_momentum", 1.30))
+        form_trading.addRow("早期动能 RR：", self.spin_sim_rr_early_momentum)
+        self.spin_sim_rr_direct_momentum = self._build_rr_spin(strategy_rr.get("direct_momentum", 1.40))
+        form_trading.addRow("直线动能 RR：", self.spin_sim_rr_direct_momentum)
+        self.spin_sim_rr_pullback_sniper = self._build_rr_spin(strategy_rr.get("pullback_sniper_probe", 1.45))
+        form_trading.addRow("回调狙击 RR：", self.spin_sim_rr_pullback_sniper)
+        self.spin_sim_rr_directional_probe = self._build_rr_spin(strategy_rr.get("directional_probe", 1.80))
+        form_trading.addRow("方向试仓 RR：", self.spin_sim_rr_directional_probe)
+
+        self.spin_sim_relaxed_rr = QDoubleSpinBox()
+        self.spin_sim_relaxed_rr.setRange(0.50, 10.00)
+        self.spin_sim_relaxed_rr.setDecimals(2)
+        self.spin_sim_relaxed_rr.setSingleStep(0.05)
+        self.spin_sim_relaxed_rr.setValue(float(getattr(self._config, "sim_relaxed_rr", 1.3) or 1.3))
+        self.spin_sim_relaxed_rr.setSuffix(" R")
+        form_trading.addRow("模型放宽 RR：", self.spin_sim_relaxed_rr)
+
+        self.spin_sim_model_min_probability = QDoubleSpinBox()
+        self.spin_sim_model_min_probability.setRange(0.00, 1.00)
+        self.spin_sim_model_min_probability.setDecimals(2)
+        self.spin_sim_model_min_probability.setSingleStep(0.01)
+        self.spin_sim_model_min_probability.setValue(
+            float(getattr(self._config, "sim_model_min_probability", 0.68) or 0.68)
+        )
+        self.spin_sim_model_min_probability.setSuffix(" 胜率")
+        form_trading.addRow("模型确认胜率：", self.spin_sim_model_min_probability)
+
+        self.spin_sim_exploratory_daily_limit = QSpinBox()
+        self.spin_sim_exploratory_daily_limit.setRange(0, 50)
+        self.spin_sim_exploratory_daily_limit.setValue(
+            int(getattr(self._config, "sim_exploratory_daily_limit", 3) or 0)
+        )
+        self.spin_sim_exploratory_daily_limit.setSuffix(" 次/日")
+        form_trading.addRow("探索试仓上限：", self.spin_sim_exploratory_daily_limit)
+
+        strategy_daily_limit = dict(getattr(self._config, "sim_strategy_daily_limit", {}) or {})
+        self.spin_sim_limit_early_momentum = self._build_limit_spin(strategy_daily_limit.get("early_momentum", 3), suffix=" 次/日")
+        form_trading.addRow("早期动能日上限：", self.spin_sim_limit_early_momentum)
+        self.spin_sim_limit_direct_momentum = self._build_limit_spin(strategy_daily_limit.get("direct_momentum", 3), suffix=" 次/日")
+        form_trading.addRow("直线动能日上限：", self.spin_sim_limit_direct_momentum)
+        self.spin_sim_limit_pullback_sniper = self._build_limit_spin(strategy_daily_limit.get("pullback_sniper_probe", 3), suffix=" 次/日")
+        form_trading.addRow("回调狙击日上限：", self.spin_sim_limit_pullback_sniper)
+        self.spin_sim_limit_directional_probe = self._build_limit_spin(strategy_daily_limit.get("directional_probe", 3), suffix=" 次/日")
+        form_trading.addRow("方向试仓日上限：", self.spin_sim_limit_directional_probe)
+
+        self.spin_sim_exploratory_cooldown_min = QSpinBox()
+        self.spin_sim_exploratory_cooldown_min.setRange(0, 240)
+        self.spin_sim_exploratory_cooldown_min.setValue(
+            int(getattr(self._config, "sim_exploratory_cooldown_min", 10) or 0)
+        )
+        self.spin_sim_exploratory_cooldown_min.setSuffix(" 分钟")
+        form_trading.addRow("探索同向冷却：", self.spin_sim_exploratory_cooldown_min)
+
+        strategy_cooldown = dict(getattr(self._config, "sim_strategy_cooldown_min", {}) or {})
+        self.spin_sim_cooldown_early_momentum = self._build_limit_spin(strategy_cooldown.get("early_momentum", 10), maximum=240, suffix=" 分钟")
+        form_trading.addRow("早期动能冷却：", self.spin_sim_cooldown_early_momentum)
+        self.spin_sim_cooldown_direct_momentum = self._build_limit_spin(strategy_cooldown.get("direct_momentum", 10), maximum=240, suffix=" 分钟")
+        form_trading.addRow("直线动能冷却：", self.spin_sim_cooldown_direct_momentum)
+        self.spin_sim_cooldown_pullback_sniper = self._build_limit_spin(strategy_cooldown.get("pullback_sniper_probe", 10), maximum=240, suffix=" 分钟")
+        form_trading.addRow("回调狙击冷却：", self.spin_sim_cooldown_pullback_sniper)
+        self.spin_sim_cooldown_directional_probe = self._build_limit_spin(strategy_cooldown.get("directional_probe", 10), maximum=240, suffix=" 分钟")
+        form_trading.addRow("方向试仓冷却：", self.spin_sim_cooldown_directional_probe)
+
+        self.tabs.addTab(tab_trading, "交易与风控")
+
         layout.addWidget(self.tabs)
 
         btn_row = QHBoxLayout()
-        test_btn = QPushButton("测试消息推送")
-        test_btn.clicked.connect(self._test_notification)
-        btn_row.addWidget(test_btn)
+        self.btn_test_notification = QPushButton("测试消息推送")
+        self.btn_test_notification.clicked.connect(self._test_notification)
+        btn_row.addWidget(self.btn_test_notification)
         btn_row.addStretch(1)
         cancel_btn = QPushButton("取消")
         save_btn = QPushButton("保存设置")
@@ -243,6 +378,23 @@ class MetalSettingsDialog(QDialog):
         self._sync_ai_push_controls()
         self._sync_event_auto_controls()
         self._refresh_notify_status()
+
+    def _build_rr_spin(self, value: float) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setRange(0.50, 10.00)
+        spin.setDecimals(2)
+        spin.setSingleStep(0.05)
+        spin.setValue(float(value or 1.60))
+        spin.setSuffix(" R")
+        return spin
+
+    def _build_limit_spin(self, value: int, *, minimum: int = 0, maximum: int = 50, suffix: str = "") -> QSpinBox:
+        spin = QSpinBox()
+        spin.setRange(int(minimum), int(maximum))
+        spin.setValue(int(value or 0))
+        if suffix:
+            spin.setSuffix(suffix)
+        return spin
 
     def _on_vendor_changed(self, text: str):
         preset = MODEL_PRESETS.get(str(text or "").strip())
@@ -307,13 +459,130 @@ class MetalSettingsDialog(QDialog):
             macro_data_feed_refresh_min=int(getattr(self._config, "macro_data_feed_refresh_min", 60) or 60),
             learning_push_enabled=bool(getattr(self._config, "learning_push_enabled", False)),
             learning_push_min_interval_hour=int(getattr(self._config, "learning_push_min_interval_hour", 12) or 12),
+            trade_mode="live" if getattr(self, "chk_live_trade", None) and self.chk_live_trade.isChecked() else "simulation",
+            live_max_drawdown_pct=float(getattr(self, "spin_max_drawdown", None).value() / 100.0) if getattr(self, "spin_max_drawdown", None) else 0.05,
+            live_order_precheck_only=bool(getattr(self._config, "live_order_precheck_only", True)),
+            live_max_open_positions=int(getattr(self._config, "live_max_open_positions", 1) or 1),
+            live_max_orders_per_day=int(getattr(self._config, "live_max_orders_per_day", 3) or 3),
+            sim_initial_balance=float(getattr(self, "spin_sim_initial_balance", None).value()) if getattr(self, "spin_sim_initial_balance", None) else 1000.0,
+            sim_exploratory_base_balance=(
+                float(getattr(self, "spin_sim_exploratory_base_balance", None).value())
+                if getattr(self, "spin_sim_exploratory_base_balance", None)
+                else 1000.0
+            ),
+            sim_no_tp2_lock_r=float(getattr(self, "spin_sim_no_tp2_lock_r", None).value()) if getattr(self, "spin_sim_no_tp2_lock_r", None) else 0.5,
+            sim_no_tp2_partial_close_ratio=(
+                float(getattr(self, "spin_sim_no_tp2_partial_close_ratio", None).value())
+                if getattr(self, "spin_sim_no_tp2_partial_close_ratio", None)
+                else 0.5
+            ),
+            sim_min_rr=float(getattr(self, "spin_sim_min_rr", None).value()) if getattr(self, "spin_sim_min_rr", None) else 1.6,
+            sim_strategy_min_rr={
+                "early_momentum": (
+                    float(getattr(self, "spin_sim_rr_early_momentum", None).value())
+                    if getattr(self, "spin_sim_rr_early_momentum", None)
+                    else 1.30
+                ),
+                "direct_momentum": (
+                    float(getattr(self, "spin_sim_rr_direct_momentum", None).value())
+                    if getattr(self, "spin_sim_rr_direct_momentum", None)
+                    else 1.40
+                ),
+                "pullback_sniper_probe": (
+                    float(getattr(self, "spin_sim_rr_pullback_sniper", None).value())
+                    if getattr(self, "spin_sim_rr_pullback_sniper", None)
+                    else 1.45
+                ),
+                "directional_probe": (
+                    float(getattr(self, "spin_sim_rr_directional_probe", None).value())
+                    if getattr(self, "spin_sim_rr_directional_probe", None)
+                    else 1.80
+                ),
+            },
+            sim_relaxed_rr=(
+                float(getattr(self, "spin_sim_relaxed_rr", None).value())
+                if getattr(self, "spin_sim_relaxed_rr", None)
+                else 1.3
+            ),
+            sim_model_min_probability=(
+                float(getattr(self, "spin_sim_model_min_probability", None).value())
+                if getattr(self, "spin_sim_model_min_probability", None)
+                else 0.68
+            ),
+            sim_exploratory_daily_limit=(
+                int(getattr(self, "spin_sim_exploratory_daily_limit", None).value())
+                if getattr(self, "spin_sim_exploratory_daily_limit", None)
+                else 3
+            ),
+            sim_strategy_daily_limit={
+                "early_momentum": (
+                    int(getattr(self, "spin_sim_limit_early_momentum", None).value())
+                    if getattr(self, "spin_sim_limit_early_momentum", None)
+                    else 3
+                ),
+                "direct_momentum": (
+                    int(getattr(self, "spin_sim_limit_direct_momentum", None).value())
+                    if getattr(self, "spin_sim_limit_direct_momentum", None)
+                    else 3
+                ),
+                "pullback_sniper_probe": (
+                    int(getattr(self, "spin_sim_limit_pullback_sniper", None).value())
+                    if getattr(self, "spin_sim_limit_pullback_sniper", None)
+                    else 3
+                ),
+                "directional_probe": (
+                    int(getattr(self, "spin_sim_limit_directional_probe", None).value())
+                    if getattr(self, "spin_sim_limit_directional_probe", None)
+                    else 3
+                ),
+            },
+            sim_exploratory_cooldown_min=(
+                int(getattr(self, "spin_sim_exploratory_cooldown_min", None).value())
+                if getattr(self, "spin_sim_exploratory_cooldown_min", None)
+                else 10
+            ),
+            sim_strategy_cooldown_min={
+                "early_momentum": (
+                    int(getattr(self, "spin_sim_cooldown_early_momentum", None).value())
+                    if getattr(self, "spin_sim_cooldown_early_momentum", None)
+                    else 10
+                ),
+                "direct_momentum": (
+                    int(getattr(self, "spin_sim_cooldown_direct_momentum", None).value())
+                    if getattr(self, "spin_sim_cooldown_direct_momentum", None)
+                    else 10
+                ),
+                "pullback_sniper_probe": (
+                    int(getattr(self, "spin_sim_cooldown_pullback_sniper", None).value())
+                    if getattr(self, "spin_sim_cooldown_pullback_sniper", None)
+                    else 10
+                ),
+                "directional_probe": (
+                    int(getattr(self, "spin_sim_cooldown_directional_probe", None).value())
+                    if getattr(self, "spin_sim_cooldown_directional_probe", None)
+                    else 10
+                ),
+            },
         )
 
-    def _test_ai_key(self):
-        import json
-        from urllib import request as url_request
-        from urllib.error import HTTPError, URLError
+    def _on_live_trade_clicked(self, checked: bool):
+        from PySide6.QtWidgets import QInputDialog
+        if checked:
+            text, ok = QInputDialog.getText(
+                self, "⚠️ 实盘高危风险确认",
+                "请注意，开启后系统将直接接管 MT5 并投入真实的现金交易。\n"
+                "在极端网络或流动性状况下，不可避免地会遭遇滑点、断线，从而带来真实的财产损失。\n\n"
+                "如果您已完全了解风险，请输入「我同意承担风险」以确认解锁："
+            )
+            if not ok or str(text).strip() != "我同意承担风险":
+                QMessageBox.warning(self, "拦截阻断", "全自动实盘量化功能已被系统拦截。")
+                self.chk_live_trade.setChecked(False)
+            else:
+                QMessageBox.information(self, "解锁成功", "🚀 实盘开关已接通。下次按「保存设置」后将随主引擎重启生效。")
+        else:
+            QMessageBox.information(self, "功能挂起", "系统已为您切回「模拟舱 (Paper Trading)」模式。")
 
+    def _test_ai_key(self):
         base_url = self.entry_ai_base.text().strip() or "https://api.siliconflow.cn/v1"
         model = self.entry_ai_model.text().strip() or "deepseek-ai/DeepSeek-R1"
         api_key = self.entry_ai_key.text().strip()
@@ -324,7 +593,15 @@ class MetalSettingsDialog(QDialog):
             
         self.btn_test_ai_key.setEnabled(False)
         self.btn_test_ai_key.setText("测试中...")
-        QApplication.processEvents()
+        self._start_ai_key_test_worker(lambda: self._run_ai_key_test_worker(base_url, model, api_key))
+
+    def _start_ai_key_test_worker(self, worker) -> None:
+        threading.Thread(target=worker, daemon=True, name="settings-ai-key-test").start()
+
+    def _run_ai_key_test_worker(self, base_url: str, model: str, api_key: str) -> None:
+        import json
+        from urllib import request as url_request
+        from urllib.error import HTTPError, URLError
 
         try:
             url, headers = _build_ai_test_request(base_url, api_key)
@@ -334,31 +611,66 @@ class MetalSettingsDialog(QDialog):
              
             with url_request.urlopen(req, timeout=10) as resp:
                 json.loads(resp.read().decode('utf-8'))
-                 
-            QMessageBox.information(
-                self, 
-                "测试成功", 
-                f"🎉 API 密钥验证通过！\n成功连接到接口。\n\n您配置的模型为：\n{model}"
+            self.ai_test_result_ready.emit(
+                {
+                    "ok": True,
+                    "title": "测试成功",
+                    "message": f"🎉 API 密钥验证通过！\n成功连接到接口。\n\n您配置的模型为：\n{model}",
+                }
             )
         except HTTPError as e:
             if e.code == 401:
-                QMessageBox.warning(self, "测试失败", "API 密钥无效或已过期 (HTTP 401)。\n请检查您输入的字母是否正确或是否带有空格。")
+                message = "API 密钥无效或已过期 (HTTP 401)。\n请检查您输入的字母是否正确或是否带有空格。"
             elif e.code == 404:
                 # Some providers don't have a /models endpoint, fallback test
-                QMessageBox.warning(self, "测试失败", "接口地址可能不正确 (HTTP 404)，找不到模型列表端点。")
+                message = "接口地址可能不正确 (HTTP 404)，找不到模型列表端点。"
             else:
-                QMessageBox.warning(self, "测试失败", f"接口返回错误代码：{e.code}\n{e.reason}")
+                message = f"接口返回错误代码：{e.code}\n{e.reason}"
+            self.ai_test_result_ready.emit({"ok": False, "title": "测试失败", "message": message})
         except URLError as e:
-            QMessageBox.warning(self, "测试失败", f"无法连接到 API 地址：\n{base_url}\n\n原因：{str(e)}")
+            self.ai_test_result_ready.emit(
+                {"ok": False, "title": "测试失败", "message": f"无法连接到 API 地址：\n{base_url}\n\n原因：{str(e)}"}
+            )
         except Exception as e:
-            QMessageBox.warning(self, "测试失败", f"发生未知错误：\n{str(e)}")
-        finally:
-            self.btn_test_ai_key.setEnabled(True)
-            self.btn_test_ai_key.setText("测试密钥")
+            self.ai_test_result_ready.emit({"ok": False, "title": "测试失败", "message": f"发生未知错误：\n{str(e)}"})
+
+    def _on_ai_test_result(self, payload: dict) -> None:
+        self.btn_test_ai_key.setEnabled(True)
+        self.btn_test_ai_key.setText("测试密钥")
+        title = str((payload or {}).get("title", "") or "测试结果")
+        message = str((payload or {}).get("message", "") or "未知结果")
+        if bool((payload or {}).get("ok", False)):
+            QMessageBox.information(self, title, message)
+            return
+        QMessageBox.warning(self, title, message)
 
     def _test_notification(self):
         config = self._build_runtime_config()
-        result = send_test_notification(config)
+        self.btn_test_notification.setEnabled(False)
+        self.btn_test_notification.setText("测试中...")
+        self._start_notification_test_worker(lambda: self._run_notification_test_worker(config))
+
+    def _start_notification_test_worker(self, worker) -> None:
+        threading.Thread(target=worker, daemon=True, name="settings-notification-test").start()
+
+    def _run_notification_test_worker(self, config: MetalMonitorConfig) -> None:
+        try:
+            result = send_test_notification(config)
+            self.notification_test_result_ready.emit({"ok": True, "config": config, "result": dict(result or {})})
+        except Exception as exc:  # noqa: BLE001
+            self.notification_test_result_ready.emit(
+                {
+                    "ok": False,
+                    "config": config,
+                    "result": {"messages": [], "errors": [str(exc or "未知错误")]},
+                }
+            )
+
+    def _on_notification_test_result(self, payload: dict) -> None:
+        self.btn_test_notification.setEnabled(True)
+        self.btn_test_notification.setText("测试消息推送")
+        config = (payload or {}).get("config") or self._build_runtime_config()
+        result = dict((payload or {}).get("result", {}) or {})
         messages = list(result.get("messages", []))
         errors = list(result.get("errors", []))
         self._refresh_notify_status(config)

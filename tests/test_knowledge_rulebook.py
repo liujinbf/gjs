@@ -6,6 +6,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from knowledge_base import import_markdown_source
+from knowledge_governance import refresh_rule_governance
 from knowledge_rulebook import build_rulebook
 from knowledge_runtime import backfill_snapshot_outcomes, record_snapshot
 from knowledge_scoring import match_rules_to_snapshots, refresh_rule_scores
@@ -70,7 +71,7 @@ def test_build_rulebook_outputs_active_and_rejected_sections(tmp_path):
 """,
         encoding="utf-8",
     )
-    import_markdown_source(file_path, db_path=db_path)
+    import_markdown_source(file_path, db_path=db_path, source_type="auto_miner")
 
     for offset, price in enumerate([100.00, 100.12, 100.28, 100.40, 100.52, 100.66, 100.78]):
         record_snapshot(
@@ -104,7 +105,7 @@ def test_build_rulebook_can_surface_regime_specific_rules(tmp_path):
 """,
         encoding="utf-8",
     )
-    import_markdown_source(file_path, db_path=db_path)
+    import_markdown_source(file_path, db_path=db_path, source_type="auto_miner")
 
     for offset, price in enumerate([100.00, 100.12, 100.30, 100.45, 100.58]):
         record_snapshot(
@@ -127,3 +128,24 @@ def test_build_rulebook_can_surface_regime_specific_rules(tmp_path):
     assert rulebook["regime_rules_text"]
     assert "当前环境暂无明确观察规则。" in rulebook["regime_watch_rules_text"] or rulebook["regime_watch_rules"]
     assert "当前环境暂无明确回避规则。" in rulebook["regime_avoid_rules_text"] or rulebook["regime_avoid_rules"]
+
+
+def test_build_rulebook_can_fallback_to_reference_rules(tmp_path):
+    db_path = tmp_path / "knowledge.db"
+    file_path = tmp_path / "rules.md"
+    file_path.write_text(
+        """
+# 入场逻辑
+- 回调至关键支撑位企稳后介入
+""",
+        encoding="utf-8",
+    )
+    import_markdown_source(file_path, db_path=db_path)
+    refresh_rule_scores(db_path=db_path, horizon_min=30)
+    refresh_rule_governance(db_path=db_path, horizon_min=30)
+
+    rulebook = build_rulebook(db_path=db_path, horizon_min=30)
+
+    assert "基础知识规则" in rulebook["summary_text"]
+    assert rulebook["reference_rules"]
+    assert "回调至关键支撑位企稳后介入" in rulebook["active_rules_text"]

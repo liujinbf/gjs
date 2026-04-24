@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from knowledge_base import KNOWLEDGE_DB_FILE, kv_get, kv_set, open_knowledge_connection
+from knowledge_base import KNOWLEDGE_DB_FILE, is_reference_source_type, kv_get, kv_set, open_knowledge_connection
 from signal_enums import TradeGrade
 
 SUPPORTED_RUNTIME_CATEGORIES = {"entry", "trend", "directional"}
@@ -21,6 +21,25 @@ SKIP_RULE_MARKERS = {
     "风险提示",
     "说明",
     "适用场景",
+}
+PSEUDO_RULE_MARKERS = {
+    "开始时间",
+    "结束时间",
+    "统计周期",
+    "统计期间",
+    "总信号数",
+    "成功信号",
+    "失败信号",
+    "是否成功",
+    "平均盈利",
+    "平均亏损",
+    "平均盈亏",
+    "累计盈亏",
+    "盈亏比：待计算",
+    "盈亏比:待计算",
+    "待计算",
+    "待记录",
+    "暂无数据",
 }
 DOMAIN_KEYWORDS = [
     "支撑位",
@@ -102,6 +121,21 @@ def _should_skip_rule(rule_text: str, category: str) -> bool:
     return False
 
 
+def _archive_reason_for_rule(rule_text: str, category: str) -> str:
+    text = _normalize_text(rule_text)
+    if not text or len(text) < 8:
+        return "规则文本过短，自动归档。"
+    if any(marker in text for marker in PSEUDO_RULE_MARKERS):
+        return "识别为统计字段或模板占位符，自动归档。"
+    if any(marker in text for marker in SKIP_RULE_MARKERS):
+        return "识别为说明、来源或风险提示文本，自动归档。"
+    if text.endswith("：") or text.endswith(":"):
+        return "规则文本不完整，自动归档。"
+    if category not in SUPPORTED_RUNTIME_CATEGORIES:
+        return "非入场、趋势或方向类执行规则，自动归档到知识背景。"
+    return "不适合作为自动执行规则，自动归档。"
+
+
 def _extract_keywords(rule_text: str) -> list[str]:
     text = _normalize_text(rule_text)
     keywords = [item for item in DOMAIN_KEYWORDS if item in text]
@@ -148,6 +182,8 @@ def _rule_direction_hint(rule_text: str) -> str:
 
 
 def _rule_matches_snapshot(rule: sqlite3.Row, snapshot: sqlite3.Row) -> tuple[bool, str]:
+    if is_reference_source_type(rule["source_type"]):
+        return False, ""
     rule_text = _normalize_text(rule["rule_text"])
     category = _normalize_text(rule["category"]).lower()
     if _should_skip_rule(rule_text, category):
@@ -209,18 +245,20 @@ def _fetch_rules(conn: sqlite3.Connection, rule_ids: list[int] | None = None) ->
         placeholders = ",".join("?" for _ in rule_ids)
         return conn.execute(
             f"""
-            SELECT id, category, asset_scope, rule_text
-            FROM knowledge_rules
-            WHERE id IN ({placeholders})
-            ORDER BY id ASC
+            SELECT kr.id, kr.category, kr.asset_scope, kr.rule_text, ks.source_type
+            FROM knowledge_rules kr
+            JOIN knowledge_sources ks ON ks.id = kr.source_id
+            WHERE kr.id IN ({placeholders})
+            ORDER BY kr.id ASC
             """,
             tuple(rule_ids),
         ).fetchall()
     return conn.execute(
         """
-        SELECT id, category, asset_scope, rule_text
-        FROM knowledge_rules
-        ORDER BY id ASC
+        SELECT kr.id, kr.category, kr.asset_scope, kr.rule_text, ks.source_type
+        FROM knowledge_rules kr
+        JOIN knowledge_sources ks ON ks.id = kr.source_id
+        ORDER BY kr.id ASC
         """
     ).fetchall()
 
@@ -372,12 +410,14 @@ def refresh_rule_scores(
         rules = conn.execute(
             """
             SELECT kr.id, kr.category, kr.rule_text,
+                   ks.source_type,
                    COALESCE(rs.success_count, 0)  AS cur_success,
                    COALESCE(rs.mixed_count, 0)    AS cur_mixed,
                    COALESCE(rs.fail_count, 0)     AS cur_fail,
                    COALESCE(rs.observe_count, 0)  AS cur_observe,
                    COALESCE(rs.last_processed_outcome_id, 0) AS last_id
             FROM knowledge_rules kr
+            JOIN knowledge_sources ks ON ks.id = kr.source_id
             LEFT JOIN rule_scores rs ON rs.rule_id = kr.id AND rs.horizon_min = ?
             ORDER BY kr.id ASC
             """,
@@ -390,17 +430,42 @@ def refresh_rule_scores(
             category = _normalize_text(rule["category"]).lower()
             last_outcome_id = int(rule["last_id"] or 0)
 
-            if _should_skip_rule(str(rule["rule_text"] or ""), category):
-                # 跳过规则：只更新 validation_status，不动计数
+            if is_reference_source_type(rule["source_type"]):
                 conn.execute(
                     """
                     INSERT INTO rule_scores (
                         rule_id, horizon_min, sample_count, success_count, mixed_count, fail_count,
                         observe_count, success_rate, score, validation_status,
                         last_processed_outcome_id, updated_at
-                    ) VALUES (?, ?, 0, 0, 0, 0, 0, 0, 0, 'manual_review', ?, ?)
+                    ) VALUES (?, ?, 0, 0, 0, 0, 0, 0, 0, 'reference', ?, ?)
                     ON CONFLICT(rule_id, horizon_min) DO UPDATE SET
-                        validation_status = 'manual_review',
+                        sample_count = 0,
+                        success_count = 0,
+                        mixed_count = 0,
+                        fail_count = 0,
+                        observe_count = 0,
+                        success_rate = 0,
+                        score = 0,
+                        validation_status = 'reference',
+                        last_processed_outcome_id = excluded.last_processed_outcome_id,
+                        updated_at = excluded.updated_at
+                    """,
+                    (rule_id, int(horizon_min), last_outcome_id, now_text),
+                )
+                updated_count += 1
+                continue
+
+            if _should_skip_rule(str(rule["rule_text"] or ""), category):
+                # 非执行类或伪规则不再进入人工待审，自动归档，避免 HITL 面板堆积成千上万条。
+                conn.execute(
+                    """
+                    INSERT INTO rule_scores (
+                        rule_id, horizon_min, sample_count, success_count, mixed_count, fail_count,
+                        observe_count, success_rate, score, validation_status,
+                        last_processed_outcome_id, updated_at
+                    ) VALUES (?, ?, 0, 0, 0, 0, 0, 0, 0, 'archived', ?, ?)
+                    ON CONFLICT(rule_id, horizon_min) DO UPDATE SET
+                        validation_status = 'archived',
                         updated_at = excluded.updated_at
                     """,
                     (rule_id, int(horizon_min), last_outcome_id, now_text),
@@ -456,6 +521,29 @@ def refresh_rule_scores(
                     validation_status = "candidate"
                 else:
                     validation_status = "rejected"
+
+            # 引入规则时间衰退机制 (Rule Decay): 提取近 30 笔匹配结果，如果近期表现崩坏则降级
+            if validation_status in ("validated", "candidate") and sample_count >= 15:
+                recent_rows = conn.execute(
+                    """
+                    SELECT so.outcome_label
+                    FROM rule_snapshot_matches rm
+                    JOIN snapshot_outcomes so ON so.snapshot_id = rm.snapshot_id
+                    WHERE rm.rule_id = ? AND so.horizon_min = ?
+                    ORDER BY so.id DESC
+                    LIMIT 30
+                    """,
+                    (rule_id, int(horizon_min))
+                ).fetchall()
+                if len(recent_rows) >= 10:
+                    r_suc = sum(1 for x in recent_rows if x["outcome_label"] == "success")
+                    r_mix = sum(1 for x in recent_rows if x["outcome_label"] == "mixed")
+                    r_fal = sum(1 for x in recent_rows if x["outcome_label"] == "fail")
+                    r_tot = r_suc + r_mix + r_fal
+                    if r_tot >= 10:
+                        r_scr = ((r_suc + r_mix * 0.35) - r_fal) / r_tot * 100.0
+                        if r_scr < -10.0:
+                            validation_status = "degraded"
 
             conn.execute(
                 """
@@ -537,10 +625,69 @@ def summarize_rule_scores(
         "rejected_count": counts.get("rejected", 0),
         "insufficient_count": counts.get("insufficient", 0),
         "manual_review_count": counts.get("manual_review", 0),
+        "archived_count": counts.get("archived", 0),
+        "reference_count": counts.get("reference", 0),
         "top_rules": top_rules,
         "summary_text": (
             f"{horizon_min} 分钟规则评分：已验证 {counts.get('validated', 0)} 条，"
             f"候选 {counts.get('candidate', 0)} 条，拒绝 {counts.get('rejected', 0)} 条，"
-            f"样本不足 {counts.get('insufficient', 0)} 条，人工评审 {counts.get('manual_review', 0)} 条。"
+            f"样本不足 {counts.get('insufficient', 0)} 条，自动归档 {counts.get('archived', 0)} 条，"
+            f"基础参考 {counts.get('reference', 0)} 条，人工评审 {counts.get('manual_review', 0)} 条。"
         ),
+    }
+
+
+def simulate_rule_performance(
+    logic_dict: dict,
+    db_path: Path | str | None = None,
+    limit: int = 500,
+) -> dict:
+    from rule_compiler import evaluate_rule_logic
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT ms.id, ms.symbol, ms.trade_grade, ms.trade_grade_source, ms.alert_state_text, ms.event_risk_mode_text,
+                   ms.event_active_name, ms.event_importance_text, ms.regime_tag, ms.signal_side, ms.feature_json,
+                   so.outcome_label
+            FROM snapshot_outcomes so
+            JOIN market_snapshots ms ON ms.id = so.snapshot_id
+            WHERE so.horizon_min IN (30, 888) AND so.outcome_label != 'unknown'
+            ORDER BY so.id DESC
+            LIMIT ?
+            """,
+            (int(limit),)
+        ).fetchall()
+
+    total_matches = 0
+    success = 0
+    mixed = 0
+    fail = 0
+
+    for row in rows:
+        snapshot_dict = dict(row)
+        if evaluate_rule_logic(logic_dict, snapshot_dict):
+            total_matches += 1
+            lbl = row["outcome_label"]
+            if lbl == "success":
+                success += 1
+            elif lbl == "mixed":
+                mixed += 1
+            elif lbl == "fail":
+                fail += 1
+
+    if total_matches == 0:
+        win_rate = 0.0
+        score = 0.0
+    else:
+        win_rate = (success + mixed * 0.5) / total_matches
+        score = ((success + mixed * 0.35) - fail) / total_matches * 100.0
+
+    return {
+        "sandbox_samples": len(rows),
+        "total_matches": total_matches,
+        "success": success,
+        "mixed": mixed,
+        "fail": fail,
+        "win_rate": win_rate,
+        "score": score
     }

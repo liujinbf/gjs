@@ -49,6 +49,7 @@ def test_main_window_can_bootstrap(monkeypatch):
         assert window.left_panel is not None
         assert window.right_table is not None
         assert window.lbl_status_badge.text() == "准备中"
+        assert "执行漏斗" in window.lbl_execution_funnel.text()
         assert "AI" in window.left_panel.txt_ai_brief.toPlainText()
 
     finally:

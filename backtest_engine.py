@@ -36,28 +36,87 @@ TRACKER_META_PATTERN = re.compile(r"<!--\s*TRACKER_META\s*:\s*(\{.*?\})\s*-->", 
 TRACKER_META_PATTERN_LOOSE = re.compile(r"<!--\s*TRACKER_META\s*:\s*(\{[^>]*?)\s*-->", re.IGNORECASE | re.DOTALL)
 JSON_BLOCK_PATTERN = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.IGNORECASE | re.DOTALL)
 
+
+def _atomic_write_json(target: Path, payload: dict) -> None:
+    """原子写入 JSON，避免程序中断时把回测结果文件截断。"""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_file = target.with_name(f"{target.name}.tmp")
+    temp_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_file.replace(target)
+
 # P-004 修复：_parse_time 委托给公共 runtime_utils.parse_time，消除三处重复定义
 def _parse_time(value: str) -> datetime | None:
     return _parse_time_impl(value)
 
-def _load_json_dict(text: str) -> dict | None:
-    raw_text = str(text or "").strip()
-    if not raw_text:
+def _try_load_json_dict(raw_text: str) -> dict | None:
+    candidate = str(raw_text or "").strip()
+    if not candidate:
         return None
     try:
-        data = json.loads(raw_text)
+        data = json.loads(candidate)
         if isinstance(data, dict):
             return data
     except Exception:
         pass
     if _json_repair_loads is not None:
         try:
-            data = _json_repair_loads(raw_text)
+            data = _json_repair_loads(candidate)
             if isinstance(data, dict):
                 logging.debug("[extract_signal_meta] 原生 JSON 解析失败，json_repair 自愈成功。")
                 return data
         except Exception:
             pass
+    return None
+
+
+def _iter_json_object_candidates(text: str):
+    raw_text = str(text or "")
+    start = -1
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, char in enumerate(raw_text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+            continue
+        if char == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                candidate = raw_text[start:index + 1].strip()
+                if candidate:
+                    yield candidate
+                start = -1
+
+
+def _load_json_dict(text: str) -> dict | None:
+    raw_text = str(text or "").strip()
+    if not raw_text:
+        return None
+    direct = _try_load_json_dict(raw_text)
+    if isinstance(direct, dict):
+        return direct
+
+    seen = {raw_text}
+    for candidate in _iter_json_object_candidates(raw_text):
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        parsed = _try_load_json_dict(candidate)
+        if isinstance(parsed, dict):
+            return parsed
     return None
 
 
@@ -122,8 +181,7 @@ def save_backtest_results(data: dict) -> None:
         sorted_items = sorted(data.items(), key=_sort_key, reverse=True)
         data = dict(sorted_items[:MAX_BACKTEST_RESULTS])
         logging.info(f"[backtest] 结果清理：保留最新 {MAX_BACKTEST_RESULTS} 条，已副除过期记录。")
-    BACKTEST_RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    BACKTEST_RESULTS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_json(BACKTEST_RESULTS_FILE, data)
 
 def evaluate_signal(signal_meta: dict, start_time: datetime, now_time: datetime) -> str:
     """

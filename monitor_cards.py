@@ -51,7 +51,7 @@ def build_spread_focus_cards(items: list[dict]) -> list[dict]:
             cards.append(
                 {
                     "title": f"{symbol} 暂无活跃报价",
-                    "detail": "当前品种休市或流动性不足，先以观察为主，不做临场追单判断。",
+                    "detail": "当前品种没有新 tick，Bid/Ask 可能是静态缓存，先以观察为主，不做临场追单判断。",
                     "tone": AlertTone.NEUTRAL.value,
                 }
             )
@@ -262,14 +262,14 @@ def build_runtime_status_cards(
     elif inactive_count >= watch_count > 0:
         second_card = {
             "title": "当前观察池暂无活跃报价",
-            "detail": "观察池内品种当前都处于休市或流动性不足阶段，更适合等待下一个活跃时段，不要拿静态报价做临场判断。",
+            "detail": "观察池内品种当前都没有新 tick，更适合等待下一个活跃时段，不要拿静态报价做临场判断。",
             "tone": AlertTone.WARNING.value,
         }
     elif inactive_symbols:
         second_card = {
-            "title": "休市 / 暂停提醒",
+            "title": "非活跃 / 暂停提醒",
             "detail": (
-                f"{'、'.join(inactive_symbols)} 当前休市或流动性不足。"
+                f"{'、'.join(inactive_symbols)} 当前没有新 tick，报价可能是静态缓存。"
                 "先盯有活跃报价的品种，事件窗口前后也别拿静态报价追单。"
             ),
             "tone": AlertTone.ACCENT.value,

@@ -12,6 +12,7 @@ from runtime_utils import parse_time as _parse_time_impl
 
 from knowledge_base import KNOWLEDGE_DB_FILE, open_knowledge_connection
 from quote_models import QuoteRow
+from signal_side_utils import derive_signal_side_meta
 from signal_enums import AlertTone, SignalSide, TradeGrade
 
 
@@ -48,54 +49,27 @@ def _get_direction_threshold_pct(symbol: str) -> float:
 
 
 def _infer_signal_side(item: dict) -> str:
-    trade_grade = _normalize_text(item.get("trade_grade", ""))
-    if trade_grade != TradeGrade.LIGHT_POSITION:
-        return SignalSide.NEUTRAL.value
-
-    long_score = 0
-    short_score = 0
-
-    for value in (
-        item.get("intraday_bias", ""),
-        item.get("multi_timeframe_bias", ""),
-        item.get("breakout_direction", ""),
-    ):
-        text = _normalize_text(value).lower()
-        if text == "bullish":
-            long_score += 1
-        elif text == "bearish":
-            short_score += 1
-
-    for value in (
-        item.get("breakout_state", ""),
-        item.get("retest_state", ""),
-        item.get("key_level_state", ""),
-        item.get("risk_reward_state", ""),
-        item.get("intraday_context_text", ""),
-        item.get("multi_timeframe_context_text", ""),
-    ):
-        text = _normalize_text(value).lower()
-        if any(keyword in text for keyword in ("confirmed_above", "confirmed_support", "bullish", "偏多", "上破")):
-            long_score += 1
-        if any(keyword in text for keyword in ("confirmed_below", "confirmed_resistance", "bearish", "偏空", "下破")):
-            short_score += 1
-
-    if long_score > short_score:
-        return SignalSide.LONG.value
-    if short_score > long_score:
-        return SignalSide.SHORT.value
-    return SignalSide.NEUTRAL.value
+    meta = derive_signal_side_meta(item)
+    return _normalize_text(meta.get("signal_side", SignalSide.NEUTRAL.value)).lower() or SignalSide.NEUTRAL.value
 
 
 def _build_feature_payload(snapshot: dict, item: dict) -> dict:
+    signal_side_meta = derive_signal_side_meta(item)
     return {
         "atr14": float(item.get("atr14", 0.0) or 0.0),
         "atr14_h4": float(item.get("atr14_h4", 0.0) or 0.0),
         "regime_tag": _normalize_text(item.get("regime_tag", "")),
         "regime_text": _normalize_text(item.get("regime_text", "")),
         "regime_reason": _normalize_text(item.get("regime_reason", "")),
+        "setup_kind": _normalize_text(item.get("setup_kind", "")),
         "trade_grade_detail": _normalize_text(item.get("trade_grade_detail", "")),
         "trade_next_review": _normalize_text(item.get("trade_next_review", "")),
+        "signal_side": _normalize_text(item.get("signal_side", "")) or _normalize_text(signal_side_meta.get("signal_side", "")),
+        "signal_side_text": _normalize_text(item.get("signal_side_text", "")) or _normalize_text(signal_side_meta.get("signal_side_text", "")),
+        "signal_side_basis": _normalize_text(item.get("signal_side_basis", "")) or _normalize_text(signal_side_meta.get("signal_side_basis", "")),
+        "signal_side_reason": _normalize_text(item.get("signal_side_reason", "")) or _normalize_text(signal_side_meta.get("signal_side_reason", "")),
+        "signal_side_long_votes": int(item.get("signal_side_long_votes", signal_side_meta.get("signal_side_long_votes", 0)) or 0),
+        "signal_side_short_votes": int(item.get("signal_side_short_votes", signal_side_meta.get("signal_side_short_votes", 0)) or 0),
         "status_text": _normalize_text(item.get("status_text", "")),
         "quote_text": _normalize_text(item.get("quote_text", "")),
         "execution_note": _normalize_text(item.get("execution_note", "")),
@@ -109,7 +83,44 @@ def _build_feature_payload(snapshot: dict, item: dict) -> dict:
         "key_level_state_text": _normalize_text(item.get("key_level_state_text", "")),
         "breakout_state_text": _normalize_text(item.get("breakout_state_text", "")),
         "retest_state_text": _normalize_text(item.get("retest_state_text", "")),
+        "intraday_bias": _normalize_text(item.get("intraday_bias", "")),
+        "intraday_volatility": _normalize_text(item.get("intraday_volatility", "")),
+        "intraday_location": _normalize_text(item.get("intraday_location", "")),
+        "multi_timeframe_alignment": _normalize_text(item.get("multi_timeframe_alignment", "")),
+        "multi_timeframe_bias": _normalize_text(item.get("multi_timeframe_bias", "")),
+        "key_level_state": _normalize_text(item.get("key_level_state", "")),
+        "breakout_state": _normalize_text(item.get("breakout_state", "")),
+        "breakout_direction": _normalize_text(item.get("breakout_direction", "")),
+        "retest_state": _normalize_text(item.get("retest_state", "")),
+        "risk_reward_ready": bool(item.get("risk_reward_ready", False)),
+        "risk_reward_state": _normalize_text(item.get("risk_reward_state", "")),
         "risk_reward_state_text": _normalize_text(item.get("risk_reward_state_text", "")),
+        "risk_reward_ratio": float(item.get("risk_reward_ratio", 0.0) or 0.0),
+        "risk_reward_direction": _normalize_text(item.get("risk_reward_direction", "")),
+        "risk_reward_stop_price": float(item.get("risk_reward_stop_price", 0.0) or 0.0),
+        "risk_reward_target_price": float(item.get("risk_reward_target_price", 0.0) or 0.0),
+        "risk_reward_target_price_2": float(item.get("risk_reward_target_price_2", 0.0) or 0.0),
+        "risk_reward_entry_zone_low": float(item.get("risk_reward_entry_zone_low", 0.0) or 0.0),
+        "risk_reward_entry_zone_high": float(item.get("risk_reward_entry_zone_high", 0.0) or 0.0),
+        "risk_reward_atr": float(item.get("risk_reward_atr", 0.0) or 0.0),
+        "quote_live_reason": _normalize_text(item.get("quote_live_reason", "")),
+        "quote_live_reason_text": _normalize_text(item.get("quote_live_reason_text", "")),
+        "quote_live_diagnostic_text": _normalize_text(item.get("quote_live_diagnostic_text", "")),
+        "quote_live_delta_sec": float(item.get("quote_live_delta_sec", 0.0) or 0.0),
+        "quote_live_max_age_sec": float(item.get("quote_live_max_age_sec", 0.0) or 0.0),
+        "quote_broker_offset_sec": float(item.get("quote_broker_offset_sec", 0.0) or 0.0),
+        "quote_offset_recalibrated": bool(item.get("quote_offset_recalibrated", False)),
+        "quote_price_available": bool(item.get("quote_price_available", False)),
+        "quote_tick_utc_text": _normalize_text(item.get("quote_tick_utc_text", "")),
+        "quote_now_utc_text": _normalize_text(item.get("quote_now_utc_text", "")),
+        "model_ready": bool(item.get("model_ready", False)),
+        "model_win_probability": float(item.get("model_win_probability", 0.0) or 0.0),
+        "model_base_win_probability": float(item.get("model_base_win_probability", 0.0) or 0.0),
+        "execution_model_ready": bool(item.get("execution_model_ready", False)),
+        "execution_open_probability": float(item.get("execution_open_probability", 0.0) or 0.0),
+        "execution_model_base_probability": float(item.get("execution_model_base_probability", 0.0) or 0.0),
+        "execution_model_confidence_text": _normalize_text(item.get("execution_model_confidence_text", "")),
+        "execution_model_note": _normalize_text(item.get("execution_model_note", "")),
         "summary_text": _normalize_text(snapshot.get("summary_text", "")),
         "event_risk_reason": _normalize_text(snapshot.get("event_risk_reason", "")),
     }

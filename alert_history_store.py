@@ -10,6 +10,7 @@ from pathlib import Path
 from app_config import PROJECT_DIR
 from quote_models import SnapshotItem
 from signal_enums import AlertTone, TradeGrade
+from notification_state import _get_notify_priority
 
 RUNTIME_DIR = PROJECT_DIR / ".runtime"
 HISTORY_FILE = RUNTIME_DIR / "alert_history.jsonl"
@@ -18,6 +19,14 @@ MAX_HISTORY_LINES = 500
 
 def _normalize_text(value: str) -> str:
     return " ".join(str(value or "").replace("\n", " ").split()).strip()
+
+
+def _atomic_write_text(target: Path, text: str) -> None:
+    """截断历史文件时使用原子替换，避免异常退出留下半截 JSONL。"""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_file = target.with_name(f"{target.name}.tmp")
+    temp_file.write_text(text, encoding="utf-8")
+    temp_file.replace(target)
 
 
 def _build_price_bucket(price: float, bucket_size: float = 10.0) -> str:
@@ -288,6 +297,25 @@ def _find_latest_symbol_event(symbol: str, history_file: Path | None = None) -> 
     return None
 
 
+def _find_latest_symbol_event_by_categories(
+    symbol: str,
+    categories: set[str],
+    history_file: Path | None = None,
+) -> dict | None:
+    target_symbol = str(symbol or "").strip().upper()
+    category_filter = {str(item or "").strip().lower() for item in set(categories or set()) if str(item or "").strip()}
+    if not target_symbol or not category_filter:
+        return None
+    history = read_full_history(history_file=history_file)
+    for entry in reversed(history):
+        entry_symbol = str(entry.get("symbol", "") or "").strip().upper()
+        category = str(entry.get("category", "") or "").strip().lower()
+        if entry_symbol != target_symbol or category not in category_filter:
+            continue
+        return entry
+    return None
+
+
 def _build_spread_recovery_entries(
     snapshot: dict,
     items_by_symbol: dict[str, dict],
@@ -406,6 +434,7 @@ def _build_structure_entries(
             "entry_zone_distance_text": _normalize_text(entry_zone_meta.get("distance_text", "")),
             "entry_zone_side": str(entry_zone_meta.get("zone_side", "") or "").strip(),
             "entry_zone_side_text": _normalize_text(entry_zone_meta.get("zone_side_text", "")),
+            "structure_validity_text": "仅当前短时有效；若价格离开观察区间或下一两轮仍无确认，请直接忽略。",
         }
         result.append(
             _build_entry(
@@ -436,6 +465,139 @@ def _build_structure_entries(
                             or 10.0,
                         ),
                     ),
+                ],
+            )
+        )
+    return result
+
+
+def _explain_structure_invalidation(item: dict | None) -> str:
+    payload = dict(item or {})
+    if not bool(payload.get("has_live_quote", False)):
+        return "当前报价已不活跃，上一条机会先作废。"
+    if _normalize_text(payload.get("trade_grade", "")) != TradeGrade.LIGHT_POSITION:
+        return "当前结构已降级，不再满足准备动手条件。"
+    if _normalize_text(payload.get("trade_grade_source", "")) not in {"structure", "setup"}:
+        return "当前不再属于可执行的结构机会。"
+    if not bool(payload.get("risk_reward_ready", False)):
+        return "当前盈亏比条件已失效，先忽略上一条提醒。"
+    risk_reward_state = str(payload.get("risk_reward_state", "") or "").strip().lower()
+    if risk_reward_state not in {"favorable", "acceptable"}:
+        return "当前赔率不够，先忽略上一条提醒。"
+    stage_meta = _classify_entry_zone_stage(payload)
+    stage = str(stage_meta.get("stage", "") or "").strip().lower()
+    signal_side = str(payload.get("signal_side", "") or "").strip().lower()
+    side_text = str(stage_meta.get("zone_side_text", "") or "").strip()
+    if stage != "inside_zone":
+        return "价格已经离开理想执行位，上一条机会先作废。"
+    if signal_side == "long" and side_text != "下沿":
+        return "价格仍在区间内，但多单位置不再漂亮，先作废上一条提醒。"
+    if signal_side == "short" and side_text != "上沿":
+        return "价格仍在区间内，但空单位置不再漂亮，先作废上一条提醒。"
+    if bool(payload.get("model_ready", False)):
+        try:
+            probability = float(payload.get("model_win_probability", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            probability = 0.0
+        if 0.0 < probability < 0.55:
+            return "模型已明显转弱，上一条机会先作废。"
+    event_note = _normalize_text(payload.get("event_note", ""))
+    if "先别抢第一脚" in event_note or "等待事件落地" in event_note or "先观望" in event_note or "不新开仓" in event_note:
+        return "高影响事件正在阻断执行，上一条机会先作废。"
+    external_bias_note = _normalize_text(payload.get("external_bias_note", ""))
+    if signal_side == "long" and "偏空" in external_bias_note:
+        return "外部背景已转向偏空，上一条做多机会先作废。"
+    if signal_side == "short" and "偏多" in external_bias_note:
+        return "外部背景已转向偏多，上一条做空机会先作废。"
+    try:
+        spread_points = float(payload.get("spread_points", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        spread_points = 0.0
+    if spread_points >= 30.0:
+        return "当前点差过宽，上一条机会先作废。"
+    return "当前条件已不再支持上一条机会，请直接忽略。"
+
+
+def _build_structure_invalidation_entries(
+    snapshot: dict,
+    items_by_symbol: dict[str, dict],
+    trade_meta: dict,
+    snapshot_event_meta: dict,
+    history_file: Path | None = None,
+    lookback_minutes: int = 20,
+) -> list[dict]:
+    occurred_at = str(snapshot.get("last_refresh_text", "") or "").strip()
+    current_time = _parse_occurred_at(occurred_at)
+    if current_time is None:
+        return []
+
+    result = []
+    lookback = timedelta(minutes=max(5, int(lookback_minutes)))
+    for symbol, item in items_by_symbol.items():
+        latest_structure_event = _find_latest_symbol_event_by_categories(
+            symbol,
+            {"structure", "structure_cancel"},
+            history_file=history_file,
+        )
+        if not latest_structure_event:
+            continue
+        latest_category = str(latest_structure_event.get("category", "") or "").strip().lower()
+        if latest_category != "structure":
+            continue
+        latest_occurred_at = _parse_occurred_at(latest_structure_event.get("occurred_at", ""))
+        if latest_occurred_at is None or current_time - latest_occurred_at > lookback:
+            continue
+        latest_stage = str(latest_structure_event.get("structure_entry_stage", "") or "").strip().lower()
+        latest_signal_side = str(latest_structure_event.get("signal_side", "") or "").strip().lower()
+        latest_zone_side_text = str(latest_structure_event.get("entry_zone_side_text", "") or "").strip()
+        latest_priority = int(_get_notify_priority(dict(latest_structure_event)))
+        if latest_priority <= 0 or latest_stage != "inside_zone":
+            continue
+        is_prev_preferred_long = latest_signal_side == "long" and latest_zone_side_text == "下沿"
+        is_prev_preferred_short = latest_signal_side == "short" and latest_zone_side_text == "上沿"
+        if not (is_prev_preferred_long or is_prev_preferred_short):
+            continue
+
+        current_candidate_entry = None
+        if bool(item.get("has_live_quote", False)):
+            stage_meta = _classify_entry_zone_stage(item)
+            current_candidate_entry = {
+                "category": "structure",
+                "tone": AlertTone.SUCCESS.value,
+                "symbol": symbol,
+                "risk_reward_ratio": float(item.get("risk_reward_ratio", 0.0) or 0.0),
+                "structure_entry_stage": str(stage_meta.get("stage", "candidate") or "candidate"),
+                "entry_zone_side_text": str(stage_meta.get("zone_side_text", "") or "").strip(),
+                "signal_side": str(item.get("signal_side", "") or "").strip(),
+                "model_ready": bool(item.get("model_ready", False)),
+                "model_win_probability": float(item.get("model_win_probability", 0.0) or 0.0),
+                "event_importance_text": str(item.get("event_importance_text", "") or "").strip(),
+                "event_note": _normalize_text(item.get("event_note", "")),
+                "external_bias_note": _normalize_text(item.get("external_bias_note", "")),
+                "baseline_spread_points": float(item.get("spread_points", 0.0) or 0.0),
+            }
+        if current_candidate_entry is not None and _get_notify_priority(current_candidate_entry) > 0:
+            continue
+
+        detail = _explain_structure_invalidation(item)
+        result.append(
+            _build_entry(
+                "structure_cancel",
+                f"{symbol} 本次机会失效",
+                detail,
+                AlertTone.WARNING.value,
+                occurred_at,
+                extra={
+                    "symbol": symbol,
+                    **_item_action_meta(item, fallback_trade_meta=trade_meta),
+                    **_item_event_meta(item, fallback=snapshot_event_meta),
+                    "invalidated_from_title": str(latest_structure_event.get("title", "") or "").strip(),
+                    "invalidated_from_time": str(latest_structure_event.get("occurred_at", "") or "").strip(),
+                },
+                sig_extra=[
+                    symbol,
+                    str(latest_structure_event.get("signature", "") or "").strip(),
+                    detail,
                 ],
             )
         )
@@ -670,6 +832,15 @@ def build_snapshot_history_entries(snapshot: dict, history_file: Path | None = N
         )
 
     entries.extend(_build_structure_entries(snapshot, items_by_symbol, trade_meta, snapshot_event_meta))
+    entries.extend(
+        _build_structure_invalidation_entries(
+            snapshot,
+            items_by_symbol,
+            trade_meta,
+            snapshot_event_meta,
+            history_file=history_file,
+        )
+    )
 
     macro_entry = _build_macro_entry(snapshot, items_by_symbol, trade_meta, snapshot_event_meta)
     if macro_entry:
@@ -731,7 +902,7 @@ def append_history_entries(entries: list[dict], history_file: Path | None = None
         lines = [line for line in target.read_text(encoding="utf-8").splitlines() if line.strip()]
         if len(lines) > MAX_HISTORY_LINES:
             trimmed = lines[-MAX_HISTORY_LINES:]
-            target.write_text("\n".join(trimmed) + "\n", encoding="utf-8")
+            _atomic_write_text(target, "\n".join(trimmed) + "\n")
     except OSError:
         pass
 

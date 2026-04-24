@@ -3,10 +3,12 @@
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
 import sqlite3
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -30,6 +32,38 @@ CATEGORY_KEYWORDS = {
     "case": ("案例", "教训", "实战", "失败", "成功"),
 }
 
+PSEUDO_RULE_MARKERS = {
+    "开始时间",
+    "结束时间",
+    "统计周期",
+    "统计期间",
+    "总信号数",
+    "成功信号",
+    "失败信号",
+    "是否成功",
+    "平均盈利",
+    "平均亏损",
+    "平均盈亏",
+    "累计盈亏",
+    "盈亏比：待计算",
+    "盈亏比:待计算",
+    "待计算",
+    "待记录",
+    "暂无数据",
+}
+
+REFERENCE_SOURCE_TYPES = {"local_markdown"}
+AUTO_LEARN_SOURCE_TYPES = {
+    "auto_miner",
+    "llm_cluster_loss",
+    "llm_golden_setup",
+    "sim_feedback",
+    "sim_reflection",
+    "strategy_learning",
+}
+_SCHEMA_INIT_LOCK = threading.Lock()
+_SCHEMA_READY_PATHS: set[str] = set()
+
 
 def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -49,6 +83,18 @@ def _normalize_tags(tags: list[str] | tuple[str, ...] | None) -> list[str]:
         seen.add(text)
         result.append(text)
     return result
+
+
+def normalize_source_type(value: object) -> str:
+    return _normalize_text(value).lower() or "unknown"
+
+
+def is_reference_source_type(source_type: object) -> bool:
+    return normalize_source_type(source_type) in REFERENCE_SOURCE_TYPES
+
+
+def is_auto_learn_source_type(source_type: object) -> bool:
+    return normalize_source_type(source_type) in AUTO_LEARN_SOURCE_TYPES
 
 
 def _infer_category(*parts: str) -> str:
@@ -86,8 +132,25 @@ def _table_cells_to_rule(line: str) -> str:
     if any(cell in header_tokens for cell in cells):
         return ""
     if len(cells) >= 3:
-        return _normalize_text(f"{cells[-2]}：{cells[-1]}")
-    return _normalize_text("：".join(cells))
+        candidate = _normalize_text(f"{cells[-2]}：{cells[-1]}")
+    else:
+        candidate = _normalize_text("：".join(cells))
+    if _looks_like_pseudo_rule(candidate):
+        return ""
+    return candidate
+
+
+def _looks_like_pseudo_rule(rule_text: str) -> bool:
+    text = _normalize_text(rule_text)
+    if not text:
+        return True
+    if any(marker in text for marker in PSEUDO_RULE_MARKERS):
+        return True
+    if re.fullmatch(r".*[:：]\s*(0次|0%|0\.0%|--|-|无|暂无)\s*", text):
+        return True
+    if re.fullmatch(r".*(时间|周期|日期|月份|统计|信号数)[:：].*", text):
+        return True
+    return False
 
 
 def _iter_candidate_rules(markdown_text: str) -> list[dict]:
@@ -123,6 +186,8 @@ def _iter_candidate_rules(markdown_text: str) -> list[dict]:
             continue
         if len(candidate_text) < 6:
             continue
+        if _looks_like_pseudo_rule(candidate_text):
+            continue
 
         category = _infer_category(current_heading, candidate_text)
         if category == "general":
@@ -152,300 +217,562 @@ def _open_sqlite(target: Path) -> sqlite3.Connection:
     return conn
 
 
+def _schema_cache_key(target: Path) -> str:
+    try:
+        return str(target.expanduser().resolve(strict=False))
+    except Exception:
+        return str(target)
+
+
+def _is_schema_cached(target: Path) -> bool:
+    cache_key = _schema_cache_key(target)
+    if cache_key not in _SCHEMA_READY_PATHS:
+        return False
+    if not target.exists():
+        return False
+    try:
+        return target.stat().st_size > 0
+    except OSError:
+        return False
+
+
+@contextlib.contextmanager
 def open_knowledge_connection(
     db_path: Path | str | None = None,
     ensure_schema: bool = True,
-) -> sqlite3.Connection:
+):
     target = Path(db_path) if db_path else KNOWLEDGE_DB_FILE
     if ensure_schema:
         init_knowledge_base(db_path=target)
-    return _open_sqlite(target)
+    conn = _open_sqlite(target)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
-
-def _connect(db_path: Path | str | None = None) -> sqlite3.Connection:
+@contextlib.contextmanager
+def _connect(db_path: Path | str | None = None):
     target = Path(db_path) if db_path else KNOWLEDGE_DB_FILE
-    return _open_sqlite(target)
+    conn = _open_sqlite(target)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init_knowledge_base(db_path: Path | str | None = None) -> Path:
     target = Path(db_path) if db_path else KNOWLEDGE_DB_FILE
-    with _connect(target) as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS knowledge_sources (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                source_type TEXT NOT NULL,
-                location TEXT NOT NULL,
-                author TEXT NOT NULL DEFAULT '',
-                published_at TEXT NOT NULL DEFAULT '',
-                trust_level TEXT NOT NULL DEFAULT 'working',
-                tags_json TEXT NOT NULL DEFAULT '[]',
-                notes TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(source_type, location)
-            );
-
-            CREATE TABLE IF NOT EXISTS knowledge_documents (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_id INTEGER NOT NULL,
-                content_hash TEXT NOT NULL,
-                content TEXT NOT NULL,
-                imported_at TEXT NOT NULL,
-                FOREIGN KEY (source_id) REFERENCES knowledge_sources(id),
-                UNIQUE(source_id, content_hash)
-            );
-
-            CREATE TABLE IF NOT EXISTS knowledge_rules (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_id INTEGER NOT NULL,
-                document_id INTEGER,
-                section_title TEXT NOT NULL DEFAULT '',
-                category TEXT NOT NULL DEFAULT 'general',
-                asset_scope TEXT NOT NULL DEFAULT 'ALL',
-                rule_text TEXT NOT NULL,
-                confidence TEXT NOT NULL DEFAULT 'working',
-                evidence_type TEXT NOT NULL DEFAULT '经验整理',
-                tags_json TEXT NOT NULL DEFAULT '[]',
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (source_id) REFERENCES knowledge_sources(id),
-                FOREIGN KEY (document_id) REFERENCES knowledge_documents(id),
-                UNIQUE(source_id, category, rule_text)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_knowledge_rules_category ON knowledge_rules(category);
-            CREATE INDEX IF NOT EXISTS idx_knowledge_rules_asset_scope ON knowledge_rules(asset_scope);
-            CREATE INDEX IF NOT EXISTS idx_knowledge_sources_trust_level ON knowledge_sources(trust_level);
-
-            CREATE TABLE IF NOT EXISTS market_snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                snapshot_time TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                latest_price REAL NOT NULL DEFAULT 0,
-                spread_points REAL NOT NULL DEFAULT 0,
-                has_live_quote INTEGER NOT NULL DEFAULT 0,
-                tone TEXT NOT NULL DEFAULT 'neutral',
-                trade_grade TEXT NOT NULL DEFAULT '',
-                trade_grade_source TEXT NOT NULL DEFAULT '',
-                alert_state_text TEXT NOT NULL DEFAULT '',
-                event_risk_mode_text TEXT NOT NULL DEFAULT '',
-                event_active_name TEXT NOT NULL DEFAULT '',
-                event_importance_text TEXT NOT NULL DEFAULT '',
-                event_note TEXT NOT NULL DEFAULT '',
-                signal_side TEXT NOT NULL DEFAULT 'neutral',
-                regime_tag TEXT NOT NULL DEFAULT '',
-                regime_text TEXT NOT NULL DEFAULT '',
-                feature_json TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL,
-                UNIQUE(snapshot_time, symbol)
-            );
-
-            CREATE TABLE IF NOT EXISTS snapshot_outcomes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                snapshot_id INTEGER NOT NULL,
-                symbol TEXT NOT NULL,
-                snapshot_time TEXT NOT NULL,
-                horizon_min INTEGER NOT NULL,
-                future_snapshot_time TEXT NOT NULL DEFAULT '',
-                future_price REAL NOT NULL DEFAULT 0,
-                future_spread_points REAL NOT NULL DEFAULT 0,
-                price_change_pct REAL NOT NULL DEFAULT 0,
-                max_price REAL NOT NULL DEFAULT 0,
-                min_price REAL NOT NULL DEFAULT 0,
-                mfe_pct REAL NOT NULL DEFAULT 0,
-                mae_pct REAL NOT NULL DEFAULT 0,
-                outcome_label TEXT NOT NULL DEFAULT 'unknown',
-                signal_quality TEXT NOT NULL DEFAULT 'neutral',
-                labeled_at TEXT NOT NULL,
-                FOREIGN KEY (snapshot_id) REFERENCES market_snapshots(id),
-                UNIQUE(snapshot_id, horizon_min)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_market_snapshots_symbol_time ON market_snapshots(symbol, snapshot_time);
-            CREATE INDEX IF NOT EXISTS idx_snapshot_outcomes_symbol_horizon ON snapshot_outcomes(symbol, horizon_min);
-
-            CREATE TABLE IF NOT EXISTS rule_snapshot_matches (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                rule_id INTEGER NOT NULL,
-                snapshot_id INTEGER NOT NULL,
-                symbol TEXT NOT NULL,
-                matched_by TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (rule_id) REFERENCES knowledge_rules(id),
-                FOREIGN KEY (snapshot_id) REFERENCES market_snapshots(id),
-                UNIQUE(rule_id, snapshot_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS rule_scores (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                rule_id INTEGER NOT NULL,
-                horizon_min INTEGER NOT NULL,
-                sample_count INTEGER NOT NULL DEFAULT 0,
-                success_count INTEGER NOT NULL DEFAULT 0,
-                mixed_count INTEGER NOT NULL DEFAULT 0,
-                fail_count INTEGER NOT NULL DEFAULT 0,
-                observe_count INTEGER NOT NULL DEFAULT 0,
-                success_rate REAL NOT NULL DEFAULT 0,
-                score REAL NOT NULL DEFAULT 0,
-                validation_status TEXT NOT NULL DEFAULT 'insufficient',
-                last_processed_outcome_id INTEGER NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (rule_id) REFERENCES knowledge_rules(id),
-                UNIQUE(rule_id, horizon_min)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_rule_snapshot_matches_rule ON rule_snapshot_matches(rule_id);
-            CREATE INDEX IF NOT EXISTS idx_rule_snapshot_matches_snapshot ON rule_snapshot_matches(snapshot_id);
-            CREATE INDEX IF NOT EXISTS idx_rule_scores_status ON rule_scores(validation_status, horizon_min);
-
-            CREATE TABLE IF NOT EXISTS rule_governance (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                rule_id INTEGER NOT NULL,
-                horizon_min INTEGER NOT NULL,
-                governance_status TEXT NOT NULL DEFAULT 'pending',
-                rationale TEXT NOT NULL DEFAULT '',
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (rule_id) REFERENCES knowledge_rules(id),
-                UNIQUE(rule_id, horizon_min)
-            );
-
-            CREATE TABLE IF NOT EXISTS learning_reports (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                report_type TEXT NOT NULL DEFAULT 'rule_digest',
-                horizon_min INTEGER NOT NULL DEFAULT 30,
-                summary_text TEXT NOT NULL DEFAULT '',
-                payload_json TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS user_feedback (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                snapshot_id INTEGER,
-                symbol TEXT NOT NULL DEFAULT '',
-                snapshot_time TEXT NOT NULL DEFAULT '',
-                feedback_label TEXT NOT NULL DEFAULT '',
-                feedback_score REAL NOT NULL DEFAULT 0,
-                feedback_text TEXT NOT NULL DEFAULT '',
-                source TEXT NOT NULL DEFAULT 'manual',
-                signature TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (snapshot_id) REFERENCES market_snapshots(id),
-                UNIQUE(signature)
-            );
-
-            CREATE TABLE IF NOT EXISTS rule_feedback_scores (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                rule_id INTEGER NOT NULL,
-                helpful_count INTEGER NOT NULL DEFAULT 0,
-                unhelpful_count INTEGER NOT NULL DEFAULT 0,
-                too_late_count INTEGER NOT NULL DEFAULT 0,
-                noise_count INTEGER NOT NULL DEFAULT 0,
-                risky_count INTEGER NOT NULL DEFAULT 0,
-                total_count INTEGER NOT NULL DEFAULT 0,
-                positive_rate REAL NOT NULL DEFAULT 0,
-                negative_rate REAL NOT NULL DEFAULT 0,
-                score REAL NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (rule_id) REFERENCES knowledge_rules(id),
-                UNIQUE(rule_id)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_rule_governance_status ON rule_governance(governance_status, horizon_min);
-            CREATE INDEX IF NOT EXISTS idx_learning_reports_type_time ON learning_reports(report_type, created_at);
-            CREATE INDEX IF NOT EXISTS idx_user_feedback_snapshot_time ON user_feedback(symbol, snapshot_time, created_at);
-            CREATE INDEX IF NOT EXISTS idx_user_feedback_label ON user_feedback(feedback_label, created_at);
-            CREATE INDEX IF NOT EXISTS idx_rule_feedback_scores_score ON rule_feedback_scores(score, total_count);
-
-            CREATE TABLE IF NOT EXISTS ai_signal_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                signal_signature TEXT NOT NULL,
-                occurred_at TEXT NOT NULL,
-                snapshot_time TEXT NOT NULL DEFAULT '',
-                snapshot_symbols_json TEXT NOT NULL DEFAULT '[]',
-                symbol TEXT NOT NULL DEFAULT '',
-                action TEXT NOT NULL DEFAULT 'neutral',
-                entry_price REAL NOT NULL DEFAULT 0,
-                stop_loss REAL NOT NULL DEFAULT 0,
-                take_profit REAL NOT NULL DEFAULT 0,
-                signal_schema_version TEXT NOT NULL DEFAULT '',
-                signal_meta_valid INTEGER NOT NULL DEFAULT 0,
-                signal_meta_reason TEXT NOT NULL DEFAULT '',
-                model TEXT NOT NULL DEFAULT '',
-                api_base TEXT NOT NULL DEFAULT '',
-                is_fallback INTEGER NOT NULL DEFAULT 0,
-                push_sent INTEGER NOT NULL DEFAULT 0,
-                summary_line TEXT NOT NULL DEFAULT '',
-                content TEXT NOT NULL DEFAULT '',
-                signal_json TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL,
-                UNIQUE(signal_signature)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_ai_signal_events_time ON ai_signal_events(occurred_at, symbol);
-            CREATE INDEX IF NOT EXISTS idx_ai_signal_events_action ON ai_signal_events(action, signal_meta_valid);
-
-            CREATE TABLE IF NOT EXISTS ml_model_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                model_name TEXT NOT NULL,
-                horizon_min INTEGER NOT NULL DEFAULT 30,
-                sample_count INTEGER NOT NULL DEFAULT 0,
-                base_win_probability REAL NOT NULL DEFAULT 0,
-                feature_count INTEGER NOT NULL DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'insufficient',
-                notes TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS ml_feature_stats (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                model_name TEXT NOT NULL,
-                horizon_min INTEGER NOT NULL DEFAULT 30,
-                feature_name TEXT NOT NULL,
-                feature_value TEXT NOT NULL,
-                sample_count INTEGER NOT NULL DEFAULT 0,
-                success_weight REAL NOT NULL DEFAULT 0,
-                mixed_count INTEGER NOT NULL DEFAULT 0,
-                fail_count INTEGER NOT NULL DEFAULT 0,
-                win_probability REAL NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL,
-                UNIQUE(model_name, horizon_min, feature_name, feature_value)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_ml_model_runs_time ON ml_model_runs(model_name, horizon_min, created_at);
-            CREATE INDEX IF NOT EXISTS idx_ml_feature_stats_lookup ON ml_feature_stats(model_name, horizon_min, feature_name, feature_value);
-
-            -- 3.2 修复：系统状态 KV 表，代替直接读写 JSON 文件，避免写入中断导致文件损坏
-            CREATE TABLE IF NOT EXISTS system_state_kv (
-                key   TEXT PRIMARY KEY,
-                value_json TEXT NOT NULL DEFAULT 'null',
-                updated_at TEXT NOT NULL DEFAULT ''
-            );
-            """
-        )
-        # 3.3 修复：为已有数据库热迁移 last_processed_outcome_id 列（SQLite 不支持 IF NOT EXISTS 修饰 ALTER COLUMN）
+    if _is_schema_cached(target):
+        return target
+    with _SCHEMA_INIT_LOCK:
+        if _is_schema_cached(target):
+            return target
+        cache_key = _schema_cache_key(target)
         try:
-            conn.execute(
-                "ALTER TABLE rule_scores ADD COLUMN last_processed_outcome_id INTEGER NOT NULL DEFAULT 0"
-            )
+            with _connect(target) as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS knowledge_sources (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        title TEXT NOT NULL,
+                        source_type TEXT NOT NULL,
+                        location TEXT NOT NULL,
+                        author TEXT NOT NULL DEFAULT '',
+                        published_at TEXT NOT NULL DEFAULT '',
+                        trust_level TEXT NOT NULL DEFAULT 'working',
+                        tags_json TEXT NOT NULL DEFAULT '[]',
+                        notes TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE(source_type, location)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS knowledge_documents (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        source_id INTEGER NOT NULL,
+                        content_hash TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        imported_at TEXT NOT NULL,
+                        FOREIGN KEY (source_id) REFERENCES knowledge_sources(id),
+                        UNIQUE(source_id, content_hash)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS knowledge_rules (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        source_id INTEGER NOT NULL,
+                        document_id INTEGER,
+                        section_title TEXT NOT NULL DEFAULT '',
+                        category TEXT NOT NULL DEFAULT 'general',
+                        asset_scope TEXT NOT NULL DEFAULT 'ALL',
+                        rule_text TEXT NOT NULL,
+                        confidence TEXT NOT NULL DEFAULT 'working',
+                        evidence_type TEXT NOT NULL DEFAULT '经验整理',
+                        tags_json TEXT NOT NULL DEFAULT '[]',
+                        logic_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY (source_id) REFERENCES knowledge_sources(id),
+                        FOREIGN KEY (document_id) REFERENCES knowledge_documents(id),
+                        UNIQUE(source_id, category, rule_text)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_knowledge_rules_category ON knowledge_rules(category);
+                    CREATE INDEX IF NOT EXISTS idx_knowledge_rules_asset_scope ON knowledge_rules(asset_scope);
+                    CREATE INDEX IF NOT EXISTS idx_knowledge_sources_trust_level ON knowledge_sources(trust_level);
+
+                    CREATE TABLE IF NOT EXISTS market_snapshots (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        snapshot_time TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        latest_price REAL NOT NULL DEFAULT 0,
+                        spread_points REAL NOT NULL DEFAULT 0,
+                        has_live_quote INTEGER NOT NULL DEFAULT 0,
+                        tone TEXT NOT NULL DEFAULT 'neutral',
+                        trade_grade TEXT NOT NULL DEFAULT '',
+                        trade_grade_source TEXT NOT NULL DEFAULT '',
+                        alert_state_text TEXT NOT NULL DEFAULT '',
+                        event_risk_mode_text TEXT NOT NULL DEFAULT '',
+                        event_active_name TEXT NOT NULL DEFAULT '',
+                        event_importance_text TEXT NOT NULL DEFAULT '',
+                        event_note TEXT NOT NULL DEFAULT '',
+                        signal_side TEXT NOT NULL DEFAULT 'neutral',
+                        regime_tag TEXT NOT NULL DEFAULT '',
+                        regime_text TEXT NOT NULL DEFAULT '',
+                        feature_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        UNIQUE(snapshot_time, symbol)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS snapshot_outcomes (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        snapshot_id INTEGER NOT NULL,
+                        symbol TEXT NOT NULL,
+                        snapshot_time TEXT NOT NULL,
+                        horizon_min INTEGER NOT NULL,
+                        future_snapshot_time TEXT NOT NULL DEFAULT '',
+                        future_price REAL NOT NULL DEFAULT 0,
+                        future_spread_points REAL NOT NULL DEFAULT 0,
+                        price_change_pct REAL NOT NULL DEFAULT 0,
+                        max_price REAL NOT NULL DEFAULT 0,
+                        min_price REAL NOT NULL DEFAULT 0,
+                        mfe_pct REAL NOT NULL DEFAULT 0,
+                        mae_pct REAL NOT NULL DEFAULT 0,
+                        outcome_label TEXT NOT NULL DEFAULT 'unknown',
+                        signal_quality TEXT NOT NULL DEFAULT 'neutral',
+                        labeled_at TEXT NOT NULL,
+                        FOREIGN KEY (snapshot_id) REFERENCES market_snapshots(id),
+                        UNIQUE(snapshot_id, horizon_min)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_market_snapshots_symbol_time ON market_snapshots(symbol, snapshot_time);
+                    CREATE INDEX IF NOT EXISTS idx_snapshot_outcomes_symbol_horizon ON snapshot_outcomes(symbol, horizon_min);
+
+                    CREATE TABLE IF NOT EXISTS rule_snapshot_matches (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        rule_id INTEGER NOT NULL,
+                        snapshot_id INTEGER NOT NULL,
+                        symbol TEXT NOT NULL,
+                        matched_by TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY (rule_id) REFERENCES knowledge_rules(id),
+                        FOREIGN KEY (snapshot_id) REFERENCES market_snapshots(id),
+                        UNIQUE(rule_id, snapshot_id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS rule_scores (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        rule_id INTEGER NOT NULL,
+                        horizon_min INTEGER NOT NULL,
+                        sample_count INTEGER NOT NULL DEFAULT 0,
+                        success_count INTEGER NOT NULL DEFAULT 0,
+                        mixed_count INTEGER NOT NULL DEFAULT 0,
+                        fail_count INTEGER NOT NULL DEFAULT 0,
+                        observe_count INTEGER NOT NULL DEFAULT 0,
+                        success_rate REAL NOT NULL DEFAULT 0,
+                        score REAL NOT NULL DEFAULT 0,
+                        validation_status TEXT NOT NULL DEFAULT 'insufficient',
+                        last_processed_outcome_id INTEGER NOT NULL DEFAULT 0,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY (rule_id) REFERENCES knowledge_rules(id),
+                        UNIQUE(rule_id, horizon_min)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_rule_snapshot_matches_rule ON rule_snapshot_matches(rule_id);
+                    CREATE INDEX IF NOT EXISTS idx_rule_snapshot_matches_snapshot ON rule_snapshot_matches(snapshot_id);
+                    CREATE INDEX IF NOT EXISTS idx_rule_scores_status ON rule_scores(validation_status, horizon_min);
+
+                    CREATE TABLE IF NOT EXISTS rule_governance (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        rule_id INTEGER NOT NULL,
+                        horizon_min INTEGER NOT NULL,
+                        governance_status TEXT NOT NULL DEFAULT 'pending',
+                        rationale TEXT NOT NULL DEFAULT '',
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY (rule_id) REFERENCES knowledge_rules(id),
+                        UNIQUE(rule_id, horizon_min)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS learning_reports (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        report_type TEXT NOT NULL DEFAULT 'rule_digest',
+                        horizon_min INTEGER NOT NULL DEFAULT 30,
+                        summary_text TEXT NOT NULL DEFAULT '',
+                        payload_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS user_feedback (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        snapshot_id INTEGER,
+                        symbol TEXT NOT NULL DEFAULT '',
+                        snapshot_time TEXT NOT NULL DEFAULT '',
+                        feedback_label TEXT NOT NULL DEFAULT '',
+                        feedback_score REAL NOT NULL DEFAULT 0,
+                        feedback_text TEXT NOT NULL DEFAULT '',
+                        source TEXT NOT NULL DEFAULT 'manual',
+                        signature TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY (snapshot_id) REFERENCES market_snapshots(id),
+                        UNIQUE(signature)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS rule_feedback_scores (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        rule_id INTEGER NOT NULL,
+                        helpful_count INTEGER NOT NULL DEFAULT 0,
+                        unhelpful_count INTEGER NOT NULL DEFAULT 0,
+                        too_late_count INTEGER NOT NULL DEFAULT 0,
+                        noise_count INTEGER NOT NULL DEFAULT 0,
+                        risky_count INTEGER NOT NULL DEFAULT 0,
+                        total_count INTEGER NOT NULL DEFAULT 0,
+                        positive_rate REAL NOT NULL DEFAULT 0,
+                        negative_rate REAL NOT NULL DEFAULT 0,
+                        score REAL NOT NULL DEFAULT 0,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY (rule_id) REFERENCES knowledge_rules(id),
+                        UNIQUE(rule_id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_rule_governance_status ON rule_governance(governance_status, horizon_min);
+                    CREATE INDEX IF NOT EXISTS idx_learning_reports_type_time ON learning_reports(report_type, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_user_feedback_snapshot_time ON user_feedback(symbol, snapshot_time, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_user_feedback_label ON user_feedback(feedback_label, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_rule_feedback_scores_score ON rule_feedback_scores(score, total_count);
+
+                    CREATE TABLE IF NOT EXISTS ai_signal_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        signal_signature TEXT NOT NULL,
+                        occurred_at TEXT NOT NULL,
+                        snapshot_time TEXT NOT NULL DEFAULT '',
+                        snapshot_symbols_json TEXT NOT NULL DEFAULT '[]',
+                        symbol TEXT NOT NULL DEFAULT '',
+                        action TEXT NOT NULL DEFAULT 'neutral',
+                        entry_price REAL NOT NULL DEFAULT 0,
+                        stop_loss REAL NOT NULL DEFAULT 0,
+                        take_profit REAL NOT NULL DEFAULT 0,
+                        signal_schema_version TEXT NOT NULL DEFAULT '',
+                        signal_meta_valid INTEGER NOT NULL DEFAULT 0,
+                        signal_meta_reason TEXT NOT NULL DEFAULT '',
+                        used_structured_payload INTEGER NOT NULL DEFAULT 0,
+                        ai_parse_mode TEXT NOT NULL DEFAULT '',
+                        ai_raw_response_logged INTEGER NOT NULL DEFAULT 0,
+                        ai_raw_response_length INTEGER NOT NULL DEFAULT 0,
+                        ai_raw_response_excerpt TEXT NOT NULL DEFAULT '',
+                        model TEXT NOT NULL DEFAULT '',
+                        api_base TEXT NOT NULL DEFAULT '',
+                        is_fallback INTEGER NOT NULL DEFAULT 0,
+                        push_sent INTEGER NOT NULL DEFAULT 0,
+                        summary_line TEXT NOT NULL DEFAULT '',
+                        content TEXT NOT NULL DEFAULT '',
+                        signal_json TEXT NOT NULL DEFAULT '{}',
+                        snapshot_trade_grade TEXT NOT NULL DEFAULT '',
+                        snapshot_trade_grade_source TEXT NOT NULL DEFAULT '',
+                        snapshot_signal_side TEXT NOT NULL DEFAULT 'neutral',
+                        snapshot_has_live_quote INTEGER NOT NULL DEFAULT 0,
+                        sim_eligible INTEGER NOT NULL DEFAULT 0,
+                        sim_block_reason TEXT NOT NULL DEFAULT '',
+                        sim_block_reason_key TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        UNIQUE(signal_signature)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_ai_signal_events_time ON ai_signal_events(occurred_at, symbol);
+                    CREATE INDEX IF NOT EXISTS idx_ai_signal_events_action ON ai_signal_events(action, signal_meta_valid);
+
+                    CREATE TABLE IF NOT EXISTS execution_audits (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        occurred_at TEXT NOT NULL,
+                        snapshot_time TEXT NOT NULL DEFAULT '',
+                        snapshot_id INTEGER NOT NULL DEFAULT 0,
+                        signal_signature TEXT NOT NULL DEFAULT '',
+                        symbol TEXT NOT NULL DEFAULT '',
+                        action TEXT NOT NULL DEFAULT 'neutral',
+                        source_kind TEXT NOT NULL DEFAULT '',
+                        trade_mode TEXT NOT NULL DEFAULT 'simulation',
+                        decision_status TEXT NOT NULL DEFAULT '',
+                        reason_key TEXT NOT NULL DEFAULT '',
+                        reason_text TEXT NOT NULL DEFAULT '',
+                        user_id TEXT NOT NULL DEFAULT 'system',
+                        entry_price REAL NOT NULL DEFAULT 0,
+                        stop_loss REAL NOT NULL DEFAULT 0,
+                        take_profit REAL NOT NULL DEFAULT 0,
+                        meta_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_execution_audits_time ON execution_audits(occurred_at, symbol);
+                    CREATE INDEX IF NOT EXISTS idx_execution_audits_source ON execution_audits(source_kind, decision_status, occurred_at);
+
+                    CREATE TABLE IF NOT EXISTS trade_learning_journal (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        sim_position_id INTEGER NOT NULL,
+                        user_id TEXT NOT NULL DEFAULT 'system',
+                        snapshot_id INTEGER NOT NULL DEFAULT 0,
+                        snapshot_time TEXT NOT NULL DEFAULT '',
+                        symbol TEXT NOT NULL DEFAULT '',
+                        action TEXT NOT NULL DEFAULT 'neutral',
+                        execution_profile TEXT NOT NULL DEFAULT 'standard',
+                        trade_grade TEXT NOT NULL DEFAULT '',
+                        trade_grade_source TEXT NOT NULL DEFAULT '',
+                        signal_side TEXT NOT NULL DEFAULT '',
+                        signal_side_reason TEXT NOT NULL DEFAULT '',
+                        setup_kind TEXT NOT NULL DEFAULT '',
+                        risk_reward_ratio REAL NOT NULL DEFAULT 0,
+                        risk_reward_state TEXT NOT NULL DEFAULT '',
+                        model_win_probability REAL NOT NULL DEFAULT 0,
+                        execution_open_probability REAL NOT NULL DEFAULT 0,
+                        entry_zone_side TEXT NOT NULL DEFAULT '',
+                        regime_tag TEXT NOT NULL DEFAULT '',
+                        event_risk_mode_text TEXT NOT NULL DEFAULT '',
+                        sizing_reference_balance REAL NOT NULL DEFAULT 0,
+                        risk_budget_pct REAL NOT NULL DEFAULT 0,
+                        entry_price REAL NOT NULL DEFAULT 0,
+                        stop_loss REAL NOT NULL DEFAULT 0,
+                        take_profit REAL NOT NULL DEFAULT 0,
+                        take_profit_2 REAL NOT NULL DEFAULT 0,
+                        quantity REAL NOT NULL DEFAULT 0,
+                        required_margin REAL NOT NULL DEFAULT 0,
+                        execution_note TEXT NOT NULL DEFAULT '',
+                        entry_payload_json TEXT NOT NULL DEFAULT '{}',
+                        opened_at TEXT NOT NULL DEFAULT '',
+                        closed_at TEXT NOT NULL DEFAULT '',
+                        exit_price REAL NOT NULL DEFAULT 0,
+                        profit REAL NOT NULL DEFAULT 0,
+                        outcome_label TEXT NOT NULL DEFAULT 'unknown',
+                        close_reason TEXT NOT NULL DEFAULT '',
+                        close_reason_key TEXT NOT NULL DEFAULT '',
+                        loss_reason_tags_json TEXT NOT NULL DEFAULT '[]',
+                        updated_at TEXT NOT NULL DEFAULT '',
+                        UNIQUE(sim_position_id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_trade_learning_symbol_time ON trade_learning_journal(symbol, opened_at);
+                    CREATE INDEX IF NOT EXISTS idx_trade_learning_outcome ON trade_learning_journal(execution_profile, outcome_label, opened_at);
+
+                    CREATE TABLE IF NOT EXISTS alert_effect_outcomes (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        alert_signature TEXT NOT NULL,
+                        category TEXT NOT NULL DEFAULT '',
+                        title TEXT NOT NULL DEFAULT '',
+                        symbol TEXT NOT NULL DEFAULT '',
+                        action TEXT NOT NULL DEFAULT 'neutral',
+                        occurred_at TEXT NOT NULL DEFAULT '',
+                        snapshot_id INTEGER NOT NULL DEFAULT 0,
+                        snapshot_time TEXT NOT NULL DEFAULT '',
+                        horizon_min INTEGER NOT NULL DEFAULT 30,
+                        outcome_label TEXT NOT NULL DEFAULT 'unknown',
+                        signal_quality TEXT NOT NULL DEFAULT 'neutral',
+                        price_change_pct REAL NOT NULL DEFAULT 0,
+                        mfe_pct REAL NOT NULL DEFAULT 0,
+                        mae_pct REAL NOT NULL DEFAULT 0,
+                        max_favorable_r REAL NOT NULL DEFAULT 0,
+                        max_adverse_r REAL NOT NULL DEFAULT 0,
+                        reached_1r INTEGER NOT NULL DEFAULT 0,
+                        meta_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL DEFAULT '',
+                        UNIQUE(alert_signature, horizon_min)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_alert_effect_symbol_time ON alert_effect_outcomes(symbol, occurred_at);
+                    CREATE INDEX IF NOT EXISTS idx_alert_effect_outcome ON alert_effect_outcomes(horizon_min, outcome_label);
+
+                    CREATE TABLE IF NOT EXISTS missed_opportunity_samples (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        snapshot_id INTEGER NOT NULL,
+                        symbol TEXT NOT NULL DEFAULT '',
+                        snapshot_time TEXT NOT NULL DEFAULT '',
+                        horizon_min INTEGER NOT NULL DEFAULT 30,
+                        best_side TEXT NOT NULL DEFAULT 'neutral',
+                        reason_key TEXT NOT NULL DEFAULT '',
+                        reason_label TEXT NOT NULL DEFAULT '',
+                        mfe_pct REAL NOT NULL DEFAULT 0,
+                        mae_pct REAL NOT NULL DEFAULT 0,
+                        price_change_pct REAL NOT NULL DEFAULT 0,
+                        meta_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL DEFAULT '',
+                        UNIQUE(snapshot_id, horizon_min)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_missed_opportunity_reason ON missed_opportunity_samples(horizon_min, reason_key);
+                    CREATE INDEX IF NOT EXISTS idx_missed_opportunity_symbol_time ON missed_opportunity_samples(symbol, snapshot_time);
+
+                    CREATE TABLE IF NOT EXISTS ml_model_runs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        model_name TEXT NOT NULL,
+                        horizon_min INTEGER NOT NULL DEFAULT 30,
+                        sample_count INTEGER NOT NULL DEFAULT 0,
+                        base_win_probability REAL NOT NULL DEFAULT 0,
+                        feature_count INTEGER NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL DEFAULT 'insufficient',
+                        notes TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS ml_feature_stats (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        model_name TEXT NOT NULL,
+                        horizon_min INTEGER NOT NULL DEFAULT 30,
+                        feature_name TEXT NOT NULL,
+                        feature_value TEXT NOT NULL,
+                        sample_count INTEGER NOT NULL DEFAULT 0,
+                        success_weight REAL NOT NULL DEFAULT 0,
+                        mixed_count INTEGER NOT NULL DEFAULT 0,
+                        fail_count INTEGER NOT NULL DEFAULT 0,
+                        win_probability REAL NOT NULL DEFAULT 0,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE(model_name, horizon_min, feature_name, feature_value)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_ml_model_runs_time ON ml_model_runs(model_name, horizon_min, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_ml_feature_stats_lookup ON ml_feature_stats(model_name, horizon_min, feature_name, feature_value);
+
+                    CREATE TABLE IF NOT EXISTS system_state_kv (
+                        key   TEXT PRIMARY KEY,
+                        value_json TEXT NOT NULL DEFAULT 'null',
+                        updated_at TEXT NOT NULL DEFAULT ''
+                    );
+                    """
+                )
+                try:
+                    conn.execute(
+                        "ALTER TABLE rule_scores ADD COLUMN last_processed_outcome_id INTEGER NOT NULL DEFAULT 0"
+                    )
+                except Exception:
+                    pass
+                try:
+                    conn.execute(
+                        "ALTER TABLE market_snapshots ADD COLUMN regime_tag TEXT NOT NULL DEFAULT ''"
+                    )
+                except Exception:
+                    pass
+                try:
+                    conn.execute(
+                        "ALTER TABLE snapshot_outcomes ADD COLUMN is_clustered INTEGER NOT NULL DEFAULT 0"
+                    )
+                except Exception:
+                    pass
+                try:
+                    conn.execute(
+                        "ALTER TABLE market_snapshots ADD COLUMN regime_text TEXT NOT NULL DEFAULT ''"
+                    )
+                except Exception:
+                    pass
+                try:
+                    conn.execute(
+                        "ALTER TABLE ai_signal_events ADD COLUMN snapshot_trade_grade TEXT NOT NULL DEFAULT ''"
+                    )
+                except Exception:
+                    pass
+                try:
+                    conn.execute(
+                        "ALTER TABLE ai_signal_events ADD COLUMN snapshot_trade_grade_source TEXT NOT NULL DEFAULT ''"
+                    )
+                except Exception:
+                    pass
+                try:
+                    conn.execute(
+                        "ALTER TABLE ai_signal_events ADD COLUMN snapshot_signal_side TEXT NOT NULL DEFAULT 'neutral'"
+                    )
+                except Exception:
+                    pass
+                try:
+                    conn.execute(
+                        "ALTER TABLE ai_signal_events ADD COLUMN snapshot_has_live_quote INTEGER NOT NULL DEFAULT 0"
+                    )
+                except Exception:
+                    pass
+                try:
+                    conn.execute(
+                        "ALTER TABLE ai_signal_events ADD COLUMN sim_eligible INTEGER NOT NULL DEFAULT 0"
+                    )
+                except Exception:
+                    pass
+                try:
+                    conn.execute(
+                        "ALTER TABLE ai_signal_events ADD COLUMN sim_block_reason TEXT NOT NULL DEFAULT ''"
+                    )
+                except Exception:
+                    pass
+                try:
+                    conn.execute(
+                        "ALTER TABLE ai_signal_events ADD COLUMN sim_block_reason_key TEXT NOT NULL DEFAULT ''"
+                    )
+                except Exception:
+                    pass
+                try:
+                    conn.execute(
+                        "ALTER TABLE ai_signal_events ADD COLUMN used_structured_payload INTEGER NOT NULL DEFAULT 0"
+                    )
+                except Exception:
+                    pass
+                try:
+                    conn.execute(
+                        "ALTER TABLE ai_signal_events ADD COLUMN ai_parse_mode TEXT NOT NULL DEFAULT ''"
+                    )
+                except Exception:
+                    pass
+                try:
+                    conn.execute(
+                        "ALTER TABLE ai_signal_events ADD COLUMN ai_raw_response_logged INTEGER NOT NULL DEFAULT 0"
+                    )
+                except Exception:
+                    pass
+                try:
+                    conn.execute(
+                        "ALTER TABLE ai_signal_events ADD COLUMN ai_raw_response_length INTEGER NOT NULL DEFAULT 0"
+                    )
+                except Exception:
+                    pass
+                try:
+                    conn.execute(
+                        "ALTER TABLE ai_signal_events ADD COLUMN ai_raw_response_excerpt TEXT NOT NULL DEFAULT ''"
+                    )
+                except Exception:
+                    pass
+                try:
+                    conn.execute(
+                        "ALTER TABLE knowledge_rules ADD COLUMN logic_json TEXT NOT NULL DEFAULT '{}'"
+                    )
+                except Exception:
+                    pass
+                for sql in (
+                    "ALTER TABLE alert_effect_outcomes ADD COLUMN max_favorable_r REAL NOT NULL DEFAULT 0",
+                    "ALTER TABLE alert_effect_outcomes ADD COLUMN max_adverse_r REAL NOT NULL DEFAULT 0",
+                    "ALTER TABLE alert_effect_outcomes ADD COLUMN reached_1r INTEGER NOT NULL DEFAULT 0",
+                ):
+                    try:
+                        conn.execute(sql)
+                    except Exception:
+                        pass
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_market_snapshots_regime_time ON market_snapshots(regime_tag, snapshot_time)"
+                )
         except Exception:
-            pass  # 列已存在，忽略
-        try:
-            conn.execute(
-                "ALTER TABLE market_snapshots ADD COLUMN regime_tag TEXT NOT NULL DEFAULT ''"
-            )
-        except Exception:
-            pass
-        try:
-            conn.execute(
-                "ALTER TABLE market_snapshots ADD COLUMN regime_text TEXT NOT NULL DEFAULT ''"
-            )
-        except Exception:
-            pass
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_market_snapshots_regime_time ON market_snapshots(regime_tag, snapshot_time)"
-        )
-    return target
+            _SCHEMA_READY_PATHS.discard(cache_key)
+            raise
+        _SCHEMA_READY_PATHS.add(cache_key)
+        return target
 
 
 
@@ -507,6 +834,7 @@ def import_markdown_source(
     title: str | None = None,
     author: str = "用户资料",
     trust_level: str = "user_note",
+    source_type: str = "local_markdown",
     tags: list[str] | tuple[str, ...] | None = None,
     notes: str = "",
     db_path: Path | str | None = None,
@@ -515,7 +843,7 @@ def import_markdown_source(
     content = path.read_text(encoding="utf-8")
     source_id = upsert_source(
         title=title or path.stem,
-        source_type="local_markdown",
+        source_type=source_type,
         location=str(path),
         author=author,
         published_at="",
@@ -547,8 +875,8 @@ def import_markdown_source(
             cursor = conn.execute(
                 """
                 INSERT OR IGNORE INTO knowledge_rules (
-                    source_id, document_id, section_title, category, asset_scope, rule_text, confidence, evidence_type, tags_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source_id, document_id, section_title, category, asset_scope, rule_text, confidence, evidence_type, tags_json, logic_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     source_id,
@@ -560,6 +888,7 @@ def import_markdown_source(
                     _normalize_text(item.get("confidence", "")) or "working",
                     _normalize_text(item.get("evidence_type", "")) or "经验整理",
                     json.dumps(_normalize_tags(item.get("tags", [])), ensure_ascii=False),
+                    json.dumps(item.get("logic", {}) or {}, ensure_ascii=False),
                     imported_at,
                 ),
             )

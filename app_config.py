@@ -1,6 +1,6 @@
 import os
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import dotenv_values, load_dotenv, set_key
@@ -12,6 +12,27 @@ DEFAULT_QUOTE_RISK_THRESHOLDS = {
     "XAU": {"warn_points": 45.0, "alert_points": 70.0, "warn_pct": 0.018, "alert_pct": 0.030},
     "XAG": {"warn_points": 80.0, "alert_points": 120.0, "warn_pct": 0.040, "alert_pct": 0.065},
     "FX": {"warn_points": 25.0, "alert_points": 40.0, "warn_pct": 0.020, "alert_pct": 0.035},
+}
+DEFAULT_SIM_STRATEGY_MIN_RR = {
+    "early_momentum": 1.30,
+    "direct_momentum": 1.40,
+    "pullback_sniper_probe": 1.45,
+    "directional_probe": 1.80,
+    "structure": 1.80,
+}
+DEFAULT_SIM_STRATEGY_DAILY_LIMIT = {
+    "early_momentum": 3,
+    "direct_momentum": 3,
+    "pullback_sniper_probe": 3,
+    "directional_probe": 3,
+    "structure": 3,
+}
+DEFAULT_SIM_STRATEGY_COOLDOWN_MIN = {
+    "early_momentum": 10,
+    "direct_momentum": 10,
+    "pullback_sniper_probe": 10,
+    "directional_probe": 10,
+    "structure": 10,
 }
 EVENT_RISK_MODES = {
     "normal": "正常观察",
@@ -152,10 +173,43 @@ class MetalMonitorConfig:
     overnight_spread_guard_enabled: bool = True
     overnight_spread_guard_start_hour: int = 5
     overnight_spread_guard_end_hour: int = 7
+    trade_mode: str = "simulation"
+    live_max_drawdown_pct: float = 0.05
+    live_order_precheck_only: bool = True
+    live_max_open_positions: int = 1
+    live_max_orders_per_day: int = 3
+    sim_initial_balance: float = 1000.0
+    sim_no_tp2_lock_r: float = 0.5
+    sim_no_tp2_partial_close_ratio: float = 0.5
+    sim_min_rr: float = 1.6
+    sim_relaxed_rr: float = 1.3
+    sim_model_min_probability: float = 0.68
+    sim_exploratory_daily_limit: int = 3
+    sim_exploratory_cooldown_min: int = 10
+    sim_exploratory_base_balance: float = 1000.0
+    sim_strategy_min_rr: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_SIM_STRATEGY_MIN_RR))
+    sim_strategy_daily_limit: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_SIM_STRATEGY_DAILY_LIMIT))
+    sim_strategy_cooldown_min: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_SIM_STRATEGY_COOLDOWN_MIN))
 
 
 def _clean_env_value(value: object) -> str:
     return str(value or "").strip().strip("'\"")
+
+
+def _quote_env_value(value: object) -> str:
+    text = str(value or "")
+    escaped = text.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
+    return f"'{escaped}'"
+
+
+def _atomic_write_env_values(values: dict[str, str], target: Path | None = None) -> None:
+    """原子写入 .env，避免保存设置时中断导致配置文件被截断。"""
+    env_path = Path(target) if target else ENV_FILE
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"{key}={_quote_env_value(value)}" for key, value in sorted(values.items())]
+    temp_file = env_path.with_name(f"{env_path.name}.tmp")
+    temp_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    temp_file.replace(env_path)
 
 
 def _read_legacy_runtime_config() -> dict:
@@ -255,6 +309,120 @@ def _parse_bool_env(name: str, default: bool = False) -> bool:
     return text in {"1", "true", "yes", "y", "on"}
 
 
+def _parse_int_env(name: str, default: int = 0, minimum: int | None = None, maximum: int | None = None) -> int:
+    try:
+        value = int(str(os.getenv(name, str(default)) or str(default)).strip() or str(default))
+    except (TypeError, ValueError):
+        value = int(default)
+    if minimum is not None:
+        value = max(int(minimum), value)
+    if maximum is not None:
+        value = min(int(maximum), value)
+    return value
+
+
+def normalize_sim_strategy_min_rr(value: object | None = None) -> dict[str, float]:
+    result = dict(DEFAULT_SIM_STRATEGY_MIN_RR)
+    payload = value
+    if payload is None:
+        payload = os.getenv("SIM_STRATEGY_MIN_RR_JSON", "")
+    if isinstance(payload, str):
+        text = payload.strip()
+        if not text:
+            return result
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return result
+    if not isinstance(payload, dict):
+        return result
+    for key, raw_value in payload.items():
+        clean_key = str(key or "").strip().lower()
+        if not clean_key:
+            continue
+        try:
+            result[clean_key] = max(0.50, min(10.0, float(raw_value)))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def normalize_sim_strategy_daily_limit(value: object | None = None) -> dict[str, int]:
+    result = dict(DEFAULT_SIM_STRATEGY_DAILY_LIMIT)
+    payload = value
+    if payload is None:
+        payload = os.getenv("SIM_STRATEGY_DAILY_LIMIT_JSON", "")
+    if isinstance(payload, str):
+        text = payload.strip()
+        if not text:
+            return result
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return result
+    if not isinstance(payload, dict):
+        return result
+    for key, raw_value in payload.items():
+        clean_key = str(key or "").strip().lower()
+        if not clean_key:
+            continue
+        try:
+            result[clean_key] = max(0, min(50, int(raw_value)))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def normalize_sim_strategy_cooldown_min(value: object | None = None) -> dict[str, int]:
+    result = dict(DEFAULT_SIM_STRATEGY_COOLDOWN_MIN)
+    payload = value
+    if payload is None:
+        payload = os.getenv("SIM_STRATEGY_COOLDOWN_JSON", "")
+    if isinstance(payload, str):
+        text = payload.strip()
+        if not text:
+            return result
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return result
+    if not isinstance(payload, dict):
+        return result
+    for key, raw_value in payload.items():
+        clean_key = str(key or "").strip().lower()
+        if not clean_key:
+            continue
+        try:
+            result[clean_key] = max(0, min(240, int(raw_value)))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def get_sim_strategy_min_rr(strategy_family: str, default: float | None = None, config: MetalMonitorConfig | None = None) -> float:
+    clean_key = str(strategy_family or "").strip().lower()
+    fallback = float(default if default is not None else DEFAULT_SIM_STRATEGY_MIN_RR.get(clean_key, 1.60))
+    source = getattr(config, "sim_strategy_min_rr", None) if config is not None else None
+    rr_map = normalize_sim_strategy_min_rr(source)
+    return float(rr_map.get(clean_key, fallback) or fallback)
+
+
+def get_sim_strategy_daily_limit(strategy_family: str, default: int | None = None, config: MetalMonitorConfig | None = None) -> int:
+    clean_key = str(strategy_family or "").strip().lower()
+    fallback = int(default if default is not None else DEFAULT_SIM_STRATEGY_DAILY_LIMIT.get(clean_key, 3))
+    source = getattr(config, "sim_strategy_daily_limit", None) if config is not None else None
+    limit_map = normalize_sim_strategy_daily_limit(source)
+    return int(limit_map.get(clean_key, fallback) or fallback)
+
+
+def get_sim_strategy_cooldown_min(strategy_family: str, default: int | None = None, config: MetalMonitorConfig | None = None) -> int:
+    clean_key = str(strategy_family or "").strip().lower()
+    fallback = int(default if default is not None else DEFAULT_SIM_STRATEGY_COOLDOWN_MIN.get(clean_key, 10))
+    source = getattr(config, "sim_strategy_cooldown_min", None) if config is not None else None
+    cooldown_map = normalize_sim_strategy_cooldown_min(source)
+    return int(cooldown_map.get(clean_key, fallback) or fallback)
+
+
 def normalize_event_risk_mode(value: str) -> str:
     key = str(value or "").strip().lower()
     return key if key in EVENT_RISK_MODES else "normal"
@@ -321,6 +489,59 @@ def get_runtime_config() -> MetalMonitorConfig:
     except ValueError:
         overnight_spread_guard_end_hour = 7
 
+    try:
+        live_max_drawdown_pct = max(0.01, min(0.99, float(str(os.getenv("LIVE_MAX_DRAWDOWN_PCT", "0.05") or "0.05").strip())))
+    except ValueError:
+        live_max_drawdown_pct = 0.05
+    try:
+        sim_initial_balance = max(
+            100.0,
+            min(1000000.0, float(str(os.getenv("SIM_INITIAL_BALANCE", "1000") or "1000").strip())),
+        )
+    except ValueError:
+        sim_initial_balance = 1000.0
+    try:
+        sim_no_tp2_lock_r = max(0.10, min(5.0, float(str(os.getenv("SIM_NO_TP2_LOCK_R", "0.5") or "0.5").strip())))
+    except ValueError:
+        sim_no_tp2_lock_r = 0.5
+    try:
+        sim_no_tp2_partial_close_ratio = max(
+            0.10,
+            min(0.90, float(str(os.getenv("SIM_NO_TP2_PARTIAL_CLOSE_RATIO", "0.5") or "0.5").strip())),
+        )
+    except ValueError:
+        sim_no_tp2_partial_close_ratio = 0.5
+    try:
+        sim_min_rr = max(0.50, min(10.0, float(str(os.getenv("SIM_MIN_RR", "1.6") or "1.6").strip())))
+    except ValueError:
+        sim_min_rr = 1.6
+    try:
+        sim_relaxed_rr = max(0.50, min(10.0, float(str(os.getenv("SIM_RELAXED_RR", "1.3") or "1.3").strip())))
+    except ValueError:
+        sim_relaxed_rr = 1.3
+    try:
+        sim_model_min_probability = max(
+            0.0,
+            min(1.0, float(str(os.getenv("SIM_MODEL_MIN_PROBABILITY", "0.68") or "0.68").strip())),
+        )
+    except ValueError:
+        sim_model_min_probability = 0.68
+    sim_exploratory_daily_limit = _parse_int_env("SIM_EXPLORATORY_DAILY_LIMIT", default=3, minimum=0, maximum=50)
+    sim_exploratory_cooldown_min = _parse_int_env("SIM_EXPLORATORY_COOLDOWN_MIN", default=10, minimum=0, maximum=240)
+    sim_strategy_min_rr = normalize_sim_strategy_min_rr()
+    sim_strategy_daily_limit = normalize_sim_strategy_daily_limit()
+    sim_strategy_cooldown_min = normalize_sim_strategy_cooldown_min()
+    try:
+        sim_exploratory_base_balance = max(
+            100.0,
+            min(
+                1000000.0,
+                float(str(os.getenv("SIM_EXPLORATORY_BASE_BALANCE", str(sim_initial_balance)) or str(sim_initial_balance)).strip()),
+            ),
+        )
+    except ValueError:
+        sim_exploratory_base_balance = sim_initial_balance
+
     return MetalMonitorConfig(
         symbols=symbols,
         refresh_interval_sec=refresh_interval_sec,
@@ -337,7 +558,7 @@ def get_runtime_config() -> MetalMonitorConfig:
         ai_model=str(os.getenv("AI_MODEL", "deepseek-ai/DeepSeek-R1") or "deepseek-ai/DeepSeek-R1").strip(),
         ai_push_enabled=_parse_bool_env("AI_PUSH_ENABLED", default=False),
         ai_push_summary_only=_parse_bool_env("AI_PUSH_SUMMARY_ONLY", default=True),
-        ai_auto_interval_min=max(0, int(str(os.getenv("AI_AUTO_INTERVAL_MIN", "0") or "0").strip() or "0")),
+        ai_auto_interval_min=_parse_int_env("AI_AUTO_INTERVAL_MIN", default=0, minimum=0),
         event_auto_mode_enabled=_parse_bool_env("EVENT_AUTO_MODE_ENABLED", default=False),
         event_schedule_text=str(os.getenv("EVENT_SCHEDULES", "") or "").strip(),
         event_pre_window_min=event_pre_window_min,
@@ -359,6 +580,23 @@ def get_runtime_config() -> MetalMonitorConfig:
         overnight_spread_guard_enabled=_parse_bool_env("OVERNIGHT_SPREAD_GUARD_ENABLED", default=True),
         overnight_spread_guard_start_hour=overnight_spread_guard_start_hour,
         overnight_spread_guard_end_hour=overnight_spread_guard_end_hour,
+        trade_mode=str(os.getenv("TRADE_MODE", "simulation") or "simulation").strip().lower(),
+        live_max_drawdown_pct=live_max_drawdown_pct,
+        live_order_precheck_only=_parse_bool_env("LIVE_ORDER_PRECHECK_ONLY", default=True),
+        live_max_open_positions=_parse_int_env("LIVE_MAX_OPEN_POSITIONS", default=1, minimum=1, maximum=20),
+        live_max_orders_per_day=_parse_int_env("LIVE_MAX_ORDERS_PER_DAY", default=3, minimum=1, maximum=100),
+        sim_initial_balance=sim_initial_balance,
+        sim_no_tp2_lock_r=sim_no_tp2_lock_r,
+        sim_no_tp2_partial_close_ratio=sim_no_tp2_partial_close_ratio,
+        sim_min_rr=sim_min_rr,
+        sim_relaxed_rr=sim_relaxed_rr,
+        sim_model_min_probability=sim_model_min_probability,
+        sim_exploratory_daily_limit=sim_exploratory_daily_limit,
+        sim_exploratory_cooldown_min=sim_exploratory_cooldown_min,
+        sim_exploratory_base_balance=sim_exploratory_base_balance,
+        sim_strategy_min_rr=sim_strategy_min_rr,
+        sim_strategy_daily_limit=sim_strategy_daily_limit,
+        sim_strategy_cooldown_min=sim_strategy_cooldown_min,
     )
 
 
@@ -368,47 +606,96 @@ def _set_env_key(key: str, value: str) -> None:
     os.environ[key] = value
 
 
+def _apply_env_updates(updates: dict[str, str]) -> None:
+    current = {
+        str(key): _clean_env_value(value)
+        for key, value in dict(dotenv_values(str(ENV_FILE)) if ENV_FILE.exists() else {}).items()
+        if key is not None
+    }
+    for key, value in dict(updates or {}).items():
+        current[str(key)] = str(value)
+        os.environ[str(key)] = str(value)
+    _atomic_write_env_values(current, ENV_FILE)
+
+
 def save_runtime_config(config: MetalMonitorConfig) -> None:
     ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
     if not ENV_FILE.exists():
-        ENV_FILE.write_text("", encoding="utf-8")
+        _atomic_write_env_values({}, ENV_FILE)
 
     symbols_text = ",".join(normalize_symbols(",".join(config.symbols)))
-    _set_env_key("TARGET_SYMBOLS", symbols_text)
-    _set_env_key("REFRESH_INTERVAL_SEC", str(max(5, int(config.refresh_interval_sec))))
-    _set_env_key("EVENT_RISK_MODE", normalize_event_risk_mode(config.event_risk_mode))
-    _set_env_key("MT5_PATH", str(config.mt5_path or "").strip())
-    _set_env_key("MT5_LOGIN", str(config.mt5_login or "").strip())
-    _set_env_key("MT5_PASSWORD", str(config.mt5_password or "").strip())
-    _set_env_key("MT5_SERVER", str(config.mt5_server or "").strip())
-    _set_env_key("DINGTALK_WEBHOOK", str(config.dingtalk_webhook or "").strip())
-    _set_env_key("PUSHPLUS_TOKEN", str(config.pushplus_token or "").strip())
-    _set_env_key("NOTIFY_COOLDOWN_MIN", str(max(5, int(config.notify_cooldown_min))))
-    _set_env_key("AI_API_KEY", str(config.ai_api_key or "").strip())
-    _set_env_key("AI_API_BASE", str(config.ai_api_base or "").strip())
-    _set_env_key("AI_MODEL", str(config.ai_model or "").strip())
-    _set_env_key("AI_PUSH_ENABLED", "1" if bool(config.ai_push_enabled) else "0")
-    _set_env_key("AI_PUSH_SUMMARY_ONLY", "1" if bool(config.ai_push_summary_only) else "0")
-    _set_env_key("AI_AUTO_INTERVAL_MIN", str(max(0, int(config.ai_auto_interval_min))))
-    _set_env_key("EVENT_AUTO_MODE_ENABLED", "1" if bool(config.event_auto_mode_enabled) else "0")
-    _set_env_key("EVENT_SCHEDULES", str(config.event_schedule_text or "").strip())
-    _set_env_key("EVENT_PRE_WINDOW_MIN", str(max(5, int(config.event_pre_window_min))))
-    _set_env_key("EVENT_POST_WINDOW_MIN", str(max(5, int(config.event_post_window_min))))
-    _set_env_key("EVENT_FEED_ENABLED", "1" if bool(config.event_feed_enabled) else "0")
-    _set_env_key("EVENT_FEED_URL", str(config.event_feed_url or "").strip())
-    _set_env_key("EVENT_FEED_REFRESH_MIN", str(max(5, int(config.event_feed_refresh_min))))
-    _set_env_key("MACRO_NEWS_FEED_ENABLED", "1" if bool(config.macro_news_feed_enabled) else "0")
-    _set_env_key("MACRO_NEWS_FEED_URLS", str(config.macro_news_feed_urls or "").strip())
-    _set_env_key("MACRO_NEWS_FEED_REFRESH_MIN", str(max(5, int(config.macro_news_feed_refresh_min))))
-    _set_env_key("MACRO_DATA_FEED_ENABLED", "1" if bool(config.macro_data_feed_enabled) else "0")
-    _set_env_key("MACRO_DATA_FEED_SPECS", str(config.macro_data_feed_specs or "").strip())
-    _set_env_key("MACRO_DATA_FEED_REFRESH_MIN", str(max(5, int(config.macro_data_feed_refresh_min))))
-    _set_env_key("LEARNING_PUSH_ENABLED", "1" if bool(config.learning_push_enabled) else "0")
-    _set_env_key("LEARNING_PUSH_MIN_INTERVAL_HOUR", str(max(1, int(config.learning_push_min_interval_hour))))
-    _set_env_key("NOTIFY_DND_ENABLED", "1" if bool(config.notify_dnd_enabled) else "0")
-    _set_env_key("NOTIFY_DND_START_HOUR", str(min(23, max(0, int(config.notify_dnd_start_hour)))))
-    _set_env_key("NOTIFY_DND_END_HOUR", str(min(23, max(0, int(config.notify_dnd_end_hour)))))
-    _set_env_key("OVERNIGHT_SPREAD_GUARD_ENABLED", "1" if bool(config.overnight_spread_guard_enabled) else "0")
-    _set_env_key("OVERNIGHT_SPREAD_GUARD_START_HOUR", str(min(23, max(0, int(config.overnight_spread_guard_start_hour)))))
-    _set_env_key("OVERNIGHT_SPREAD_GUARD_END_HOUR", str(min(23, max(0, int(config.overnight_spread_guard_end_hour)))))
-    _set_env_key(LEGACY_MIGRATION_DONE_KEY, "1")
+    _apply_env_updates(
+        {
+            "TARGET_SYMBOLS": symbols_text,
+            "REFRESH_INTERVAL_SEC": str(max(5, int(config.refresh_interval_sec))),
+            "EVENT_RISK_MODE": normalize_event_risk_mode(config.event_risk_mode),
+            "MT5_PATH": str(config.mt5_path or "").strip(),
+            "MT5_LOGIN": str(config.mt5_login or "").strip(),
+            "MT5_PASSWORD": str(config.mt5_password or "").strip(),
+            "MT5_SERVER": str(config.mt5_server or "").strip(),
+            "DINGTALK_WEBHOOK": str(config.dingtalk_webhook or "").strip(),
+            "PUSHPLUS_TOKEN": str(config.pushplus_token or "").strip(),
+            "NOTIFY_COOLDOWN_MIN": str(max(5, int(config.notify_cooldown_min))),
+            "AI_API_KEY": str(config.ai_api_key or "").strip(),
+            "AI_API_BASE": str(config.ai_api_base or "").strip(),
+            "AI_MODEL": str(config.ai_model or "").strip(),
+            "AI_PUSH_ENABLED": "1" if bool(config.ai_push_enabled) else "0",
+            "AI_PUSH_SUMMARY_ONLY": "1" if bool(config.ai_push_summary_only) else "0",
+            "AI_AUTO_INTERVAL_MIN": str(max(0, int(config.ai_auto_interval_min))),
+            "EVENT_AUTO_MODE_ENABLED": "1" if bool(config.event_auto_mode_enabled) else "0",
+            "EVENT_SCHEDULES": str(config.event_schedule_text or "").strip(),
+            "EVENT_PRE_WINDOW_MIN": str(max(5, int(config.event_pre_window_min))),
+            "EVENT_POST_WINDOW_MIN": str(max(5, int(config.event_post_window_min))),
+            "EVENT_FEED_ENABLED": "1" if bool(config.event_feed_enabled) else "0",
+            "EVENT_FEED_URL": str(config.event_feed_url or "").strip(),
+            "EVENT_FEED_REFRESH_MIN": str(max(5, int(config.event_feed_refresh_min))),
+            "MACRO_NEWS_FEED_ENABLED": "1" if bool(config.macro_news_feed_enabled) else "0",
+            "MACRO_NEWS_FEED_URLS": str(config.macro_news_feed_urls or "").strip(),
+            "MACRO_NEWS_FEED_REFRESH_MIN": str(max(5, int(config.macro_news_feed_refresh_min))),
+            "MACRO_DATA_FEED_ENABLED": "1" if bool(config.macro_data_feed_enabled) else "0",
+            "MACRO_DATA_FEED_SPECS": str(config.macro_data_feed_specs or "").strip(),
+            "MACRO_DATA_FEED_REFRESH_MIN": str(max(5, int(config.macro_data_feed_refresh_min))),
+            "LEARNING_PUSH_ENABLED": "1" if bool(config.learning_push_enabled) else "0",
+            "LEARNING_PUSH_MIN_INTERVAL_HOUR": str(max(1, int(config.learning_push_min_interval_hour))),
+            "NOTIFY_DND_ENABLED": "1" if bool(config.notify_dnd_enabled) else "0",
+            "NOTIFY_DND_START_HOUR": str(min(23, max(0, int(config.notify_dnd_start_hour)))),
+            "NOTIFY_DND_END_HOUR": str(min(23, max(0, int(config.notify_dnd_end_hour)))),
+            "OVERNIGHT_SPREAD_GUARD_ENABLED": "1" if bool(config.overnight_spread_guard_enabled) else "0",
+            "OVERNIGHT_SPREAD_GUARD_START_HOUR": str(min(23, max(0, int(config.overnight_spread_guard_start_hour)))),
+            "OVERNIGHT_SPREAD_GUARD_END_HOUR": str(min(23, max(0, int(config.overnight_spread_guard_end_hour)))),
+            "TRADE_MODE": str(config.trade_mode),
+            "LIVE_MAX_DRAWDOWN_PCT": str(config.live_max_drawdown_pct),
+            "LIVE_ORDER_PRECHECK_ONLY": "1" if bool(config.live_order_precheck_only) else "0",
+            "LIVE_MAX_OPEN_POSITIONS": str(max(1, min(20, int(config.live_max_open_positions)))),
+            "LIVE_MAX_ORDERS_PER_DAY": str(max(1, min(100, int(config.live_max_orders_per_day)))),
+            "SIM_INITIAL_BALANCE": str(max(100.0, min(1000000.0, float(config.sim_initial_balance)))),
+            "SIM_NO_TP2_LOCK_R": str(max(0.10, min(5.0, float(config.sim_no_tp2_lock_r)))),
+            "SIM_NO_TP2_PARTIAL_CLOSE_RATIO": str(
+                max(0.10, min(0.90, float(config.sim_no_tp2_partial_close_ratio)))
+            ),
+            "SIM_MIN_RR": str(max(0.50, min(10.0, float(config.sim_min_rr)))),
+            "SIM_RELAXED_RR": str(max(0.50, min(10.0, float(config.sim_relaxed_rr)))),
+            "SIM_MODEL_MIN_PROBABILITY": str(max(0.0, min(1.0, float(config.sim_model_min_probability)))),
+            "SIM_EXPLORATORY_DAILY_LIMIT": str(max(0, min(50, int(config.sim_exploratory_daily_limit)))),
+            "SIM_EXPLORATORY_COOLDOWN_MIN": str(max(0, min(240, int(config.sim_exploratory_cooldown_min)))),
+            "SIM_EXPLORATORY_BASE_BALANCE": str(
+                max(100.0, min(1000000.0, float(config.sim_exploratory_base_balance)))
+            ),
+            "SIM_STRATEGY_MIN_RR_JSON": json.dumps(
+                normalize_sim_strategy_min_rr(getattr(config, "sim_strategy_min_rr", {})),
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            "SIM_STRATEGY_DAILY_LIMIT_JSON": json.dumps(
+                normalize_sim_strategy_daily_limit(getattr(config, "sim_strategy_daily_limit", {})),
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            "SIM_STRATEGY_COOLDOWN_JSON": json.dumps(
+                normalize_sim_strategy_cooldown_min(getattr(config, "sim_strategy_cooldown_min", {})),
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            LEGACY_MIGRATION_DONE_KEY: "1",
+        }
+    )

@@ -1,5 +1,6 @@
 import socket
 import sys
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -49,6 +50,13 @@ def test_build_snapshot_prompt_contains_symbols_and_alerts():
                 "regime_text": "趋势扩张",
                 "macro_focus": "重点看非农、CPI 和联储。",
                 "execution_note": "点差稳定，可继续观察。",
+                "trade_grade": "可轻仓试仓",
+                "trade_grade_source": "setup",
+                "trade_grade_detail": "早期动能候选，先按轻仓跟踪处理。",
+                "signal_side": "long",
+                "setup_kind": "direct_momentum",
+                "execution_model_ready": True,
+                "execution_open_probability": 0.61,
                 "model_ready": True,
                 "model_win_probability": 0.74,
                 "model_confidence_text": "中等信心",
@@ -92,6 +100,18 @@ def test_build_snapshot_prompt_contains_symbols_and_alerts():
     assert "参考胜率 74%" in prompt
     assert "报价状态 活跃报价" in prompt
     assert "经纪商返回实时字符串" not in prompt
+    assert "系统出手分级 可轻仓试仓(setup)" in prompt
+    assert "系统候选方向 long" in prompt
+    assert "执行就绪度 61%" in prompt
+    assert "系统候选形态: direct_momentum" in prompt
+    assert "signal_meta.action 是“机器可跟踪的候选方向”" in prompt
+    assert "轻仓候选 + 风险提示" in prompt
+    assert "summary_text 内的所有换行符必须严格使用 \\n 转义" in prompt
+    assert '"price": 2000.50' in prompt
+    assert '"sl": 1990.00' in prompt
+    assert '"tp": 2020.00' in prompt
+    assert "<数字:" not in prompt
+    assert "若你输出的 JSON 无法被标准 json.loads 直接解析" in prompt
 
 
 def test_build_snapshot_prompt_accepts_snapshot_item_objects():
@@ -218,6 +238,33 @@ def test_full_prompt_assets_are_independent():
     assert "优先观察对象" in batch_prompt
 
 
+def test_build_metal_advisor_prompt_contains_json_guardrails():
+    snapshot = {
+        "summary_text": "当前优先关注黄金。",
+        "alert_text": "点差正常，等待事件窗口。",
+        "market_text": "优先等 CPI 落地后再看黄金方向。",
+        "items": [
+            {
+                "symbol": "XAUUSD",
+                "latest_text": "4759.82",
+                "quote_text": "Bid 4759.74 | Ask 4759.91 | 点差 17点",
+                "status_text": "实时报价",
+                "macro_focus": "重点看非农、CPI 和联储。",
+                "execution_note": "事件前先观察。",
+            },
+        ],
+    }
+
+    prompt = build_metal_advisor_prompt(snapshot)
+
+    assert "summary_text 内的所有换行符必须严格使用 \\n 转义" in prompt
+    assert '"price": 2000.50' in prompt
+    assert '"sl": 1990.00' in prompt
+    assert '"tp": 2020.00' in prompt
+    assert "<数字:" not in prompt
+    assert "若当前只适合观察且没有明确候选方向，action 必须为 neutral" in prompt
+
+
 def test_request_ai_brief_requires_api_key():
     try:
         request_ai_brief({}, _build_config(api_key=""), allow_fallback=False)
@@ -272,6 +319,59 @@ def test_request_ai_brief_parses_response(monkeypatch):
     assert result["signal_schema_version"] == "signal-meta-v1"
     assert result["signal_meta_valid"] is True
     assert result["rulebook_summary_text"] == "当前优先遵守 1 条已验证规则。"
+
+
+def test_request_ai_brief_extracts_markdown_wrapped_json_without_json_repair(monkeypatch):
+    captured = {"payloads": []}
+    audit_file = ROOT / ".test_sandbox" / "ai_response_audit_test.jsonl"
+    if audit_file.exists():
+        audit_file.unlink()
+
+    def fake_post(url, payload, api_key, timeout=30):
+        captured["payloads"].append(payload)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            "好的，为您分析如下：\n"
+                            "```json\n"
+                            '{"summary_text":"当前结论：轻仓试多。",'
+                            '"signal_meta":{"symbol":"XAUUSD","action":"long","price":2350,"sl":2340,"tp":2370}}'
+                            "\n```"
+                        )
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr("ai_briefing._json_repair_loads", None)
+    monkeypatch.setattr("ai_briefing.AI_RESPONSE_AUDIT_FILE", audit_file)
+    monkeypatch.setattr("ai_briefing._post_json", fake_post)
+    monkeypatch.setattr(
+        "ai_briefing.build_rulebook",
+        lambda **_kwargs: {
+            "summary_text": "规则库还在学习中。",
+            "active_rules_text": "暂无已验证规则。",
+            "candidate_rules_text": "暂无候选规则。",
+            "rejected_rules_text": "暂无明确淘汰规则。",
+        },
+    )
+
+    result = request_ai_brief({"summary_text": "测试快照", "items": []}, _build_config())
+
+    assert len(captured["payloads"]) == 1
+    assert result["content"] == "当前结论：轻仓试多。"
+    assert result["signal_meta"]["action"] == "long"
+    assert result["signal_meta"]["price"] == 2350.0
+    assert result["model"] == "deepseek-ai/DeepSeek-R1"
+    assert result["used_structured_payload"] is True
+    assert result["ai_parse_mode"] == "json_mode"
+    assert result["ai_raw_response_logged"] is True
+    rows = [json.loads(line) for line in audit_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert rows[-1]["parse_ok"] is True
+    assert rows[-1]["signal_action"] == "long"
+    assert "好的，为您分析如下" in rows[-1]["raw_content"]
 
 
 def test_request_ai_brief_retries_invalid_json_once(monkeypatch):

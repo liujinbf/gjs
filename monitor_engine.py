@@ -20,7 +20,9 @@ from monitor_rules import (
 )
 from mt5_gateway import fetch_quotes, initialize_connection
 from runtime_utils import parse_time as _parse_time
+from signal_side_utils import derive_signal_side_meta
 from signal_enums import AlertTone, EventModeText, QuoteStatus, SignalSide, TradeGrade
+from trade_opportunity import score_trade_opportunity
 
 
 _SIGNAL_SIDE_TEXT = {
@@ -37,6 +39,23 @@ def _safe_field(d: dict, key: str) -> str:
         return str(val).lower().strip() if val is not None else ""
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _retry_risk_reward_with_signal_side(row: dict, enriched_row: dict, signal_side: str) -> dict:
+    side = str(signal_side or "").strip().lower()
+    if side not in {SignalSide.LONG.value, SignalSide.SHORT.value}:
+        return dict(enriched_row or {})
+    if bool(enriched_row.get("risk_reward_ready", False)):
+        return dict(enriched_row or {})
+
+    retry_input = {**dict(row or {}), **dict(enriched_row or {}), "signal_side": side}
+    retried = analyze_risk_reward(retry_input)
+    if not retried:
+        return dict(enriched_row or {})
+
+    merged = dict(enriched_row or {})
+    merged.update(retried)
+    return merged
 
 
 def _normalize_quote_row(row: dict | QuoteRow | None) -> dict:
@@ -116,8 +135,11 @@ def _build_symbol_alert_state(
         QuoteStatus.ERROR.value,
     }:
         return {
-            "alert_state_text": "休市 / 暂无报价",
-            "alert_state_detail": f"{symbol_key} 当前暂无活跃报价，先不做临场判断。",
+            "alert_state_text": "非活跃 / 静态报价",
+            "alert_state_detail": (
+                f"{symbol_key} 当前没有新 tick，看到的 Bid/Ask 可能是静态缓存，先不做临场判断。"
+                f"{(' ' + str(row.get('quote_live_diagnostic_text', '') or '').strip()) if str(row.get('quote_live_diagnostic_text', '') or '').strip() else ''}"
+            ),
             "alert_state_tone": AlertTone.NEUTRAL.value,
             "alert_state_rank": 3,
         }
@@ -142,6 +164,61 @@ def _build_symbol_alert_state(
             "alert_state_detail": detail,
             "alert_state_tone": AlertTone.ACCENT.value,
             "alert_state_rank": 5,
+        }
+
+    if (
+        str(trade_grade.get("grade", "") or "").strip() == TradeGrade.LIGHT_POSITION
+        and str(trade_grade.get("event_override_kind", "") or "").strip() == "post_event_continuation"
+    ):
+        return {
+            "alert_state_text": "事件后延续候选",
+            "alert_state_detail": f"{symbol_key} 当前已通过事件后延续纪律校验，可继续按轻仓候选跟踪，但必须短周期复核。",
+            "alert_state_tone": AlertTone.SUCCESS.value,
+            "alert_state_rank": 2,
+        }
+
+    if (
+        str(trade_grade.get("grade", "") or "").strip() == TradeGrade.LIGHT_POSITION
+        and str(trade_grade.get("setup_kind", "") or "").strip() == "early_momentum"
+    ):
+        return {
+            "alert_state_text": "早期动能候选",
+            "alert_state_detail": f"{symbol_key} 当前已进入早期动能候选，允许轻仓跟踪，但必须盯紧下一到两根 M5 的确认与失效。",
+            "alert_state_tone": AlertTone.SUCCESS.value,
+            "alert_state_rank": 2,
+        }
+
+    if (
+        str(trade_grade.get("grade", "") or "").strip() == TradeGrade.LIGHT_POSITION
+        and str(trade_grade.get("setup_kind", "") or "").strip() == "direct_momentum"
+    ):
+        return {
+            "alert_state_text": "直线动能候选",
+            "alert_state_detail": f"{symbol_key} 当前属于无回踩动能延续，允许轻仓跟踪，但必须盯紧 M5 是否继续扩张或立刻衰减。",
+            "alert_state_tone": AlertTone.SUCCESS.value,
+            "alert_state_rank": 2,
+        }
+
+    if (
+        str(trade_grade.get("grade", "") or "").strip() == TradeGrade.LIGHT_POSITION
+        and str(trade_grade.get("setup_kind", "") or "").strip() == "directional_probe"
+    ):
+        return {
+            "alert_state_text": "方向试仓候选",
+            "alert_state_detail": f"{symbol_key} 当前方向明确、波动扩张、盈亏比达标，虽然结构还不完美，但已允许轻仓试探。",
+            "alert_state_tone": AlertTone.SUCCESS.value,
+            "alert_state_rank": 2,
+        }
+
+    if (
+        str(trade_grade.get("grade", "") or "").strip() == TradeGrade.LIGHT_POSITION
+        and str(trade_grade.get("setup_kind", "") or "").strip() == "pullback_sniper_probe"
+    ):
+        return {
+            "alert_state_text": "回调狙击候选",
+            "alert_state_detail": f"{symbol_key} 当前趋势方向明确，价格回到均线价值区且 RSI 未过热，允许按探索试仓采样。",
+            "alert_state_tone": AlertTone.SUCCESS.value,
+            "alert_state_rank": 2,
         }
 
     # 事件窗口优先级最高（高影响事件前 / 后）
@@ -233,6 +310,13 @@ def build_snapshot_from_rows(
 
         latest_price = float(row.get("latest_price", 0.0) or 0.0)
         point = float(row.get("point", 0.0) or 0.0)
+        bid_price = float(row.get("bid", 0.0) or 0.0)
+        ask_price = float(row.get("ask", 0.0) or 0.0)
+        display_price = latest_price
+        if display_price <= 0 and bid_price > 0 and ask_price > 0:
+            display_price = (bid_price + ask_price) / 2.0
+        elif display_price <= 0:
+            display_price = max(bid_price, ask_price, 0.0)
         tone, execution_note = build_quote_risk_note(symbol, row)
         enriched_row = dict(row or {})
         enriched_row.update(analyze_risk_reward(enriched_row))
@@ -245,35 +329,31 @@ def build_snapshot_from_rows(
             event_risk_mode=event_risk_mode,
             event_context=context,
         )
+        display_event_meta = dict(item_event_meta)
+        override_event_note = str(trade_grade.get("event_override_note", "") or "").strip()
+        if override_event_note:
+            display_event_meta["event_note"] = override_event_note
         alert_state = _build_symbol_alert_state(
             symbol,
             row,
             tone,
             trade_grade,
-            item_event_meta,
+            display_event_meta,
             latest_symbol_event=latest_symbol_events.get(str(symbol).strip().upper()),
         )
         regime_meta = classify_market_regime(symbol, enriched_row, tone, item_event_meta)
         execution_segments = [
             f"{trade_grade['grade']}：{trade_grade['detail'] if str(trade_grade.get('source', '') or '').strip() == 'event' else execution_note}"
         ]
-        # 方向推断（当出手分级为可轻仓时）
-        signal_side = SignalSide.NEUTRAL.value
-        if str(trade_grade.get("grade", "") or "").strip() == TradeGrade.LIGHT_POSITION:
-            # 使用 row 里的方向字段（intraday/multi_timeframe/breakout 来自 row，非 enriched_row）
-            intraday_b = _safe_field(row, "intraday_bias")
-            multi_b = _safe_field(row, "multi_timeframe_bias")
-            bk_dir = _safe_field(row, "breakout_direction")
-            long_s = sum(1 for v in (intraday_b, multi_b, bk_dir) if v == "bullish")
-            short_s = sum(1 for v in (intraday_b, multi_b, bk_dir) if v == "bearish")
-            if long_s > short_s:
-                signal_side = SignalSide.LONG.value
-            elif short_s > long_s:
-                signal_side = SignalSide.SHORT.value
-        signal_side_text = _SIGNAL_SIDE_TEXT.get(signal_side, "")
+        signal_side_meta = derive_signal_side_meta({**row, **enriched_row})
+        inferred_signal_side = str(signal_side_meta.get("signal_side", SignalSide.NEUTRAL.value) or SignalSide.NEUTRAL.value).strip().lower()
+        enriched_row = _retry_risk_reward_with_signal_side(row, enriched_row, inferred_signal_side)
+        signal_side_meta = derive_signal_side_meta({**row, **enriched_row})
+        signal_side = str(signal_side_meta.get("signal_side", SignalSide.NEUTRAL.value) or SignalSide.NEUTRAL.value).strip().lower()
+        signal_side_text = str(signal_side_meta.get("signal_side_text", "") or "").strip()
 
-        if item_event_meta["event_note"] and str(trade_grade.get("source", "") or "").strip() != "event":
-            execution_segments.append(item_event_meta["event_note"])
+        if display_event_meta["event_note"] and str(trade_grade.get("source", "") or "").strip() != "event":
+            execution_segments.append(display_event_meta["event_note"])
         for extra_text in (
             str(row.get("intraday_context_text", "") or "").strip(),
             str(row.get("multi_timeframe_context_text", "") or "").strip(),
@@ -284,105 +364,122 @@ def build_snapshot_from_rows(
         ):
             if extra_text:
                 execution_segments.append(extra_text)
-        items.append(
-            SnapshotItem(
-                symbol=str(symbol).strip().upper(),
-                latest_price=latest_price,
-                spread_points=float(row.get("spread_points", 0.0) or 0.0),
-                point=point,
-                has_live_quote=has_live_quote,
-                bid=float(row.get("bid", 0.0) or 0.0),
-                ask=float(row.get("ask", 0.0) or 0.0),
-                tick_time=int(row.get("tick_time", 0) or 0),
-                latest_text=format_quote_price(latest_price, point) if has_live_quote and latest_price > 0 else "--",
-                quote_text=build_quote_structure_text(row),
-                status_text=str(row.get("status", "暂无快照") or "暂无快照"),
-                quote_status_code=str(row.get("quote_status_code", "") or "").strip().lower(),
-                execution_note=" ".join(segment for segment in execution_segments if segment),
-                trade_grade=trade_grade["grade"],
-                trade_grade_detail=trade_grade["detail"],
-                trade_next_review=trade_grade["next_review"],
-                trade_grade_source=str(trade_grade.get("source", "") or "").strip(),
-                event_importance_text=item_event_meta["event_importance_text"],
-                event_note=item_event_meta["event_note"],
-                macro_focus=build_symbol_macro_focus(symbol),
-                alert_state_text=alert_state["alert_state_text"],
-                alert_state_detail=alert_state["alert_state_detail"],
-                alert_state_tone=alert_state["alert_state_tone"],
-                alert_state_rank=int(alert_state["alert_state_rank"] or 0),
-                regime_tag=str(regime_meta.get("regime_tag", "") or "").strip(),
-                regime_text=str(regime_meta.get("regime_text", "") or "").strip(),
-                regime_reason=str(regime_meta.get("regime_reason", "") or "").strip(),
-                regime_rank=int(regime_meta.get("regime_rank", 0) or 0),
-                tone=tone,
-                signal_side=signal_side,
-                signal_side_text=signal_side_text,
-                intraday_bias=str(row.get("intraday_bias", "") or "").strip(),
-                intraday_bias_text=str(row.get("intraday_bias_text", "") or "").strip(),
-                multi_timeframe_alignment=str(row.get("multi_timeframe_alignment", "") or "").strip(),
-                multi_timeframe_alignment_text=str(row.get("multi_timeframe_alignment_text", "") or "").strip(),
-                multi_timeframe_bias=str(row.get("multi_timeframe_bias", "") or "").strip(),
-                multi_timeframe_bias_text=str(row.get("multi_timeframe_bias_text", "") or "").strip(),
-                intraday_context_text=str(row.get("intraday_context_text", "") or "").strip(),
-                multi_timeframe_context_text=str(row.get("multi_timeframe_context_text", "") or "").strip(),
-                key_level_context_text=str(row.get("key_level_context_text", "") or "").strip(),
-                key_level_state=str(row.get("key_level_state", "") or "").strip(),
-                key_level_state_text=str(row.get("key_level_state_text", "") or "").strip(),
-                breakout_direction=str(row.get("breakout_direction", "") or "").strip(),
-                breakout_context_text=str(row.get("breakout_context_text", "") or "").strip(),
-                breakout_state=str(row.get("breakout_state", "") or "").strip(),
-                breakout_state_text=str(row.get("breakout_state_text", "") or "").strip(),
-                retest_context_text=str(row.get("retest_context_text", "") or "").strip(),
-                retest_state=str(row.get("retest_state", "") or "").strip(),
-                retest_state_text=str(row.get("retest_state_text", "") or "").strip(),
-                risk_reward_ready=bool(enriched_row.get("risk_reward_ready", False)),
-                risk_reward_context_text=str(enriched_row.get("risk_reward_context_text", "") or "").strip(),
-                risk_reward_state=str(enriched_row.get("risk_reward_state", "") or "").strip(),
-                risk_reward_state_text=str(enriched_row.get("risk_reward_state_text", "") or "").strip(),
-                risk_reward_ratio=float(enriched_row.get("risk_reward_ratio", 0.0) or 0.0),
-                risk_reward_stop_price=float(enriched_row.get("risk_reward_stop_price", 0.0) or 0.0),
-                risk_reward_target_price=float(enriched_row.get("risk_reward_target_price", 0.0) or 0.0),
-                risk_reward_target_price_2=float(enriched_row.get("risk_reward_target_price_2", 0.0) or 0.0),
-                risk_reward_entry_zone_low=float(enriched_row.get("risk_reward_entry_zone_low", 0.0) or 0.0),
-                risk_reward_entry_zone_high=float(enriched_row.get("risk_reward_entry_zone_high", 0.0) or 0.0),
-                risk_reward_entry_zone_text=str(enriched_row.get("risk_reward_entry_zone_text", "") or "").strip(),
-                risk_reward_position_text=str(enriched_row.get("risk_reward_position_text", "") or "").strip(),
-                risk_reward_invalidation_text=str(enriched_row.get("risk_reward_invalidation_text", "") or "").strip(),
-                risk_reward_atr=float(enriched_row.get("risk_reward_atr", 0.0) or 0.0),
-                atr14=float(row.get("atr14", 0.0) or 0.0),
-                atr14_h4=float(row.get("atr14_h4", 0.0) or 0.0),
-                event_mode_text=item_event_meta["event_mode_text"],
-                event_active_name=item_event_meta["event_active_name"],
-                event_active_time_text=item_event_meta["event_active_time_text"],
-                event_scope_text=item_event_meta["event_scope_text"],
-                event_applies=item_event_meta["event_applies"],
-                tech_summary=str(row.get("tech_summary", "") or "").strip(),
-                tech_summary_h4=str(row.get("tech_summary_h4", "") or "").strip(),
-                h4_context_text=str(row.get("h4_context_text", "") or "").strip(),
-                extra={
-                    "intraday_volatility": str(row.get("intraday_volatility", "") or "").strip(),
-                    "intraday_volatility_text": str(row.get("intraday_volatility_text", "") or "").strip(),
-                    "intraday_location": str(row.get("intraday_location", "") or "").strip(),
-                    "intraday_location_text": str(row.get("intraday_location_text", "") or "").strip(),
-                    "rsi14": row.get("rsi14"),
-                    "ma20": row.get("ma20"),
-                    "ma50": row.get("ma50"),
-                    "change_pct_24h": row.get("change_pct_24h"),
-                    "bollinger_upper": row.get("bollinger_upper"),
-                    "bollinger_mid": row.get("bollinger_mid"),
-                    "bollinger_lower": row.get("bollinger_lower"),
-                    "rsi14_h4": row.get("rsi14_h4"),
-                    "ma20_h4": row.get("ma20_h4"),
-                    "ma50_h4": row.get("ma50_h4"),
-                    "bollinger_upper_h4": row.get("bollinger_upper_h4"),
-                    "bollinger_mid_h4": row.get("bollinger_mid_h4"),
-                    "bollinger_lower_h4": row.get("bollinger_lower_h4"),
-                    "macd": row.get("macd"),
-                    "macd_signal": row.get("macd_signal"),
-                    "macd_histogram": row.get("macd_histogram"),
-                },
-            ).to_dict()
-        )
+        item_payload = SnapshotItem(
+            symbol=str(symbol).strip().upper(),
+            latest_price=latest_price,
+            spread_points=float(row.get("spread_points", 0.0) or 0.0),
+            point=point,
+            has_live_quote=has_live_quote,
+            bid=bid_price,
+            ask=ask_price,
+            tick_time=int(row.get("tick_time", 0) or 0),
+            latest_text=format_quote_price(display_price, point) if display_price > 0 else "--",
+            quote_text=build_quote_structure_text(row),
+            status_text=str(row.get("status", "暂无快照") or "暂无快照"),
+            quote_status_code=str(row.get("quote_status_code", "") or "").strip().lower(),
+            execution_note=" ".join(segment for segment in execution_segments if segment),
+            trade_grade=trade_grade["grade"],
+            trade_grade_detail=trade_grade["detail"],
+            trade_next_review=trade_grade["next_review"],
+            trade_grade_source=str(trade_grade.get("source", "") or "").strip(),
+            event_importance_text=display_event_meta["event_importance_text"],
+            event_note=display_event_meta["event_note"],
+            macro_focus=build_symbol_macro_focus(symbol),
+            alert_state_text=alert_state["alert_state_text"],
+            alert_state_detail=alert_state["alert_state_detail"],
+            alert_state_tone=alert_state["alert_state_tone"],
+            alert_state_rank=int(alert_state["alert_state_rank"] or 0),
+            regime_tag=str(regime_meta.get("regime_tag", "") or "").strip(),
+            regime_text=str(regime_meta.get("regime_text", "") or "").strip(),
+            regime_reason=str(regime_meta.get("regime_reason", "") or "").strip(),
+            regime_rank=int(regime_meta.get("regime_rank", 0) or 0),
+            tone=tone,
+            signal_side=signal_side,
+            signal_side_text=signal_side_text,
+            intraday_bias=str(row.get("intraday_bias", "") or "").strip(),
+            intraday_bias_text=str(row.get("intraday_bias_text", "") or "").strip(),
+            multi_timeframe_alignment=str(row.get("multi_timeframe_alignment", "") or "").strip(),
+            multi_timeframe_alignment_text=str(row.get("multi_timeframe_alignment_text", "") or "").strip(),
+            multi_timeframe_bias=str(row.get("multi_timeframe_bias", "") or "").strip(),
+            multi_timeframe_bias_text=str(row.get("multi_timeframe_bias_text", "") or "").strip(),
+            intraday_context_text=str(row.get("intraday_context_text", "") or "").strip(),
+            multi_timeframe_context_text=str(row.get("multi_timeframe_context_text", "") or "").strip(),
+            key_level_context_text=str(row.get("key_level_context_text", "") or "").strip(),
+            key_level_state=str(row.get("key_level_state", "") or "").strip(),
+            key_level_state_text=str(row.get("key_level_state_text", "") or "").strip(),
+            breakout_direction=str(row.get("breakout_direction", "") or "").strip(),
+            breakout_context_text=str(row.get("breakout_context_text", "") or "").strip(),
+            breakout_state=str(row.get("breakout_state", "") or "").strip(),
+            breakout_state_text=str(row.get("breakout_state_text", "") or "").strip(),
+            retest_context_text=str(row.get("retest_context_text", "") or "").strip(),
+            retest_state=str(row.get("retest_state", "") or "").strip(),
+            retest_state_text=str(row.get("retest_state_text", "") or "").strip(),
+            risk_reward_ready=bool(enriched_row.get("risk_reward_ready", False)),
+            risk_reward_context_text=str(enriched_row.get("risk_reward_context_text", "") or "").strip(),
+            risk_reward_state=str(enriched_row.get("risk_reward_state", "") or "").strip(),
+            risk_reward_state_text=str(enriched_row.get("risk_reward_state_text", "") or "").strip(),
+            risk_reward_ratio=float(enriched_row.get("risk_reward_ratio", 0.0) or 0.0),
+            risk_reward_direction=str(enriched_row.get("risk_reward_direction", "") or "").strip(),
+            risk_reward_stop_price=float(enriched_row.get("risk_reward_stop_price", 0.0) or 0.0),
+            risk_reward_target_price=float(enriched_row.get("risk_reward_target_price", 0.0) or 0.0),
+            risk_reward_target_price_2=float(enriched_row.get("risk_reward_target_price_2", 0.0) or 0.0),
+            risk_reward_entry_zone_low=float(enriched_row.get("risk_reward_entry_zone_low", 0.0) or 0.0),
+            risk_reward_entry_zone_high=float(enriched_row.get("risk_reward_entry_zone_high", 0.0) or 0.0),
+            risk_reward_entry_zone_text=str(enriched_row.get("risk_reward_entry_zone_text", "") or "").strip(),
+            risk_reward_position_text=str(enriched_row.get("risk_reward_position_text", "") or "").strip(),
+            risk_reward_invalidation_text=str(enriched_row.get("risk_reward_invalidation_text", "") or "").strip(),
+            risk_reward_atr=float(enriched_row.get("risk_reward_atr", 0.0) or 0.0),
+            atr14=float(row.get("atr14", 0.0) or 0.0),
+            atr14_h4=float(row.get("atr14_h4", 0.0) or 0.0),
+            event_mode_text=display_event_meta["event_mode_text"],
+            event_active_name=display_event_meta["event_active_name"],
+            event_active_time_text=display_event_meta["event_active_time_text"],
+            event_scope_text=display_event_meta["event_scope_text"],
+            event_applies=display_event_meta["event_applies"],
+            tech_summary=str(row.get("tech_summary", "") or "").strip(),
+            tech_summary_h4=str(row.get("tech_summary_h4", "") or "").strip(),
+            h4_context_text=str(row.get("h4_context_text", "") or "").strip(),
+            extra={
+                "setup_kind": str(trade_grade.get("setup_kind", "") or "").strip(),
+                "signal_side_basis": str(signal_side_meta.get("signal_side_basis", "") or "").strip(),
+                "signal_side_reason": str(signal_side_meta.get("signal_side_reason", "") or "").strip(),
+                "signal_side_long_votes": int(signal_side_meta.get("signal_side_long_votes", 0) or 0),
+                "signal_side_short_votes": int(signal_side_meta.get("signal_side_short_votes", 0) or 0),
+                "risk_reward_basis": str(enriched_row.get("risk_reward_basis", "") or "").strip(),
+                "intraday_volatility": str(row.get("intraday_volatility", "") or "").strip(),
+                "intraday_volatility_text": str(row.get("intraday_volatility_text", "") or "").strip(),
+                "intraday_location": str(row.get("intraday_location", "") or "").strip(),
+                "intraday_location_text": str(row.get("intraday_location_text", "") or "").strip(),
+                "quote_live_reason": str(row.get("quote_live_reason", "") or "").strip(),
+                "quote_live_reason_text": str(row.get("quote_live_reason_text", "") or "").strip(),
+                "quote_live_diagnostic_text": str(row.get("quote_live_diagnostic_text", "") or "").strip(),
+                "quote_live_delta_sec": float(row.get("quote_live_delta_sec", 0.0) or 0.0),
+                "quote_live_max_age_sec": float(row.get("quote_live_max_age_sec", 0.0) or 0.0),
+                "quote_tick_utc_text": str(row.get("quote_tick_utc_text", "") or "").strip(),
+                "quote_now_utc_text": str(row.get("quote_now_utc_text", "") or "").strip(),
+                "quote_broker_offset_sec": float(row.get("quote_broker_offset_sec", 0.0) or 0.0),
+                "quote_offset_recalibrated": bool(row.get("quote_offset_recalibrated", False)),
+                "quote_price_available": bool(row.get("quote_price_available", False)),
+                "rsi14": row.get("rsi14"),
+                "ma20": row.get("ma20"),
+                "ma50": row.get("ma50"),
+                "change_pct_24h": row.get("change_pct_24h"),
+                "bollinger_upper": row.get("bollinger_upper"),
+                "bollinger_mid": row.get("bollinger_mid"),
+                "bollinger_lower": row.get("bollinger_lower"),
+                "rsi14_h4": row.get("rsi14_h4"),
+                "ma20_h4": row.get("ma20_h4"),
+                "ma50_h4": row.get("ma50_h4"),
+                "bollinger_upper_h4": row.get("bollinger_upper_h4"),
+                "bollinger_mid_h4": row.get("bollinger_mid_h4"),
+                "bollinger_lower_h4": row.get("bollinger_lower_h4"),
+                "macd": row.get("macd"),
+                "macd_signal": row.get("macd_signal"),
+                "macd_histogram": row.get("macd_histogram"),
+            },
+        ).to_dict()
+        item_payload.update(score_trade_opportunity(item_payload))
+        items.append(item_payload)
 
     items = apply_alert_state_transitions(items, state_file=status_state_file, now=snapshot_time)
     recent_transitions = read_recent_transitions(state_file=status_state_file, now=snapshot_time)
@@ -396,7 +493,7 @@ def build_snapshot_from_rows(
     )
 
     summary_lines = [
-        f"当前共观察 {len(symbols)} 个品种，实时报价 {live_count} 个，休市或暂无报价 {inactive_count} 个。",
+        f"当前共观察 {len(symbols)} 个品种，实时报价 {live_count} 个，非活跃或暂无报价 {inactive_count} 个。",
         f"事件纪律：{EVENT_RISK_MODES.get(str(event_risk_mode or 'normal').strip().lower(), '正常观察')}。",
         f"出手分级：{portfolio_grade['grade']}。{portfolio_grade['detail']}",
         regime_summary.get("regime_summary_text", "") or "当前环境样本不足，先服从点差与事件窗口纪律。",

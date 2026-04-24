@@ -47,7 +47,9 @@ def test_apply_external_signal_context_downgrades_conflicting_event_result():
     assert item["trade_grade"] == "只适合观察"
     assert item["trade_grade_source"] == "macro"
     assert "美国 CPI" in item["trade_grade_detail"]
+    assert item["execution_note"].startswith("只适合观察：")
     assert "事件结果" in item["execution_note"]
+    assert "可轻仓试仓：" not in item["execution_note"]
     assert item["alert_state_text"] == "宏观结果冲突"
     assert result["trade_grade"] == "只适合观察"
 
@@ -125,6 +127,7 @@ def test_apply_external_signal_context_downgrades_conflicting_macro_news():
     result = apply_external_signal_context(snapshot)
     item = result["items"][0]
     assert item["trade_grade"] == "只适合观察"
+    assert item["execution_note"].startswith("只适合观察：")
     assert "资讯流" in item["execution_note"]
     assert "Powell stays hawkish" in item["trade_grade_detail"]
 
@@ -208,6 +211,7 @@ def test_apply_external_signal_context_accepts_event_feed_item_objects():
     item = result["items"][0]
 
     assert item["trade_grade"] == "只适合观察"
+    assert item["execution_note"].startswith("只适合观察：")
     assert "美国 CPI" in item["execution_note"]
 
 
@@ -285,4 +289,5 @@ def test_apply_external_signal_context_accepts_macro_news_item_objects():
     item = result["items"][0]
 
     assert item["trade_grade"] == "只适合观察"
+    assert item["execution_note"].startswith("只适合观察：")
     assert "资讯流" in item["execution_note"]
