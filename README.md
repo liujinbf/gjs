@@ -99,6 +99,11 @@ python main.py
 - `SIM_INITIAL_BALANCE`
 - `SIM_NO_TP2_LOCK_R`
 - `SIM_NO_TP2_PARTIAL_CLOSE_RATIO`
+- `SIM_SCALP_EXIT_R`
+- `SIM_SCALP_MIN_MINUTES`
+- `SIM_TIME_PROTECT_MINUTES`
+- `SIM_TIME_PROTECT_MIN_R`
+- `SIM_TIME_PROTECT_GIVEBACK_RATIO`
 - `SIM_MIN_RR`
 - `SIM_RELAXED_RR`
 - `SIM_MODEL_MIN_PROBABILITY`
@@ -187,7 +192,7 @@ python main.py
 - 系统默认会在 `00:00-07:00` 开启免打扰，并在 `05:00-07:00` 额外压制隔夜结算带来的普通点差告警；如果你是夜间盯盘用户，可在 `.env` 里关闭或调整
 - 如果需要手动 AI 研判，可以填写 `AI_API_KEY`；当前独立项目默认使用与老项目一致的硅基流动配置：
   - `AI_API_BASE=https://api.siliconflow.cn/v1`
-  - `AI_MODEL=deepseek-ai/DeepSeek-R1`
+  - `AI_MODEL=deepseek-v4-flash`
 - `AI_PUSH_ENABLED=1` 后，手动触发的 AI 研判可同步推送到钉钉 / PushPlus
 - `AI_PUSH_SUMMARY_ONLY=1` 时，只推送 AI 摘要首句，避免长文本刷屏
 - `AI_AUTO_INTERVAL_MIN` 大于 0 时，系统会按分钟间隔自动触发 AI 研判；配置异常会安全回落为关闭状态
@@ -197,12 +202,15 @@ python main.py
 - `LIVE_MAX_OPEN_POSITIONS` 控制实盘最大同时持仓数，达到上限后禁止继续开仓
 - `LIVE_MAX_ORDERS_PER_DAY` 控制实盘每日 AI 订单上限，防止异常信号在同一天反复开仓
 - `SIM_INITIAL_BALANCE` 控制模拟盘起始本金
-- `SIM_NO_TP2_LOCK_R` 与 `SIM_NO_TP2_PARTIAL_CLOSE_RATIO` 控制无第二目标位时的保本保护和首次减仓比例
+- `SIM_NO_TP2_LOCK_R` 与 `SIM_NO_TP2_PARTIAL_CLOSE_RATIO` 控制浮盈锁定保护和首次减仓比例；有第二目标位时也会先保护浮盈，剩余仓位继续看第二目标
+- `SIM_SCALP_EXIT_R / SIM_SCALP_MIN_MINUTES` 控制短线套利落袋：当 0.01 手等无法拆分仓位已经达到小目标浮盈时，先止盈释放同品种下一次机会；`SIM_SCALP_EXIT_R=0` 可关闭
+- `SIM_TIME_PROTECT_MINUTES / SIM_TIME_PROTECT_MIN_R / SIM_TIME_PROTECT_GIVEBACK_RATIO` 控制时间保护：持仓超过设定时间后，若仍有小幅浮盈或曾经浮盈后明显回吐，会先减仓并把剩余仓位抬到保本
 - `SIM_MIN_RR / SIM_RELAXED_RR / SIM_MODEL_MIN_PROBABILITY` 控制自动试仓的盈亏比门槛与本地模型胜率放宽条件
-- `SIM_STRATEGY_MIN_RR_JSON` 控制早期动能、直线动能、回调狙击、方向试仓等策略族的独立 RR 门槛；HITL 批准策略学习建议后只调整对应策略族
-- `SIM_STRATEGY_DAILY_LIMIT_JSON` 控制各策略族自己的探索试仓日上限；这样“回调狙击今天试错太多”不会误伤其他策略
-- `SIM_EXPLORATORY_DAILY_LIMIT` 控制模拟盘探索试仓每日最多开仓次数，避免低置信学习样本在震荡行情里过度试错
-- `SIM_STRATEGY_COOLDOWN_JSON` 控制各策略族自己的探索冷却分钟数；这样短线动能可以快一些，回调策略可以稳一些
+- 默认参数已经偏向短线套利：`SIM_MIN_RR=1.45`、`SIM_RELAXED_RR=1.15`、`SIM_MODEL_MIN_PROBABILITY=0.62`
+- `SIM_STRATEGY_MIN_RR_JSON` 控制早期动能、直线动能、回调狙击、方向试仓等策略族的独立 RR 门槛；当前默认是早期动能更快、方向试仓更谨慎
+- `SIM_STRATEGY_DAILY_LIMIT_JSON` 控制各策略族自己的探索试仓日上限；这样“回调狙击今天试错太多”不会误伤其他策略，短线动能也能保留更多出手机会
+- `SIM_EXPLORATORY_DAILY_LIMIT` 控制模拟盘探索试仓每日最多开仓次数；短线套利默认提高到 12 次，但仍受单品种持仓、止损和事件风控约束
+- `SIM_STRATEGY_COOLDOWN_JSON` 控制各策略族自己的探索冷却分钟数；短线动能默认 3-4 分钟，回调/方向类更稳一些
 - `SIM_EXPLORATORY_COOLDOWN_MIN` 控制同一品种同一方向探索试仓的冷却分钟数，避免同一波行情被重复拆成多笔低质量样本
 
 ## 外部历史行情回放样本

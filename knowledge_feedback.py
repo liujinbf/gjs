@@ -428,23 +428,42 @@ def build_feedback_push_policy(summary: dict | None = None) -> dict:
     ]
     action_keys = {_normalize_text(item.get("action_key", "")).lower() for item in suggestions}
     total_count = int(payload.get("total_count", 0) or 0)
+    alert_effect = dict(payload.get("alert_effect_summary", {}) or {})
+    effect_sample_count = int(alert_effect.get("total_count", 0) or 0)
+    effect_useful_rate = float(alert_effect.get("useful_rate", 0.0) or 0.0)
+    effect_reached_1r_rate = float(alert_effect.get("reached_1r_rate", 0.0) or 0.0)
+    effect_fail_count = int(alert_effect.get("fail_count", 0) or 0)
+    effect_fail_rate = effect_fail_count / effect_sample_count if effect_sample_count > 0 else 0.0
+    effect_reduce_noise = effect_sample_count >= 6 and (
+        effect_useful_rate < 0.35 or effect_reached_1r_rate < 0.15
+    )
+    effect_tighten_risk = effect_sample_count >= 6 and effect_fail_rate >= 0.35
     policy = {
         "advance_warning": "advance_warning" in action_keys,
-        "reduce_noise": "reduce_noise" in action_keys,
-        "tighten_risk": "tighten_risk" in action_keys,
+        "reduce_noise": "reduce_noise" in action_keys or effect_reduce_noise,
+        "tighten_risk": "tighten_risk" in action_keys or effect_tighten_risk,
         "review_context": "review_context" in action_keys,
         "min_score_boost": 0,
-        "active": bool(action_keys),
+        "active": bool(action_keys) or effect_reduce_noise or effect_tighten_risk,
         "sample_count": total_count,
+        "effect_sample_count": effect_sample_count,
+        "effect_useful_rate": effect_useful_rate,
+        "effect_reached_1r_rate": effect_reached_1r_rate,
+        "effect_fail_rate": effect_fail_rate,
         "updated_at": _now_text(),
-        "source": "user_feedback",
+        "source": "user_feedback+alert_effect" if effect_sample_count > 0 else "user_feedback",
     }
-    if policy["reduce_noise"]:
+    if "reduce_noise" in action_keys:
         policy["min_score_boost"] += 10
-    if policy["tighten_risk"]:
+    elif effect_reduce_noise:
+        policy["min_score_boost"] += 8
+    if "tighten_risk" in action_keys:
         policy["min_score_boost"] += 5
+    elif effect_tighten_risk:
+        policy["min_score_boost"] += 4
     if policy["advance_warning"] and not policy["reduce_noise"]:
         policy["min_score_boost"] -= 5
+    policy["min_score_boost"] = max(-5, min(20, int(policy["min_score_boost"])))
     return policy
 
 
@@ -454,6 +473,12 @@ def refresh_feedback_push_policy(
     now: datetime | None = None,
 ) -> dict:
     summary = summarize_feedback_stats(db_path=db_path, days=days, now=now)
+    try:
+        from learning_closure import summarize_alert_effect_outcomes
+
+        summary["alert_effect_summary"] = summarize_alert_effect_outcomes(db_path=db_path, horizon_min=30)
+    except Exception:  # noqa: BLE001
+        summary["alert_effect_summary"] = {}
     policy = build_feedback_push_policy(summary)
     kv_set(FEEDBACK_PUSH_POLICY_KEY, policy, db_path=db_path)
     return policy

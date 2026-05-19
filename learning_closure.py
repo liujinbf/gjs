@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from alert_history_store import read_full_history
@@ -139,6 +139,132 @@ def _load_outcome(conn, snapshot_id: int, horizon_min: int) -> dict:
     }
 
 
+def _compute_directional_metrics(base_price: float, future_price: float, max_price: float, min_price: float, action: str) -> dict:
+    if base_price <= 0:
+        return {"price_change_pct": 0.0, "mfe_pct": 0.0, "mae_pct": 0.0}
+    clean_action = _normalize_text(action).lower()
+    if clean_action == SignalSide.SHORT.value:
+        price_change_pct = (base_price - future_price) / base_price * 100.0
+        mfe_pct = (base_price - min_price) / base_price * 100.0
+        mae_pct = (max_price - base_price) / base_price * 100.0
+    else:
+        price_change_pct = (future_price - base_price) / base_price * 100.0
+        mfe_pct = (max_price - base_price) / base_price * 100.0
+        mae_pct = (base_price - min_price) / base_price * 100.0
+    return {
+        "price_change_pct": price_change_pct,
+        "mfe_pct": max(0.0, mfe_pct),
+        "mae_pct": max(0.0, mae_pct),
+    }
+
+
+def _direction_threshold_pct(symbol: str) -> float:
+    symbol_key = _normalize_text(symbol).upper()
+    if symbol_key.startswith("XAU"):
+        return 0.18
+    if symbol_key.startswith("XAG"):
+        return 0.30
+    return 0.08
+
+
+def _label_directional_alert(symbol: str, action: str, metrics: dict, r_metrics: dict | None = None) -> tuple[str, str]:
+    clean_action = _normalize_text(action).lower()
+    if clean_action not in {SignalSide.LONG.value, SignalSide.SHORT.value}:
+        return "observe", "neutral"
+    threshold = _direction_threshold_pct(symbol)
+    mfe_pct = float(metrics.get("mfe_pct", 0.0) or 0.0)
+    mae_pct = float(metrics.get("mae_pct", 0.0) or 0.0)
+    price_change_pct = float(metrics.get("price_change_pct", 0.0) or 0.0)
+    max_favorable_r = float((r_metrics or {}).get("max_favorable_r", 0.0) or 0.0)
+    max_adverse_r = float((r_metrics or {}).get("max_adverse_r", 0.0) or 0.0)
+    if max_favorable_r >= 1.0 or (mfe_pct >= threshold and mae_pct <= threshold * 0.9):
+        return "success", "high"
+    if max_adverse_r >= 1.0 or price_change_pct <= -(threshold * 0.6) or mae_pct >= threshold * 1.2:
+        return "fail", "low"
+    if mfe_pct >= threshold * 0.5:
+        return "mixed", "medium"
+    return "observe", "neutral"
+
+
+def _find_signal_snapshot(conn, symbol: str, snapshot_time: str, occurred_at: str, tolerance_min: int) -> dict:
+    target_time = _parse_time(snapshot_time) or _parse_time(occurred_at)
+    if target_time is None:
+        return {}
+    rows = conn.execute(
+        """
+        SELECT id, symbol, snapshot_time, latest_price
+        FROM market_snapshots
+        WHERE symbol = ?
+        ORDER BY snapshot_time DESC, id DESC
+        LIMIT 1000
+        """,
+        (symbol,),
+    ).fetchall()
+    best = None
+    best_delta = None
+    for row in rows:
+        row_time = _parse_time(row["snapshot_time"])
+        if row_time is None:
+            continue
+        delta = abs((row_time - target_time).total_seconds())
+        if delta > max(1, int(tolerance_min)) * 60:
+            continue
+        if best_delta is None or delta < best_delta:
+            best = row
+            best_delta = delta
+    if not best:
+        return {}
+    return {
+        "snapshot_id": int(best["id"]),
+        "snapshot_time": _normalize_text(best["snapshot_time"]),
+        "latest_price": float(best["latest_price"] or 0.0),
+        "delta_sec": float(best_delta or 0.0),
+    }
+
+
+def _load_directional_future_outcome(conn, snapshot: dict, symbol: str, action: str, horizon_min: int, current: datetime) -> dict:
+    snapshot_time = _parse_time(snapshot.get("snapshot_time", ""))
+    if snapshot_time is None:
+        return {}
+    target_time = snapshot_time + timedelta(minutes=max(1, int(horizon_min)))
+    if target_time > current:
+        return {}
+    future_rows = conn.execute(
+        """
+        SELECT snapshot_time, latest_price, spread_points
+        FROM market_snapshots
+        WHERE symbol = ? AND snapshot_time > ? AND snapshot_time <= ?
+        ORDER BY snapshot_time ASC
+        """,
+        (
+            symbol,
+            snapshot_time.strftime("%Y-%m-%d %H:%M:%S"),
+            target_time.strftime("%Y-%m-%d %H:%M:%S"),
+        ),
+    ).fetchall()
+    base_price = float(snapshot.get("latest_price", 0.0) or 0.0)
+    prices = [float(row["latest_price"] or 0.0) for row in future_rows if float(row["latest_price"] or 0.0) > 0]
+    if base_price <= 0 or not prices:
+        return {}
+    future_row = future_rows[-1]
+    metrics = _compute_directional_metrics(
+        base_price=base_price,
+        future_price=float(future_row["latest_price"] or 0.0),
+        max_price=max(prices),
+        min_price=min(prices),
+        action=action,
+    )
+    return {
+        "horizon_min": int(horizon_min),
+        "future_snapshot_time": _normalize_text(future_row["snapshot_time"]),
+        "future_price": float(future_row["latest_price"] or 0.0),
+        "future_spread_points": float(future_row["spread_points"] or 0.0),
+        "max_price": max(prices),
+        "min_price": min(prices),
+        **metrics,
+    }
+
+
 def _pick_float(entry: dict, *keys: str) -> float:
     for key in keys:
         try:
@@ -268,6 +394,156 @@ def backfill_alert_effect_outcomes(
         "missing_snapshot_count": missing_snapshot_count,
         "missing_outcome_count": missing_outcome_count,
         "horizon_min": int(horizon_min),
+    }
+
+
+def backfill_ai_signal_effect_outcomes(
+    *,
+    db_path: Path | str | None = None,
+    horizon_min: int = 30,
+    tolerance_min: int = 180,
+    pushed_only: bool = True,
+    now: datetime | None = None,
+) -> dict:
+    """把已推送的 AI 动作信号和后续行情对齐，沉淀为提醒效果样本。"""
+    target_db = Path(db_path) if db_path else KNOWLEDGE_DB_FILE
+    current = now or datetime.now()
+    created_at = _now_text(current)
+    checked_count = 0
+    inserted_count = 0
+    skipped_count = 0
+    missing_snapshot_count = 0
+    missing_future_count = 0
+    invalid_signal_count = 0
+    pushed_sql = "AND push_sent = 1" if pushed_only else ""
+
+    with open_knowledge_connection(target_db, ensure_schema=True) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, signal_signature, occurred_at, snapshot_time, symbol, action,
+                   entry_price, stop_loss, take_profit, summary_line, content,
+                   model, is_fallback, sim_eligible, sim_block_reason
+            FROM ai_signal_events
+            WHERE action IN ('long', 'short')
+              AND signal_meta_valid = 1
+              {pushed_sql}
+            ORDER BY occurred_at ASC, id ASC
+            """
+        ).fetchall()
+        for row in rows:
+            checked_count += 1
+            symbol = _normalize_text(row["symbol"]).upper()
+            action = _normalize_text(row["action"]).lower()
+            occurred_at = _normalize_text(row["occurred_at"])
+            if not symbol or action not in {SignalSide.LONG.value, SignalSide.SHORT.value}:
+                invalid_signal_count += 1
+                continue
+
+            signature = _normalize_text(row["signal_signature"]) or f"ai-signal-{int(row['id'])}"
+            alert_signature = f"ai::{signature}"
+            existing = conn.execute(
+                """
+                SELECT 1
+                FROM alert_effect_outcomes
+                WHERE alert_signature = ? AND horizon_min = ?
+                LIMIT 1
+                """,
+                (alert_signature, int(horizon_min)),
+            ).fetchone()
+            if existing:
+                skipped_count += 1
+                continue
+
+            snapshot = _find_signal_snapshot(
+                conn,
+                symbol=symbol,
+                snapshot_time=_normalize_text(row["snapshot_time"]),
+                occurred_at=occurred_at,
+                tolerance_min=tolerance_min,
+            )
+            if not snapshot:
+                missing_snapshot_count += 1
+                continue
+            outcome = _load_directional_future_outcome(
+                conn,
+                snapshot=snapshot,
+                symbol=symbol,
+                action=action,
+                horizon_min=int(horizon_min),
+                current=current,
+            )
+            if not outcome:
+                missing_future_count += 1
+                continue
+
+            entry_like = {
+                "entry_price": float(row["entry_price"] or 0.0),
+                "stop_loss_price": float(row["stop_loss"] or 0.0),
+            }
+            r_metrics = _resolve_r_metrics(entry_like, snapshot, outcome, action)
+            outcome_label, signal_quality = _label_directional_alert(symbol, action, outcome, r_metrics)
+            title = f"{symbol} AI动作提醒：{'做多' if action == SignalSide.LONG.value else '做空'}"
+            detail = _normalize_text(row["summary_line"]) or _normalize_text(row["content"])[:120]
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO alert_effect_outcomes (
+                    alert_signature, category, title, symbol, action, occurred_at,
+                    snapshot_id, snapshot_time, horizon_min, outcome_label, signal_quality,
+                    price_change_pct, mfe_pct, mae_pct, max_favorable_r, max_adverse_r,
+                    reached_1r, meta_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    alert_signature,
+                    "ai",
+                    title,
+                    symbol,
+                    action,
+                    occurred_at,
+                    int(snapshot["snapshot_id"]),
+                    _normalize_text(snapshot["snapshot_time"]),
+                    int(horizon_min),
+                    outcome_label,
+                    signal_quality,
+                    float(outcome["price_change_pct"]),
+                    float(outcome["mfe_pct"]),
+                    float(outcome["mae_pct"]),
+                    float(r_metrics["max_favorable_r"]),
+                    float(r_metrics["max_adverse_r"]),
+                    1 if bool(r_metrics["reached_1r"]) else 0,
+                    json.dumps(
+                        {
+                            "source": "ai_signal_events",
+                            "ai_signal_event_id": int(row["id"]),
+                            "model": _normalize_text(row["model"]),
+                            "summary": detail,
+                            "entry_price": float(row["entry_price"] or 0.0),
+                            "stop_loss": float(row["stop_loss"] or 0.0),
+                            "take_profit": float(row["take_profit"] or 0.0),
+                            "is_fallback": bool(row["is_fallback"]),
+                            "sim_eligible": bool(row["sim_eligible"]),
+                            "sim_block_reason": _normalize_text(row["sim_block_reason"]),
+                            "future_snapshot_time": _normalize_text(outcome["future_snapshot_time"]),
+                            "future_price": float(outcome["future_price"]),
+                            "snapshot_delta_sec": float(snapshot.get("delta_sec", 0.0) or 0.0),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    created_at,
+                ),
+            )
+            if cursor.rowcount > 0:
+                inserted_count += 1
+
+    return {
+        "checked_count": checked_count,
+        "inserted_count": inserted_count,
+        "skipped_count": skipped_count,
+        "missing_snapshot_count": missing_snapshot_count,
+        "missing_future_count": missing_future_count,
+        "invalid_signal_count": invalid_signal_count,
+        "horizon_min": int(horizon_min),
+        "pushed_only": bool(pushed_only),
     }
 
 

@@ -57,6 +57,8 @@ def test_runtime_config_has_notify_defaults():
     assert hasattr(config, "sim_min_rr")
     assert hasattr(config, "sim_relaxed_rr")
     assert hasattr(config, "sim_model_min_probability")
+    assert hasattr(config, "sim_scalp_exit_r")
+    assert hasattr(config, "sim_scalp_min_minutes")
     assert hasattr(config, "sim_exploratory_daily_limit")
     assert hasattr(config, "sim_exploratory_cooldown_min")
     assert hasattr(config, "live_order_precheck_only")
@@ -236,6 +238,8 @@ def test_runtime_config_supports_no_tp2_lock_settings(tmp_path, monkeypatch):
     for key in (
         "SIM_NO_TP2_LOCK_R",
         "SIM_NO_TP2_PARTIAL_CLOSE_RATIO",
+        "SIM_SCALP_EXIT_R",
+        "SIM_SCALP_MIN_MINUTES",
         app_config.LEGACY_MIGRATION_DONE_KEY,
     ):
         monkeypatch.delenv(key, raising=False)
@@ -259,18 +263,26 @@ def test_runtime_config_supports_no_tp2_lock_settings(tmp_path, monkeypatch):
             ai_push_summary_only=True,
             sim_no_tp2_lock_r=0.75,
             sim_no_tp2_partial_close_ratio=0.25,
+            sim_scalp_exit_r=0.65,
+            sim_scalp_min_minutes=3,
         )
     )
 
     monkeypatch.setenv("SIM_NO_TP2_LOCK_R", "0.75")
     monkeypatch.setenv("SIM_NO_TP2_PARTIAL_CLOSE_RATIO", "0.25")
+    monkeypatch.setenv("SIM_SCALP_EXIT_R", "0.65")
+    monkeypatch.setenv("SIM_SCALP_MIN_MINUTES", "3")
     config = app_config.get_runtime_config()
 
     assert abs(config.sim_no_tp2_lock_r - 0.75) < 1e-9
     assert abs(config.sim_no_tp2_partial_close_ratio - 0.25) < 1e-9
+    assert abs(config.sim_scalp_exit_r - 0.65) < 1e-9
+    assert config.sim_scalp_min_minutes == 3
     content = env_file.read_text(encoding="utf-8")
     assert "SIM_NO_TP2_LOCK_R='0.75'" in content or 'SIM_NO_TP2_LOCK_R="0.75"' in content
     assert "SIM_NO_TP2_PARTIAL_CLOSE_RATIO='0.25'" in content or 'SIM_NO_TP2_PARTIAL_CLOSE_RATIO="0.25"' in content
+    assert "SIM_SCALP_EXIT_R='0.65'" in content or 'SIM_SCALP_EXIT_R="0.65"' in content
+    assert "SIM_SCALP_MIN_MINUTES='3'" in content or 'SIM_SCALP_MIN_MINUTES="3"' in content
 
 
 def test_runtime_config_supports_sim_signal_thresholds(tmp_path, monkeypatch):
@@ -364,7 +376,7 @@ def test_runtime_config_supports_strategy_min_rr_json(tmp_path, monkeypatch):
 
     assert abs(config.sim_strategy_min_rr["pullback_sniper_probe"] - 1.75) < 1e-9
     assert abs(config.sim_strategy_min_rr["directional_probe"] - 2.05) < 1e-9
-    assert abs(config.sim_strategy_min_rr["early_momentum"] - 1.30) < 1e-9
+    assert abs(config.sim_strategy_min_rr["early_momentum"] - 1.15) < 1e-9
     content = env_file.read_text(encoding="utf-8")
     assert "SIM_STRATEGY_MIN_RR_JSON=" in content
 
@@ -404,10 +416,10 @@ def test_runtime_config_supports_strategy_exploratory_controls_json(tmp_path, mo
 
     assert config.sim_strategy_daily_limit["pullback_sniper_probe"] == 5
     assert config.sim_strategy_daily_limit["directional_probe"] == 2
-    assert config.sim_strategy_daily_limit["early_momentum"] == 3
+    assert config.sim_strategy_daily_limit["early_momentum"] == 10
     assert config.sim_strategy_cooldown_min["pullback_sniper_probe"] == 18
     assert config.sim_strategy_cooldown_min["directional_probe"] == 6
-    assert config.sim_strategy_cooldown_min["early_momentum"] == 10
+    assert config.sim_strategy_cooldown_min["early_momentum"] == 3
     content = env_file.read_text(encoding="utf-8")
     assert "SIM_STRATEGY_DAILY_LIMIT_JSON=" in content
     assert "SIM_STRATEGY_COOLDOWN_JSON=" in content

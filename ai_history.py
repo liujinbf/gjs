@@ -54,6 +54,9 @@ def build_ai_history_entry(result: dict, snapshot: dict, push_result: dict | Non
     signal_schema_version = str((result or {}).get("signal_schema_version", "") or "").strip()
     signal_meta_valid = bool((result or {}).get("signal_meta_valid", False))
     signal_meta_reason = _normalize_text((result or {}).get("signal_meta_reason", "") or "")
+    fallback_reason_key = _normalize_text((result or {}).get("fallback_reason_key", ""))
+    fallback_reason_text = _normalize_text((result or {}).get("fallback_reason_text", ""))
+    fallback_reason_detail = _normalize_text((result or {}).get("fallback_reason_detail", "") or (result or {}).get("fallback_reason", ""))
     symbols = [
         str(item.get("symbol", "") or "").strip().upper()
         for item in [_normalize_snapshot_item(item) for item in list((snapshot or {}).get("items", []) or [])]
@@ -78,6 +81,10 @@ def build_ai_history_entry(result: dict, snapshot: dict, push_result: dict | Non
         "ai_raw_response_length": int((result or {}).get("ai_raw_response_length", 0) or 0),
         "ai_raw_response_excerpt": str((result or {}).get("ai_raw_response_excerpt", "") or "")[:500],
         "rulebook_summary_text": _normalize_text((result or {}).get("rulebook_summary_text", "")),
+        "is_fallback": bool((result or {}).get("is_fallback", False)),
+        "fallback_reason_key": fallback_reason_key,
+        "fallback_reason_text": fallback_reason_text,
+        "fallback_reason_detail": fallback_reason_detail,
         "snapshot_time": str((snapshot or {}).get("last_refresh_text", "") or "").strip(),
         "status_hint": _normalize_text((snapshot or {}).get("status_hint", "")),
         "alert_text": _normalize_text((snapshot or {}).get("alert_text", "")),
@@ -156,6 +163,7 @@ def summarize_recent_ai_history(days: int = 7, history_file: Path | None = None,
         return {
             "total_count": 0,
             "push_count": 0,
+            "fallback_count": 0,
             "latest_model": "--",
             "latest_time": "--",
             "latest_summary": "最近还没有 AI 研判记录。",
@@ -174,6 +182,7 @@ def summarize_recent_ai_history(days: int = 7, history_file: Path | None = None,
         return {
             "total_count": 0,
             "push_count": 0,
+            "fallback_count": 0,
             "latest_model": "--",
             "latest_time": "--",
             "latest_summary": "最近还没有 AI 研判记录。",
@@ -184,13 +193,18 @@ def summarize_recent_ai_history(days: int = 7, history_file: Path | None = None,
     latest_dt, latest_row = filtered[-1]
     total_count = len(filtered)
     push_count = sum(1 for _dt, row in filtered if bool(row.get("push_sent")))
+    fallback_count = sum(1 for _dt, row in filtered if bool(row.get("is_fallback")))
     latest_model = str(latest_row.get("model", "--") or "--").strip()
     latest_summary = str(latest_row.get("summary_line", "最近一次 AI 研判未返回摘要。") or "最近一次 AI 研判未返回摘要。").strip()
     return {
         "total_count": total_count,
         "push_count": push_count,
+        "fallback_count": fallback_count,
         "latest_model": latest_model,
         "latest_time": latest_dt.strftime("%Y-%m-%d %H:%M:%S"),
         "latest_summary": latest_summary,
-        "summary_text": f"最近 {max(1, int(days))} 天共记录 {total_count} 次 AI 研判，其中 {push_count} 次已发送到外部提醒渠道。",
+        "summary_text": (
+            f"最近 {max(1, int(days))} 天共记录 {total_count} 次 AI 研判，"
+            f"其中 {push_count} 次已发送到外部提醒渠道，降级 {fallback_count} 次。"
+        ),
     }

@@ -22,6 +22,10 @@ def test_build_ai_history_entry_keeps_summary_and_push_state():
             "content": "当前结论：只适合观察。\n方向判断：黄金偏强。\n风险点：点差可能放大。\n行动建议：等待回踩。",
             "signal_meta": {"symbol": "XAUUSD", "action": "neutral", "price": 0, "sl": 0, "tp": 0},
             "rulebook_summary_text": "当前优先遵守 1 条已验证规则。",
+            "is_fallback": True,
+            "fallback_reason_key": "insufficient_balance",
+            "fallback_reason_text": "AI 账户余额不足",
+            "fallback_reason_detail": "HTTP 402",
         },
         {
             "last_refresh_text": "2026-04-12 18:20:00",
@@ -36,6 +40,9 @@ def test_build_ai_history_entry_keeps_summary_and_push_state():
     assert entry["symbols"] == ["XAUUSD"]
     assert entry["signal_meta"]["symbol"] == "XAUUSD"
     assert entry["rulebook_summary_text"] == "当前优先遵守 1 条已验证规则。"
+    assert entry["is_fallback"] is True
+    assert entry["fallback_reason_key"] == "insufficient_balance"
+    assert entry["fallback_reason_text"] == "AI 账户余额不足"
 
 
 def test_append_and_summarize_ai_history():
@@ -52,6 +59,7 @@ def test_append_and_summarize_ai_history():
             "summary_line": "方向判断：黄金偏强。",
             "content": "方向判断：黄金偏强。",
             "push_sent": True,
+            "is_fallback": True,
             "signature": "ai-1",
         },
         history_file=history_file,
@@ -79,8 +87,9 @@ def test_append_and_summarize_ai_history():
     )
     assert stats["total_count"] == 1
     assert stats["push_count"] == 1
+    assert stats["fallback_count"] == 1
     assert stats["latest_model"] == "deepseek-chat"
-    assert "最近 7 天共记录 1 次 AI 研判" in stats["summary_text"]
+    assert "降级 1 次" in stats["summary_text"]
 
     shutil.rmtree(history_dir)
 

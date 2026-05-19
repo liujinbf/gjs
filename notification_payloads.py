@@ -77,11 +77,11 @@ def _build_user_facing_title(entry: dict) -> str:
             if signal_side == "long":
                 if ai_rule_eligible is False:
                     return f"{symbol} 动作更新：偏多观察"
-                return f"{symbol} 动作更新：可准备做多"
+                return f"{symbol} 做多机会：等待入场"
             if signal_side == "short":
                 if ai_rule_eligible is False:
                     return f"{symbol} 动作更新：偏空观察"
-                return f"{symbol} 动作更新：可准备做空"
+                return f"{symbol} 做空机会：等待入场"
             return f"{symbol} 动作更新：先别动手"
         return "动作更新：先别动手"
     return original_title
@@ -447,11 +447,11 @@ def _build_ai_action_summary(signal_meta: dict, item: dict, summary_line: str) -
     if action == "long":
         if ai_rule_eligible is False:
             return f"{symbol} AI 偏向做多，但规则层仍未放行，先观察。"
-        return f"{symbol} 可准备做多，先等确认后再动手。"
+        return f"{symbol} 做多机会接近，等价格回到入场区并确认承接。"
     if action == "short":
         if ai_rule_eligible is False:
             return f"{symbol} AI 偏向做空，但规则层仍未放行，先观察。"
-        return f"{symbol} 可准备做空，先等确认后再动手。"
+        return f"{symbol} 做空机会接近，等价格回到入场区并确认承压。"
     if summary_line:
         return _clip_text(summary_line, 40)
     return f"{symbol} 当前先不出手。"
@@ -476,7 +476,7 @@ def _build_ai_markdown_body(result: dict, item: dict, signal_meta: dict, occurre
     ai_rule_eligible = item.get("ai_rule_eligible")
     ai_rule_reason = _normalize_text(item.get("ai_rule_reason", ""))
 
-    lines = [f"## 🤖【AI 动作提醒：{symbol}】", ""]
+    lines = [f"## 🤖【行情机会提醒：{symbol}】", ""]
     headline = [f"- 时间：{occurred_at}"]
     if action == "long":
         headline.append("- 结论：**偏多观察**" if ai_rule_eligible is False else "- 结论：**可准备做多**")
@@ -592,6 +592,7 @@ def _build_ai_brief_entry(result: dict, snapshot: dict, config: MetalMonitorConf
     ai_audit = resolve_ai_signal_execution_audit(snapshot, symbol=focus_symbol)
     focus_item = dict(focus_item)
     focus_item["ai_rule_eligible"] = ai_audit["sim_eligible"] if ai_audit["audit_available"] else None
+    focus_item["ai_audit_available"] = bool(ai_audit["audit_available"])
     focus_item["ai_rule_reason"] = ai_audit["sim_block_reason"]
 
     occurred_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -607,6 +608,7 @@ def _build_ai_brief_entry(result: dict, snapshot: dict, config: MetalMonitorConf
         "symbol": focus_symbol,
         "signal_side": str(normalized_signal_meta.get("action", "neutral") or "neutral").strip().lower(),
         "ai_rule_eligible": focus_item.get("ai_rule_eligible"),
+        "ai_audit_available": focus_item.get("ai_audit_available"),
         "ai_rule_reason": focus_item.get("ai_rule_reason", ""),
         "markdown_body": markdown_body,
     }

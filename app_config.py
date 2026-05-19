@@ -14,25 +14,25 @@ DEFAULT_QUOTE_RISK_THRESHOLDS = {
     "FX": {"warn_points": 25.0, "alert_points": 40.0, "warn_pct": 0.020, "alert_pct": 0.035},
 }
 DEFAULT_SIM_STRATEGY_MIN_RR = {
-    "early_momentum": 1.30,
-    "direct_momentum": 1.40,
-    "pullback_sniper_probe": 1.45,
-    "directional_probe": 1.80,
-    "structure": 1.80,
+    "early_momentum": 1.15,
+    "direct_momentum": 1.25,
+    "pullback_sniper_probe": 1.30,
+    "directional_probe": 1.55,
+    "structure": 1.55,
 }
 DEFAULT_SIM_STRATEGY_DAILY_LIMIT = {
-    "early_momentum": 3,
-    "direct_momentum": 3,
-    "pullback_sniper_probe": 3,
-    "directional_probe": 3,
-    "structure": 3,
+    "early_momentum": 10,
+    "direct_momentum": 8,
+    "pullback_sniper_probe": 8,
+    "directional_probe": 6,
+    "structure": 5,
 }
 DEFAULT_SIM_STRATEGY_COOLDOWN_MIN = {
-    "early_momentum": 10,
-    "direct_momentum": 10,
-    "pullback_sniper_probe": 10,
-    "directional_probe": 10,
-    "structure": 10,
+    "early_momentum": 3,
+    "direct_momentum": 4,
+    "pullback_sniper_probe": 6,
+    "directional_probe": 8,
+    "structure": 8,
 }
 EVENT_RISK_MODES = {
     "normal": "正常观察",
@@ -181,6 +181,11 @@ class MetalMonitorConfig:
     sim_initial_balance: float = 1000.0
     sim_no_tp2_lock_r: float = 0.5
     sim_no_tp2_partial_close_ratio: float = 0.5
+    sim_scalp_exit_r: float = 0.55
+    sim_scalp_min_minutes: int = 0
+    sim_time_protect_minutes: int = 30
+    sim_time_protect_min_r: float = 0.2
+    sim_time_protect_giveback_ratio: float = 0.55
     sim_min_rr: float = 1.6
     sim_relaxed_rr: float = 1.3
     sim_model_min_probability: float = 0.68
@@ -512,22 +517,42 @@ def get_runtime_config() -> MetalMonitorConfig:
     except ValueError:
         sim_no_tp2_partial_close_ratio = 0.5
     try:
-        sim_min_rr = max(0.50, min(10.0, float(str(os.getenv("SIM_MIN_RR", "1.6") or "1.6").strip())))
+        sim_scalp_exit_r = max(0.0, min(5.0, float(str(os.getenv("SIM_SCALP_EXIT_R", "0.55") or "0.55").strip())))
     except ValueError:
-        sim_min_rr = 1.6
+        sim_scalp_exit_r = 0.55
+    sim_scalp_min_minutes = _parse_int_env("SIM_SCALP_MIN_MINUTES", default=0, minimum=0, maximum=240)
+    sim_time_protect_minutes = _parse_int_env("SIM_TIME_PROTECT_MINUTES", default=30, minimum=0, maximum=240)
     try:
-        sim_relaxed_rr = max(0.50, min(10.0, float(str(os.getenv("SIM_RELAXED_RR", "1.3") or "1.3").strip())))
+        sim_time_protect_min_r = max(
+            0.05,
+            min(2.0, float(str(os.getenv("SIM_TIME_PROTECT_MIN_R", "0.2") or "0.2").strip())),
+        )
     except ValueError:
-        sim_relaxed_rr = 1.3
+        sim_time_protect_min_r = 0.2
+    try:
+        sim_time_protect_giveback_ratio = max(
+            0.10,
+            min(0.95, float(str(os.getenv("SIM_TIME_PROTECT_GIVEBACK_RATIO", "0.55") or "0.55").strip())),
+        )
+    except ValueError:
+        sim_time_protect_giveback_ratio = 0.55
+    try:
+        sim_min_rr = max(0.50, min(10.0, float(str(os.getenv("SIM_MIN_RR", "1.45") or "1.45").strip())))
+    except ValueError:
+        sim_min_rr = 1.45
+    try:
+        sim_relaxed_rr = max(0.50, min(10.0, float(str(os.getenv("SIM_RELAXED_RR", "1.15") or "1.15").strip())))
+    except ValueError:
+        sim_relaxed_rr = 1.15
     try:
         sim_model_min_probability = max(
             0.0,
-            min(1.0, float(str(os.getenv("SIM_MODEL_MIN_PROBABILITY", "0.68") or "0.68").strip())),
+            min(1.0, float(str(os.getenv("SIM_MODEL_MIN_PROBABILITY", "0.62") or "0.62").strip())),
         )
     except ValueError:
-        sim_model_min_probability = 0.68
-    sim_exploratory_daily_limit = _parse_int_env("SIM_EXPLORATORY_DAILY_LIMIT", default=3, minimum=0, maximum=50)
-    sim_exploratory_cooldown_min = _parse_int_env("SIM_EXPLORATORY_COOLDOWN_MIN", default=10, minimum=0, maximum=240)
+        sim_model_min_probability = 0.62
+    sim_exploratory_daily_limit = _parse_int_env("SIM_EXPLORATORY_DAILY_LIMIT", default=12, minimum=0, maximum=50)
+    sim_exploratory_cooldown_min = _parse_int_env("SIM_EXPLORATORY_COOLDOWN_MIN", default=5, minimum=0, maximum=240)
     sim_strategy_min_rr = normalize_sim_strategy_min_rr()
     sim_strategy_daily_limit = normalize_sim_strategy_daily_limit()
     sim_strategy_cooldown_min = normalize_sim_strategy_cooldown_min()
@@ -555,7 +580,7 @@ def get_runtime_config() -> MetalMonitorConfig:
         notify_cooldown_min=notify_cooldown_min,
         ai_api_key=str(os.getenv("AI_API_KEY", "") or "").strip(),
         ai_api_base=str(os.getenv("AI_API_BASE", "https://api.siliconflow.cn/v1") or "https://api.siliconflow.cn/v1").strip(),
-        ai_model=str(os.getenv("AI_MODEL", "deepseek-ai/DeepSeek-R1") or "deepseek-ai/DeepSeek-R1").strip(),
+        ai_model=str(os.getenv("AI_MODEL", "deepseek-v4-flash") or "deepseek-v4-flash").strip(),
         ai_push_enabled=_parse_bool_env("AI_PUSH_ENABLED", default=False),
         ai_push_summary_only=_parse_bool_env("AI_PUSH_SUMMARY_ONLY", default=True),
         ai_auto_interval_min=_parse_int_env("AI_AUTO_INTERVAL_MIN", default=0, minimum=0),
@@ -588,6 +613,11 @@ def get_runtime_config() -> MetalMonitorConfig:
         sim_initial_balance=sim_initial_balance,
         sim_no_tp2_lock_r=sim_no_tp2_lock_r,
         sim_no_tp2_partial_close_ratio=sim_no_tp2_partial_close_ratio,
+        sim_scalp_exit_r=sim_scalp_exit_r,
+        sim_scalp_min_minutes=sim_scalp_min_minutes,
+        sim_time_protect_minutes=sim_time_protect_minutes,
+        sim_time_protect_min_r=sim_time_protect_min_r,
+        sim_time_protect_giveback_ratio=sim_time_protect_giveback_ratio,
         sim_min_rr=sim_min_rr,
         sim_relaxed_rr=sim_relaxed_rr,
         sim_model_min_probability=sim_model_min_probability,
@@ -672,6 +702,13 @@ def save_runtime_config(config: MetalMonitorConfig) -> None:
             "SIM_NO_TP2_LOCK_R": str(max(0.10, min(5.0, float(config.sim_no_tp2_lock_r)))),
             "SIM_NO_TP2_PARTIAL_CLOSE_RATIO": str(
                 max(0.10, min(0.90, float(config.sim_no_tp2_partial_close_ratio)))
+            ),
+            "SIM_SCALP_EXIT_R": str(max(0.0, min(5.0, float(config.sim_scalp_exit_r)))),
+            "SIM_SCALP_MIN_MINUTES": str(max(0, min(240, int(config.sim_scalp_min_minutes)))),
+            "SIM_TIME_PROTECT_MINUTES": str(max(0, min(240, int(config.sim_time_protect_minutes)))),
+            "SIM_TIME_PROTECT_MIN_R": str(max(0.05, min(2.0, float(config.sim_time_protect_min_r)))),
+            "SIM_TIME_PROTECT_GIVEBACK_RATIO": str(
+                max(0.10, min(0.95, float(config.sim_time_protect_giveback_ratio)))
             ),
             "SIM_MIN_RR": str(max(0.50, min(10.0, float(config.sim_min_rr)))),
             "SIM_RELAXED_RR": str(max(0.50, min(10.0, float(config.sim_relaxed_rr)))),

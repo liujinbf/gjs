@@ -33,6 +33,31 @@ def _build_config() -> MetalMonitorConfig:
     )
 
 
+def _actionable_ai_snapshot_item() -> dict:
+    return {
+        "symbol": "XAUUSD",
+        "latest_price": 4759.82,
+        "bid": 4759.70,
+        "ask": 4759.82,
+        "spread_points": 12.0,
+        "point": 0.01,
+        "has_live_quote": True,
+        "trade_grade": "可轻仓试仓",
+        "trade_grade_source": "structure",
+        "signal_side": "long",
+        "risk_reward_ready": True,
+        "risk_reward_state": "acceptable",
+        "risk_reward_ratio": 2.0,
+        "risk_reward_direction": "bullish",
+        "risk_reward_stop_price": 4749.80,
+        "risk_reward_target_price": 4779.80,
+        "risk_reward_entry_zone_low": 4758.80,
+        "risk_reward_entry_zone_high": 4761.80,
+        "risk_reward_entry_zone_text": "4758.80-4761.80",
+        "atr14": 10.0,
+    }
+
+
 def test_pick_notify_entries_honors_cooldown_and_session_keeps_priority_after_macro_silence():
     state_dir = ROOT / ".runtime_test_notify"
     if state_dir.exists():
@@ -1416,13 +1441,7 @@ def test_send_ai_brief_notification_honors_summary_mode(monkeypatch):
             "summary_text": "当前共观察 2 个品种。",
             "items": [
                 {
-                    "symbol": "XAUUSD",
-                    "latest_price": 4759.82,
-                    "bid": 4759.70,
-                    "ask": 4759.82,
-                    "spread_points": 12.0,
-                    "point": 0.01,
-                    "has_live_quote": True,
+                    **_actionable_ai_snapshot_item(),
                     "risk_reward_entry_zone_text": "4758.80-4760.20",
                 },
                 {"symbol": "EURUSD"},
@@ -1437,11 +1456,11 @@ def test_send_ai_brief_notification_honors_summary_mode(monkeypatch):
     # 期望值改为 2（两个通道均入队）
     assert result["sent_count"] >= 1
     assert payloads
-    assert payloads[0]["title"] == "XAUUSD 动作更新：可准备做多"
-    assert payloads[0]["detail"] == "XAUUSD 可准备做多，先等确认后再动手。"
-    assert "## 🤖【AI 动作提醒：XAUUSD】" in payloads[0]["markdown_body"]
+    assert payloads[0]["title"] == "XAUUSD 做多机会：等待入场"
+    assert payloads[0]["detail"] == "XAUUSD 做多机会接近，等价格回到入场区并确认承接。"
+    assert "## 🤖【行情机会提醒：XAUUSD】" in payloads[0]["markdown_body"]
     assert "### XAUUSD" in payloads[0]["markdown_body"]
-    assert "短线：偏多，等回踩确认" in payloads[0]["markdown_body"]
+    assert "短线：偏多，可轻仓试多" in payloads[0]["markdown_body"]
     assert "入场区：4758.80-4760.20" in payloads[0]["markdown_body"]
     assert "止损：4,749.80" in payloads[0]["markdown_body"]
     assert "止盈1：4,779.80" in payloads[0]["markdown_body"]
@@ -1513,16 +1532,53 @@ def test_send_ai_brief_notification_marks_blocked_direction_as_watch_only(monkey
         state_file=state_file,
     )
 
-    assert result["sent_count"] >= 1
-    assert payloads
-    assert payloads[0]["title"] == "XAUUSD 动作更新：偏多观察"
-    assert payloads[0]["detail"] == "XAUUSD AI 偏向做多，但规则层仍未放行，先观察。"
-    assert "- 结论：**偏多观察**" in payloads[0]["markdown_body"]
-    assert "短线：偏多，先观察" in payloads[0]["markdown_body"]
-    assert "建议：规则未放行，只观察，不下单。" in payloads[0]["markdown_body"]
-    assert "风险：规则未放行" in payloads[0]["markdown_body"]
-    assert "**出手拆解**" not in payloads[0]["markdown_body"]
-    assert "**三步执行**" not in payloads[0]["markdown_body"]
+    assert result["sent_count"] == 0
+    assert result["skipped_reason"] == "ai_not_actionable_suppressed"
+    assert payloads == []
+
+    import shutil
+    shutil.rmtree(state_dir)
+
+
+def test_send_ai_brief_notification_suppresses_existing_position(monkeypatch):
+    state_dir = ROOT / ".runtime_test_ai_brief_existing_position"
+    if state_dir.exists():
+        import shutil
+        shutil.rmtree(state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_file = state_dir / "notify_state.json"
+
+    config = _build_config()
+    config.ai_push_enabled = True
+    payloads = []
+
+    monkeypatch.setattr(notification, "send_dingtalk", lambda entry, webhook: payloads.append(entry) or (True, "ok"))
+    monkeypatch.setattr(notification, "send_pushplus", lambda entry, token: (False, "skip"))
+
+    result = notification.send_ai_brief_notification(
+        {
+            "model": "deepseek-chat",
+            "content": "方向判断：黄金偏强。\n行动建议：等待入场。",
+            "signal_meta": {
+                "symbol": "XAUUSD",
+                "action": "long",
+                "price": 4759.80,
+                "sl": 4749.80,
+                "tp": 4779.80,
+            },
+        },
+        {
+            "summary_text": "快照",
+            "active_position_symbols": ["XAUUSD"],
+            "items": [_actionable_ai_snapshot_item()],
+        },
+        config,
+        state_file=state_file,
+    )
+
+    assert result["sent_count"] == 0
+    assert result["skipped_reason"] == "ai_existing_position_suppressed"
+    assert payloads == []
 
     import shutil
     shutil.rmtree(state_dir)
@@ -1619,7 +1675,7 @@ def test_send_ai_brief_notification_cooldown_blocks_second_push(monkeypatch):
             "tp": 4779.8,
         },
     }
-    snap = {"summary_text": "快照", "items": [{"symbol": "XAUUSD"}]}
+    snap = {"summary_text": "快照", "items": [_actionable_ai_snapshot_item()]}
 
     # 第一次：无状态，应该正常发送（入队 ≥ 1 个通道）
     r1 = notification.send_ai_brief_notification(brief_payload, snap, config, state_file=state_file)

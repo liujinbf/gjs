@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+import os
 import shutil
 from pathlib import Path
 
@@ -37,8 +38,17 @@ class LocalTmpPathFactory:
 @pytest.fixture(scope="session")
 def tmp_path_factory() -> LocalTmpPathFactory:
     sandbox_root = Path(__file__).resolve().parent.parent / ".test_sandbox"
+    if os.environ.get("KEEP_TEST_SANDBOX", "").strip() != "1" and sandbox_root.exists():
+        shutil.rmtree(sandbox_root, ignore_errors=True)
     sandbox_root.mkdir(parents=True, exist_ok=True)
     return LocalTmpPathFactory(sandbox_root)
+
+
+def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
+    if os.environ.get("KEEP_TEST_SANDBOX", "").strip() == "1":
+        return
+    sandbox_root = Path(__file__).resolve().parent.parent / ".test_sandbox"
+    shutil.rmtree(sandbox_root, ignore_errors=True)
 
 
 @pytest.fixture

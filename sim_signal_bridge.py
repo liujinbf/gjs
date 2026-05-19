@@ -63,6 +63,41 @@ _SIM_BLOCK_REASON_LABELS = {
     "exploratory_ready": "探索试仓就绪",
 }
 
+_GRADE_GATE_SECONDARY_LABELS = {
+    "event_gate": "事件窗口",
+    "source_gate": "非结构型信号",
+    "grade_not_observe": "结构等级偏低",
+    "rr_not_ready": "盈亏比未准备好",
+    "rr_too_low": "RR不足",
+    "risk_reward_state_bad": "盈亏比状态不佳",
+    "multi_timeframe_misaligned": "多周期未同向",
+    "direction_unclear": "方向不清晰",
+    "target_incomplete": "止损目标不完整",
+    "entry_zone_miss": "未回到执行区",
+    "chasing_upper": "上沿追价",
+    "chasing_lower": "下沿追空",
+    "unknown": "待继续细分",
+}
+
+_RR_NOT_READY_TERTIARY_LABELS = {
+    "no_price": "现价缺失",
+    "no_direction": "方向基础不足",
+    "atr_missing_no_key_levels": "ATR缺失且关键位不足",
+    "key_range_invalid": "关键位区间无效",
+    "price_span_too_small": "止损目标跨度过小",
+    "entry_zone_missing": "入场区间未生成",
+    "unknown": "待继续细分",
+}
+
+_NO_DIRECTION_COMPONENT_LABELS = {
+    "signal_side_missing": "信号方向缺失",
+    "intraday_sideways": "日内方向震荡",
+    "multi_not_aligned": "多周期未同向",
+    "breakout_direction_neutral": "突破方向中性",
+    "breakout_state_none": "突破未确认",
+    "retest_state_none": "回踩未确认",
+}
+
 
 def _normalize_text(value: object) -> str:
     return " ".join(str(value or "").replace("\n", " ").split()).strip()
@@ -179,6 +214,150 @@ def _classify_sim_block_reason(reason: str, eligible: bool) -> str:
     if "下沿追空" in text or "下沿" in text:
         return "chasing_lower"
     return "meta_invalid"
+
+
+def _resolve_rr_direction_hint(item: dict) -> str:
+    for key in ("signal_side", "risk_reward_direction", "multi_timeframe_bias", "breakout_direction", "intraday_bias"):
+        value = _normalize_text(item.get(key, "")).lower()
+        if value in {"long", "bullish"}:
+            return "bullish"
+        if value in {"short", "bearish"}:
+            return "bearish"
+    return "unknown"
+
+
+def _diagnose_rr_not_ready_tertiary(item: dict) -> tuple[str, str]:
+    current_price = float(item.get("latest_price", 0.0) or 0.0)
+    key_high = float(item.get("key_level_high", 0.0) or 0.0)
+    key_low = float(item.get("key_level_low", 0.0) or 0.0)
+    atr14 = max(float(item.get("atr14", 0.0) or 0.0), 0.0)
+    direction = _resolve_rr_direction_hint(item)
+
+    if current_price <= 0:
+        return "no_price", _RR_NOT_READY_TERTIARY_LABELS["no_price"]
+    if direction not in {"bullish", "bearish"}:
+        return "no_direction", _RR_NOT_READY_TERTIARY_LABELS["no_direction"]
+    if min(key_high, key_low) <= 0 or key_high <= key_low:
+        if atr14 <= 0:
+            return "atr_missing_no_key_levels", _RR_NOT_READY_TERTIARY_LABELS["atr_missing_no_key_levels"]
+        return "unknown", _RR_NOT_READY_TERTIARY_LABELS["unknown"]
+
+    stop_price = float(item.get("risk_reward_stop_price", 0.0) or 0.0)
+    target_price = float(item.get("risk_reward_target_price", 0.0) or 0.0)
+    if min(stop_price, target_price) > 0:
+        risk = abs(current_price - stop_price)
+        reward = abs(target_price - current_price)
+        if risk < 1e-5 or reward < 1e-5:
+            return "price_span_too_small", _RR_NOT_READY_TERTIARY_LABELS["price_span_too_small"]
+
+    zone_low = float(item.get("risk_reward_entry_zone_low", 0.0) or 0.0)
+    zone_high = float(item.get("risk_reward_entry_zone_high", 0.0) or 0.0)
+    if zone_low <= 0 or zone_high <= 0:
+        return "entry_zone_missing", _RR_NOT_READY_TERTIARY_LABELS["entry_zone_missing"]
+    return "unknown", _RR_NOT_READY_TERTIARY_LABELS["unknown"]
+
+
+def _diagnose_no_direction_components(item: dict) -> list[dict]:
+    components: list[dict] = []
+    signal_side = _normalize_text(item.get("signal_side", "")).lower()
+    intraday_bias = _normalize_text(item.get("intraday_bias", "")).lower()
+    multi_alignment = _normalize_text(item.get("multi_timeframe_alignment", "")).lower()
+    multi_bias = _normalize_text(item.get("multi_timeframe_bias", "")).lower()
+    breakout_direction = _normalize_text(item.get("breakout_direction", "")).lower()
+    breakout_state = _normalize_text(item.get("breakout_state", "")).lower()
+    retest_state = _normalize_text(item.get("retest_state", "")).lower()
+
+    if signal_side not in {"long", "short"}:
+        components.append({"reason_key": "signal_side_missing", "reason_label": _NO_DIRECTION_COMPONENT_LABELS["signal_side_missing"]})
+    if intraday_bias not in {"bullish", "bearish"}:
+        components.append({"reason_key": "intraday_sideways", "reason_label": _NO_DIRECTION_COMPONENT_LABELS["intraday_sideways"]})
+    if multi_alignment not in {"aligned", "partial"} or multi_bias not in {"bullish", "bearish"}:
+        components.append({"reason_key": "multi_not_aligned", "reason_label": _NO_DIRECTION_COMPONENT_LABELS["multi_not_aligned"]})
+    if breakout_direction not in {"bullish", "bearish"}:
+        components.append({"reason_key": "breakout_direction_neutral", "reason_label": _NO_DIRECTION_COMPONENT_LABELS["breakout_direction_neutral"]})
+    if breakout_state in {"", "none", "unknown"}:
+        components.append({"reason_key": "breakout_state_none", "reason_label": _NO_DIRECTION_COMPONENT_LABELS["breakout_state_none"]})
+    if retest_state in {"", "none", "unknown"}:
+        components.append({"reason_key": "retest_state_none", "reason_label": _NO_DIRECTION_COMPONENT_LABELS["retest_state_none"]})
+    return components
+
+
+def _diagnose_grade_gate_secondary(item: dict, thresholds: dict[str, float] | None = None) -> tuple[str, str]:
+    thresholds = dict(thresholds or _get_sim_thresholds())
+    trade_grade = _normalize_text(item.get("trade_grade", ""))
+    trade_grade_source = _normalize_text(item.get("trade_grade_source", "")).lower()
+    event_note = _normalize_text(item.get("event_note", ""))
+    event_mode = _normalize_text(item.get("event_mode_text", "") or item.get("event_risk_mode_text", ""))
+    if "事件" in trade_grade or "事件" in event_note or event_mode in {"事件前高敏", "事件落地观察"}:
+        return "event_gate", _GRADE_GATE_SECONDARY_LABELS["event_gate"]
+    if trade_grade_source not in {"structure", "setup"}:
+        return "source_gate", _GRADE_GATE_SECONDARY_LABELS["source_gate"]
+    if trade_grade != TradeGrade.OBSERVE_ONLY:
+        return "grade_not_observe", _GRADE_GATE_SECONDARY_LABELS["grade_not_observe"]
+    if not bool(item.get("risk_reward_ready", False)):
+        return "rr_not_ready", _GRADE_GATE_SECONDARY_LABELS["rr_not_ready"]
+
+    rr = float(item.get("risk_reward_ratio", 0.0) or 0.0)
+    exploratory_min_rr = float(thresholds.get("exploratory_min_rr", 1.8) or 1.8)
+    if rr < exploratory_min_rr:
+        return "rr_too_low", _GRADE_GATE_SECONDARY_LABELS["rr_too_low"]
+
+    risk_reward_state = _normalize_text(item.get("risk_reward_state", "")).lower()
+    if risk_reward_state and risk_reward_state not in {"acceptable", "favorable", "good"}:
+        return "risk_reward_state_bad", _GRADE_GATE_SECONDARY_LABELS["risk_reward_state_bad"]
+
+    action = _resolve_signal_side(item)
+    if action not in {"long", "short"}:
+        return "direction_unclear", _GRADE_GATE_SECONDARY_LABELS["direction_unclear"]
+
+    multi_alignment = _normalize_text(item.get("multi_timeframe_alignment", "")).lower()
+    multi_bias = _normalize_text(item.get("multi_timeframe_bias", "")).lower()
+    if multi_alignment and multi_alignment not in {"aligned", "partial"}:
+        return "multi_timeframe_misaligned", _GRADE_GATE_SECONDARY_LABELS["multi_timeframe_misaligned"]
+    if multi_bias in {"bullish", "long"} and action != "long":
+        return "multi_timeframe_misaligned", _GRADE_GATE_SECONDARY_LABELS["multi_timeframe_misaligned"]
+    if multi_bias in {"bearish", "short"} and action != "short":
+        return "multi_timeframe_misaligned", _GRADE_GATE_SECONDARY_LABELS["multi_timeframe_misaligned"]
+
+    if min(
+        float(item.get("risk_reward_stop_price", 0.0) or 0.0),
+        float(item.get("risk_reward_target_price", 0.0) or 0.0),
+    ) <= 0:
+        return "target_incomplete", _GRADE_GATE_SECONDARY_LABELS["target_incomplete"]
+
+    if not _is_price_near_entry_zone(item, action):
+        return "entry_zone_miss", _GRADE_GATE_SECONDARY_LABELS["entry_zone_miss"]
+
+    zone_side, _zone_side_text = _resolve_entry_zone_position(item, action)
+    if action == "long" and zone_side == "upper":
+        return "chasing_upper", _GRADE_GATE_SECONDARY_LABELS["chasing_upper"]
+    if action == "short" and zone_side == "lower":
+        return "chasing_lower", _GRADE_GATE_SECONDARY_LABELS["chasing_lower"]
+    return "unknown", _GRADE_GATE_SECONDARY_LABELS["unknown"]
+
+
+def _build_sim_block_diagnostics(item: dict, reason_key: str, thresholds: dict[str, float] | None = None) -> dict:
+    diagnostics: dict = {}
+    clean_reason_key = _normalize_text(reason_key).lower()
+    if clean_reason_key == "grade_gate":
+        secondary_key, secondary_label = _diagnose_grade_gate_secondary(item, thresholds)
+        diagnostics["secondary_reason_key"] = secondary_key
+        diagnostics["secondary_reason_label"] = secondary_label
+        if secondary_key == "rr_not_ready":
+            tertiary_key, tertiary_label = _diagnose_rr_not_ready_tertiary(item)
+            diagnostics["tertiary_reason_key"] = tertiary_key
+            diagnostics["tertiary_reason_label"] = tertiary_label
+            if tertiary_key == "no_direction":
+                diagnostics["direction_components"] = _diagnose_no_direction_components(item)
+        elif secondary_key == "direction_unclear":
+            diagnostics["direction_components"] = _diagnose_no_direction_components(item)
+    elif clean_reason_key == "rr_not_ready":
+        tertiary_key, tertiary_label = _diagnose_rr_not_ready_tertiary(item)
+        diagnostics["tertiary_reason_key"] = tertiary_key
+        diagnostics["tertiary_reason_label"] = tertiary_label
+    elif clean_reason_key == "direction_unclear":
+        diagnostics["direction_components"] = _diagnose_no_direction_components(item)
+    return diagnostics
 
 
 def _build_contract_signal_payload(
@@ -398,10 +577,10 @@ def _evaluate_item_for_sim(
         return False, reason, action, _classify_sim_block_reason(reason, False)
 
     zone_side, zone_side_text = _resolve_entry_zone_position(item, action)
-    if not exploratory_override and action == "long" and zone_side == "upper":
+    if action == "long" and zone_side == "upper":
         reason = f"当前更贴近观察区间{zone_side_text}，自动试仓先别在上沿追价。"
         return False, reason, action, _classify_sim_block_reason(reason, False)
-    if not exploratory_override and action == "short" and zone_side == "lower":
+    if action == "short" and zone_side == "lower":
         reason = f"当前更贴近观察区间{zone_side_text}，自动试仓先别在下沿追空。"
         return False, reason, action, _classify_sim_block_reason(reason, False)
 
@@ -424,6 +603,10 @@ def audit_rule_sim_signal_decision(snapshot: dict, allow_exploratory: bool = Fal
     thresholds = _get_sim_thresholds()
     blocked_counts: dict[str, int] = {}
     blocked_labels: dict[str, str] = {}
+    secondary_blocked_counts: dict[str, int] = {}
+    secondary_blocked_labels: dict[str, str] = {}
+    tertiary_blocked_counts: dict[str, int] = {}
+    tertiary_blocked_labels: dict[str, str] = {}
     candidate_rows = []
     ready_count = 0
 
@@ -436,11 +619,25 @@ def audit_rule_sim_signal_decision(snapshot: dict, allow_exploratory: bool = Fal
             thresholds=thresholds,
             allow_exploratory=allow_exploratory,
         )
+        diagnostics = {}
         if eligible:
             ready_count += 1
         else:
+            diagnostics = _build_sim_block_diagnostics(item, reason_key, thresholds)
             blocked_counts[reason_key] = int(blocked_counts.get(reason_key, 0) or 0) + 1
             blocked_labels[reason_key] = _SIM_BLOCK_REASON_LABELS.get(reason_key, reason_key)
+            secondary_key = _normalize_text(diagnostics.get("secondary_reason_key", ""))
+            if secondary_key:
+                secondary_blocked_counts[secondary_key] = int(secondary_blocked_counts.get(secondary_key, 0) or 0) + 1
+                secondary_blocked_labels[secondary_key] = _normalize_text(
+                    diagnostics.get("secondary_reason_label", "")
+                ) or secondary_key
+            tertiary_key = _normalize_text(diagnostics.get("tertiary_reason_key", ""))
+            if tertiary_key:
+                tertiary_blocked_counts[tertiary_key] = int(tertiary_blocked_counts.get(tertiary_key, 0) or 0) + 1
+                tertiary_blocked_labels[tertiary_key] = _normalize_text(
+                    diagnostics.get("tertiary_reason_label", "")
+                ) or tertiary_key
         candidate_rows.append(
             {
                 "symbol": symbol,
@@ -449,6 +646,7 @@ def audit_rule_sim_signal_decision(snapshot: dict, allow_exploratory: bool = Fal
                 "reason": _normalize_text(reason),
                 "reason_key": reason_key,
                 "reason_label": _SIM_BLOCK_REASON_LABELS.get(reason_key, reason_key),
+                **diagnostics,
             }
         )
 
@@ -459,10 +657,28 @@ def audit_rule_sim_signal_decision(snapshot: dict, allow_exploratory: bool = Fal
         ),
         key=lambda row: (-int(row["count"]), str(row["reason_label"])),
     )
+    secondary_blocked_summary = sorted(
+        (
+            {"reason_key": key, "reason_label": secondary_blocked_labels.get(key, key), "count": count}
+            for key, count in secondary_blocked_counts.items()
+        ),
+        key=lambda row: (-int(row["count"]), str(row["reason_label"])),
+    )
+    tertiary_blocked_summary = sorted(
+        (
+            {"reason_key": key, "reason_label": tertiary_blocked_labels.get(key, key), "count": count}
+            for key, count in tertiary_blocked_counts.items()
+        ),
+        key=lambda row: (-int(row["count"]), str(row["reason_label"])),
+    )
     return {
         "ready_count": ready_count,
         "blocked_counts": blocked_counts,
         "blocked_summary": blocked_summary,
+        "secondary_blocked_counts": secondary_blocked_counts,
+        "secondary_blocked_summary": secondary_blocked_summary,
+        "tertiary_blocked_counts": tertiary_blocked_counts,
+        "tertiary_blocked_summary": tertiary_blocked_summary,
         "rows": candidate_rows,
         "total_candidates": len(candidate_rows),
     }
@@ -484,7 +700,10 @@ def build_rule_sim_signal_decision(snapshot: dict, allow_exploratory: bool = Fal
             continue
         if not eligible:
             if bool(item.get("has_live_quote", False)) and _normalize_text(item.get("trade_grade", "")):
-                blocked_reasons.append(f"{symbol}：{reason}")
+                diagnostics = _build_sim_block_diagnostics(item, reason_key, thresholds)
+                secondary_label = _normalize_text(diagnostics.get("secondary_reason_label", ""))
+                suffix = f"（细分：{secondary_label}）" if reason_key == "grade_gate" and secondary_label else ""
+                blocked_reasons.append(f"{symbol}：{reason}{suffix}")
             continue
 
         score = float(item.get("risk_reward_ratio", 0.0) or 0.0)

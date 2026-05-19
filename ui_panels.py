@@ -28,6 +28,7 @@ from app_config import (
 )
 from execution_audit import (
     fetch_recent_execution_audits,
+    summarize_execution_block_diagnostics,
     summarize_execution_audits,
     summarize_execution_reason_counts,
     summarize_today_execution_audits,
@@ -39,6 +40,17 @@ from knowledge_governance import apply_strategy_learning_review, sync_strategy_l
 from runtime_utils import parse_time as _parse_time
 from sim_signal_bridge import audit_rule_sim_signal_decision, build_rule_sim_signal_decision
 from trade_learning import summarize_trade_learning_by_strategy
+
+
+def _safe_emit_signal(signal, payload: dict) -> bool:
+    """后台线程回主线程时，若 Qt 对象已销毁则放弃这次 UI 更新。"""
+    try:
+        signal.emit(payload)
+        return True
+    except RuntimeError as exc:
+        if "Signal source has been deleted" in str(exc):
+            return False
+        raise
 
 
 _DIRECTION_TEXT_MAP = {
@@ -2727,6 +2739,10 @@ class SimTradingPanel(QWidget):
             reason_rows = summarize_execution_reason_counts(hours=48, symbol=primary_symbol, limit=3)
         except Exception:
             return "", ""
+        try:
+            block_diagnostics = summarize_execution_block_diagnostics(hours=48, symbol=primary_symbol, limit=3)
+        except Exception:
+            block_diagnostics = {}
 
         total_count = int(summary.get("total_count", 0) or 0)
         counts = dict(summary.get("counts", {}) or {})
@@ -2759,6 +2775,23 @@ class SimTradingPanel(QWidget):
                     reason_parts.append(f"{label} {count}次")
             if reason_parts:
                 history_text += f"\n主要阻断：{' | '.join(reason_parts)}"
+
+        secondary_rows = list(block_diagnostics.get("top_secondary_labels", []) or [])
+        secondary_parts = [
+            f"{str(row.get('reason_label', '') or '').strip()} {int(row.get('count', 0) or 0)}次"
+            for row in secondary_rows
+            if str(row.get("reason_label", "") or "").strip() and int(row.get("count", 0) or 0) > 0
+        ]
+        if secondary_parts:
+            history_text += f"\n观察细分：{' | '.join(secondary_parts)}"
+        tertiary_rows = list(block_diagnostics.get("top_tertiary_labels", []) or [])
+        tertiary_parts = [
+            f"{str(row.get('reason_label', '') or '').strip()} {int(row.get('count', 0) or 0)}次"
+            for row in tertiary_rows
+            if str(row.get("reason_label", "") or "").strip() and int(row.get("count", 0) or 0) > 0
+        ]
+        if tertiary_parts:
+            history_text += f"\nRR细分：{' | '.join(tertiary_parts)}"
 
         tone = "success" if opened > 0 else "warning"
         self._recent_execution_summary_cache_key = cache_key
@@ -2795,6 +2828,12 @@ class SimTradingPanel(QWidget):
             reason_label = _EXECUTION_REASON_LABEL_MAP.get(reason_key, "")
             reason_text = str(row.get("reason_text", "") or "").strip()
             detail = reason_label or (reason_text[:18] if reason_text else "")
+            secondary_label = str(row.get("block_secondary_reason_label", "") or "").strip()
+            tertiary_label = str(row.get("block_tertiary_reason_label", "") or "").strip()
+            if reason_key == "grade_gate" and secondary_label:
+                detail = f"{detail}/{secondary_label}" if detail else secondary_label
+                if tertiary_label:
+                    detail += f"/{tertiary_label}"
             line = f"{time_text} {status} {primary_symbol} {action_text}".strip()
             if detail:
                 line += f" · {detail}"
@@ -3452,7 +3491,8 @@ class PendingRulesPanel(QWidget):
                     deep_payload = {}
             if not isinstance(deep_payload, dict):
                 deep_payload = {}
-            self.pending_rules_loaded.emit(
+            _safe_emit_signal(
+                self.pending_rules_loaded,
                 {
                     "ok": True,
                     "rows": [dict(row) for row in rows],
@@ -3499,7 +3539,8 @@ class PendingRulesPanel(QWidget):
                 }
             )
         except Exception as exc:  # noqa: BLE001
-            self.pending_rules_loaded.emit(
+            _safe_emit_signal(
+                self.pending_rules_loaded,
                 {
                     "ok": False,
                     "rows": [],

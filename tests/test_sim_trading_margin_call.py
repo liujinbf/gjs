@@ -9,7 +9,7 @@ import gc
 import shutil
 import sqlite3
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import sys
@@ -324,6 +324,55 @@ def test_normal_sl_tp_still_works_after_fix():
     assert len(positions) == 0, "命中止盈后应无持仓"
     assert any("止盈" in r[0] for r in trades), f"找不到止盈记录，实际：{[r[0] for r in trades]}"
 
+    shutil.rmtree(TEST_DIR, ignore_errors=True)
+
+
+def test_min_lot_scalp_exit_releases_symbol_before_far_tp(monkeypatch):
+    test_dir = _prepare_dir()
+    eng = _make_engine(test_dir, "scalp_exit")
+
+    runtime_config = mt5_sim_trading.get_runtime_config()
+    monkeypatch.setattr(
+        mt5_sim_trading,
+        "get_runtime_config",
+        lambda: type(
+            "RuntimeConfig",
+            (),
+            {
+                **dict(getattr(runtime_config, "__dict__", {})),
+                "sim_scalp_exit_r": 0.55,
+                "sim_scalp_min_minutes": 0,
+            },
+        )(),
+    )
+
+    ok, msg = eng.execute_signal(
+        {
+            "symbol": "XAUUSD",
+            "action": "long",
+            "price": 3300.0,
+            "sl": 3280.0,
+            "tp": 3360.0,
+        }
+    )
+    assert ok, msg
+
+    # 0.01 手无法再拆分减仓；浮盈达到 0.6R 时应先落袋，释放下一次短线机会。
+    eng.update_prices({"XAUUSD": 3312.0})
+
+    with sqlite3.connect(str(test_dir / "scalp_exit.sqlite")) as conn:
+        conn.row_factory = sqlite3.Row
+        position_count = conn.execute("SELECT COUNT(*) FROM sim_positions WHERE status='open'").fetchone()[0]
+        trade = conn.execute(
+            "SELECT profit, reason FROM sim_trades WHERE user_id='system' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
+    assert position_count == 0
+    assert trade["profit"] > 0
+    assert "短线套利浮盈达到" in trade["reason"]
+
+    del eng
+    gc.collect()
     shutil.rmtree(TEST_DIR, ignore_errors=True)
 
 
@@ -649,6 +698,91 @@ def test_partial_take_profit_moves_stop_to_break_even(monkeypatch):
     shutil.rmtree(TEST_DIR, ignore_errors=True)
 
 
+def test_position_with_tp2_locks_profit_before_target1_and_then_exits_at_break_even(monkeypatch):
+    test_dir = _prepare_dir()
+    eng = _make_engine(test_dir, "tp2_profit_lock")
+    rich_config = type(
+        "Cfg",
+        (),
+        {
+            "sim_initial_balance": 100000.0,
+            "sim_no_tp2_lock_r": 0.5,
+            "sim_no_tp2_partial_close_ratio": 0.5,
+        },
+    )()
+    monkeypatch.setattr(mt5_sim_trading, "get_runtime_config", lambda: rich_config)
+
+    ok, msg = eng.execute_signal(
+        {
+            "symbol": "XAUUSD",
+            "action": "long",
+            "price": 3300.0,
+            "sl": 3280.0,
+            "tp": 3340.0,
+            "tp2": 3360.0,
+        }
+    )
+    assert ok, f"开仓失败：{msg}"
+
+    eng.update_prices(
+        {
+            "XAUUSD": {
+                "latest": 3310.2,
+                "bid": 3310.2,
+                "ask": 3310.4,
+            }
+        }
+    )
+
+    with sqlite3.connect(str(test_dir / "tp2_profit_lock.sqlite")) as conn:
+        conn.row_factory = sqlite3.Row
+        pos = conn.execute("SELECT * FROM sim_positions WHERE status='open'").fetchone()
+        trades = conn.execute(
+            "SELECT reason, quantity, profit FROM sim_trades WHERE user_id='system' ORDER BY id ASC"
+        ).fetchall()
+
+    assert pos is not None, "带 TP2 的单子浮盈达到锁盈阈值后应保留剩余仓位"
+    assert int(pos["break_even_armed"]) == 1
+    assert abs(float(pos["stop_loss"]) - float(pos["entry_price"])) < 1e-6
+    assert float(pos["take_profit"]) == 3360.0
+    assert float(pos["partial_closed_quantity"]) > 0
+    assert len(trades) == 1
+    assert "先减仓并上移保本止损" in str(trades[0]["reason"])
+    assert float(trades[0]["profit"]) > 0
+
+    eng.update_prices(
+        {
+            "XAUUSD": {
+                "latest": 3300.0,
+                "bid": 3300.0,
+                "ask": 3300.2,
+            }
+        }
+    )
+
+    del eng
+    gc.collect()
+
+    with sqlite3.connect(str(test_dir / "tp2_profit_lock.sqlite")) as conn:
+        conn.row_factory = sqlite3.Row
+        open_count = conn.execute("SELECT COUNT(*) FROM sim_positions WHERE status='open'").fetchone()[0]
+        trades = conn.execute(
+            "SELECT reason, quantity, profit FROM sim_trades WHERE user_id='system' ORDER BY id ASC"
+        ).fetchall()
+        account = conn.execute(
+            "SELECT total_profit, win_count, loss_count FROM sim_accounts WHERE user_id='system'"
+        ).fetchone()
+
+    assert open_count == 0
+    assert len(trades) == 2
+    assert "回撤至保本止损" in str(trades[-1]["reason"])
+    assert float(account["total_profit"]) > 0
+    assert int(account["win_count"]) == 1
+    assert int(account["loss_count"]) == 0
+
+    shutil.rmtree(TEST_DIR, ignore_errors=True)
+
+
 def test_position_without_tp2_locks_profit_and_then_exits_at_break_even(monkeypatch):
     test_dir = _prepare_dir()
     eng = _make_engine(test_dir, "no_tp2_profit_lock")
@@ -787,6 +921,88 @@ def test_position_without_tp2_respects_configurable_lock_threshold_and_partial_r
     assert abs(float(pos_after["stop_loss"]) - 3300.0) < 1e-6
     assert abs(float(pos_after["partial_closed_quantity"]) - 0.25) < 1e-6
     assert float(pos_after["partial_realized_profit"] or 0.0) > 0.0
+
+    shutil.rmtree(TEST_DIR, ignore_errors=True)
+
+
+def test_aged_position_locks_smaller_profit_before_fixed_target(monkeypatch):
+    test_dir = _prepare_dir()
+    eng = _make_engine(test_dir, "time_profit_lock")
+
+    old_time = (datetime.now() - timedelta(minutes=45)).strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(eng.db_file) as conn:
+        conn.execute(
+            "INSERT INTO sim_accounts (user_id, balance, equity, used_margin, total_profit, win_count, loss_count, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("system", 100000.0, 100000.0, 100.0, 0.0, 0, 0, old_time),
+        )
+        conn.execute(
+            """
+            INSERT INTO sim_positions (
+                user_id, symbol, action, entry_price, quantity, margin,
+                stop_loss, take_profit, take_profit_2, opened_at, status,
+                floating_pnl, break_even_armed, partial_closed_quantity, partial_realized_profit,
+                max_favorable_r
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "system",
+                "XAUUSD",
+                "long",
+                3300.0,
+                1.0,
+                100.0,
+                3280.0,
+                3360.0,
+                3380.0,
+                old_time,
+                "open",
+                0.0,
+                0,
+                0.0,
+                0.0,
+                0.0,
+            ),
+        )
+        conn.commit()
+
+    config = type(
+        "Cfg",
+        (),
+        {
+            "sim_no_tp2_lock_r": 0.50,
+            "sim_no_tp2_partial_close_ratio": 0.25,
+            "sim_time_protect_minutes": 30,
+            "sim_time_protect_min_r": 0.20,
+            "sim_time_protect_giveback_ratio": 0.55,
+        },
+    )()
+    monkeypatch.setattr(mt5_sim_trading, "get_runtime_config", lambda: config)
+
+    eng.update_prices({"XAUUSD": {"latest": 3305.2, "bid": 3305.2, "ask": 3305.4}})
+
+    with sqlite3.connect(str(test_dir / "time_profit_lock.sqlite")) as conn:
+        conn.row_factory = sqlite3.Row
+        pos = conn.execute(
+            """
+            SELECT quantity, break_even_armed, stop_loss, partial_closed_quantity, partial_realized_profit, max_favorable_r
+            FROM sim_positions WHERE status='open'
+            """
+        ).fetchone()
+        trade = conn.execute(
+            "SELECT reason, quantity, profit FROM sim_trades WHERE user_id='system' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
+    assert pos is not None
+    assert abs(float(pos["quantity"]) - 0.75) < 1e-6
+    assert int(pos["break_even_armed"] or 0) == 1
+    assert abs(float(pos["stop_loss"]) - 3300.0) < 1e-6
+    assert abs(float(pos["partial_closed_quantity"]) - 0.25) < 1e-6
+    assert float(pos["partial_realized_profit"] or 0.0) > 0.0
+    assert float(pos["max_favorable_r"] or 0.0) >= 0.20
+    assert trade is not None
+    assert "持仓 45 分钟后浮盈仍有" in str(trade["reason"])
+    assert float(trade["profit"]) > 0
 
     shutil.rmtree(TEST_DIR, ignore_errors=True)
 

@@ -26,6 +26,8 @@ from trade_learning import summarize_trade_learning_by_strategy
 
 
 SIM_DB_PATH = PROJECT_DIR / ".runtime" / "mt5_sim_trading.sqlite"
+LEARNING_REPORT_FULL_PAYLOAD_KEEP_COUNT = 72
+LEARNING_REPORT_COMPACT_BATCH_SIZE = 500
 
 _STRATEGY_FAMILY_LABEL_MAP = {
     "pullback_sniper_probe": "回调狙击",
@@ -76,6 +78,256 @@ def _load_previous_learning_report(
     payload["summary_text"] = _normalize_text(row["summary_text"])
     payload["created_at"] = _normalize_text(row["created_at"])
     return payload
+
+
+def _build_compact_learning_report_payload(payload: dict, summary_text: str, created_at: str) -> dict:
+    """把历史学习报告压成可追溯摘要，避免完整规则地图长期堆积。"""
+    source = payload if isinstance(payload, dict) else {}
+    governance_summary = dict(source.get("governance_summary", {}) or {})
+    feedback_summary = dict(source.get("feedback_summary", {}) or {})
+    alert_effect_summary = dict(source.get("alert_effect_summary", {}) or {})
+    missed_opportunity_summary = dict(source.get("missed_opportunity_summary", {}) or {})
+    sim_trade_profile_summary = dict(source.get("sim_trade_profile_summary", {}) or {})
+    return {
+        "compacted": True,
+        "summary_text": _normalize_text(summary_text or source.get("summary_text", "")),
+        "created_at": _normalize_text(created_at),
+        "counts": {
+            "active_rules": len(list(source.get("active_rules", []) or [])),
+            "watch_rules": len(list(source.get("watch_rules", []) or [])),
+            "frozen_rules": len(list(source.get("frozen_rules", []) or [])),
+            "promoted_rules": len(list(source.get("promoted_rules", []) or [])),
+            "new_watch_rules": len(list(source.get("new_watch_rules", []) or [])),
+            "new_frozen_rules": len(list(source.get("new_frozen_rules", []) or [])),
+            "recovered_rules": len(list(source.get("recovered_rules", []) or [])),
+            "governance_map": len(dict(source.get("governance_map", {}) or {})),
+        },
+        "governance_summary": governance_summary,
+        "feedback_summary": feedback_summary,
+        "alert_effect_summary": alert_effect_summary,
+        "missed_opportunity_summary": missed_opportunity_summary,
+        "sim_trade_profile_summary": sim_trade_profile_summary,
+    }
+
+
+def _compact_old_learning_reports(
+    conn: sqlite3.Connection,
+    report_type: str = "rule_digest",
+    horizon_min: int = 30,
+    keep_full_count: int = LEARNING_REPORT_FULL_PAYLOAD_KEEP_COUNT,
+    batch_size: int = LEARNING_REPORT_COMPACT_BATCH_SIZE,
+) -> int:
+    """仅保留最近若干条完整学习报告，旧报告只留轻量摘要。"""
+    clean_type = _normalize_text(report_type) or "rule_digest"
+    clean_horizon = int(horizon_min or 30)
+    keep_count = max(1, int(keep_full_count or LEARNING_REPORT_FULL_PAYLOAD_KEEP_COUNT))
+    batch_limit = max(1, int(batch_size or LEARNING_REPORT_COMPACT_BATCH_SIZE))
+    keep_rows = conn.execute(
+        """
+        SELECT id
+        FROM learning_reports
+        WHERE report_type = ? AND horizon_min = ?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (clean_type, clean_horizon, keep_count),
+    ).fetchall()
+    keep_ids = {int(row["id"] if isinstance(row, sqlite3.Row) else row[0]) for row in keep_rows}
+    if keep_ids:
+        placeholders = ",".join("?" * len(keep_ids))
+        rows = conn.execute(
+            f"""
+            SELECT id, summary_text, payload_json, created_at
+            FROM learning_reports
+            WHERE report_type = ?
+              AND horizon_min = ?
+              AND id NOT IN ({placeholders})
+              AND payload_json NOT LIKE '%"compacted":true%'
+              AND payload_json NOT LIKE '%"compacted": true%'
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (clean_type, clean_horizon, *sorted(keep_ids), batch_limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT id, summary_text, payload_json, created_at
+            FROM learning_reports
+            WHERE report_type = ? AND horizon_min = ?
+              AND payload_json NOT LIKE '%"compacted":true%'
+              AND payload_json NOT LIKE '%"compacted": true%'
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (clean_type, clean_horizon, batch_limit),
+        ).fetchall()
+    compacted_count = 0
+    for row in rows:
+        raw_payload = str(row["payload_json"] or "{}")
+        try:
+            payload = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict) and payload.get("compacted") is True:
+            continue
+        compact_payload = _build_compact_learning_report_payload(
+            payload if isinstance(payload, dict) else {},
+            str(row["summary_text"] or ""),
+            str(row["created_at"] or ""),
+        )
+        compact_json = json.dumps(compact_payload, ensure_ascii=False, separators=(",", ":"))
+        if len(compact_json) >= len(raw_payload):
+            continue
+        conn.execute(
+            "UPDATE learning_reports SET payload_json = ? WHERE id = ?",
+            (compact_json, int(row["id"])),
+        )
+        compacted_count += 1
+    return compacted_count
+
+
+def summarize_learning_report_storage(
+    db_path: Path | str | None = None,
+    report_type: str = "rule_digest",
+    horizon_min: int = 30,
+) -> dict:
+    """统计学习报告 payload 占用，用于运行库健康检查。"""
+    clean_type = _normalize_text(report_type) or "rule_digest"
+    clean_horizon = int(horizon_min or 30)
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS report_count,
+                COALESCE(SUM(LENGTH(payload_json)), 0) AS payload_bytes,
+                COALESCE(AVG(LENGTH(payload_json)), 0) AS avg_payload_bytes,
+                COALESCE(MAX(LENGTH(payload_json)), 0) AS max_payload_bytes,
+                MIN(created_at) AS min_created_at,
+                MAX(created_at) AS max_created_at,
+                SUM(
+                    CASE
+                        WHEN payload_json LIKE '%"compacted":true%'
+                          OR payload_json LIKE '%"compacted": true%'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS compacted_count
+            FROM learning_reports
+            WHERE report_type = ? AND horizon_min = ?
+            """,
+            (clean_type, clean_horizon),
+        ).fetchone()
+    report_count = int(row["report_count"] or 0)
+    payload_bytes = int(row["payload_bytes"] or 0)
+    compacted_count = int(row["compacted_count"] or 0)
+    return {
+        "report_type": clean_type,
+        "horizon_min": clean_horizon,
+        "report_count": report_count,
+        "full_payload_count": max(0, report_count - compacted_count),
+        "compacted_count": compacted_count,
+        "payload_bytes": payload_bytes,
+        "payload_mb": round(payload_bytes / 1024 / 1024, 3),
+        "avg_payload_bytes": float(row["avg_payload_bytes"] or 0.0),
+        "max_payload_bytes": int(row["max_payload_bytes"] or 0),
+        "min_created_at": _normalize_text(row["min_created_at"]),
+        "max_created_at": _normalize_text(row["max_created_at"]),
+    }
+
+
+def compact_learning_reports(
+    db_path: Path | str | None = None,
+    report_type: str = "rule_digest",
+    horizon_min: int = 30,
+    keep_full_count: int = LEARNING_REPORT_FULL_PAYLOAD_KEEP_COUNT,
+    batch_size: int = LEARNING_REPORT_COMPACT_BATCH_SIZE,
+    max_batches: int = 1,
+    dry_run: bool = False,
+) -> dict:
+    """批量压缩旧学习报告；dry_run=True 时只估算候选规模。"""
+    clean_type = _normalize_text(report_type) or "rule_digest"
+    clean_horizon = int(horizon_min or 30)
+    keep_count = max(1, int(keep_full_count or LEARNING_REPORT_FULL_PAYLOAD_KEEP_COUNT))
+    batch_limit = max(1, int(batch_size or LEARNING_REPORT_COMPACT_BATCH_SIZE))
+    batch_count = max(1, int(max_batches or 1))
+    before = summarize_learning_report_storage(db_path, clean_type, clean_horizon)
+    total_compacted = 0
+    if dry_run:
+        with _connect(db_path) as conn:
+            keep_rows = conn.execute(
+                """
+                SELECT id
+                FROM learning_reports
+                WHERE report_type = ? AND horizon_min = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (clean_type, clean_horizon, keep_count),
+            ).fetchall()
+            keep_ids = [int(row["id"] if isinstance(row, sqlite3.Row) else row[0]) for row in keep_rows]
+            if keep_ids:
+                placeholders = ",".join("?" * len(keep_ids))
+                row = conn.execute(
+                    f"""
+                    SELECT
+                        COUNT(*) AS candidate_count,
+                        COALESCE(SUM(LENGTH(payload_json)), 0) AS candidate_bytes
+                    FROM learning_reports
+                    WHERE report_type = ?
+                      AND horizon_min = ?
+                      AND id NOT IN ({placeholders})
+                      AND payload_json NOT LIKE '%"compacted":true%'
+                      AND payload_json NOT LIKE '%"compacted": true%'
+                    """,
+                    (clean_type, clean_horizon, *keep_ids),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS candidate_count,
+                        COALESCE(SUM(LENGTH(payload_json)), 0) AS candidate_bytes
+                    FROM learning_reports
+                    WHERE report_type = ?
+                      AND horizon_min = ?
+                      AND payload_json NOT LIKE '%"compacted":true%'
+                      AND payload_json NOT LIKE '%"compacted": true%'
+                    """,
+                    (clean_type, clean_horizon),
+                ).fetchone()
+        return {
+            "dry_run": True,
+            "compacted_count": 0,
+            "candidate_count": int(row["candidate_count"] or 0),
+            "candidate_payload_bytes": int(row["candidate_bytes"] or 0),
+            "candidate_payload_mb": round(int(row["candidate_bytes"] or 0) / 1024 / 1024, 3),
+            "before": before,
+            "after": before,
+        }
+
+    for _ in range(batch_count):
+        with _connect(db_path) as conn:
+            compacted = _compact_old_learning_reports(
+                conn,
+                report_type=clean_type,
+                horizon_min=clean_horizon,
+                keep_full_count=keep_count,
+                batch_size=batch_limit,
+            )
+            conn.commit()
+        total_compacted += compacted
+        if compacted <= 0:
+            break
+    after = summarize_learning_report_storage(db_path, clean_type, clean_horizon)
+    return {
+        "dry_run": False,
+        "compacted_count": total_compacted,
+        "before": before,
+        "after": after,
+        "saved_payload_bytes": max(0, int(before["payload_bytes"]) - int(after["payload_bytes"])),
+        "saved_payload_mb": round(max(0, int(before["payload_bytes"]) - int(after["payload_bytes"])) / 1024 / 1024, 3),
+    }
 
 
 def _decide_governance(row: sqlite3.Row) -> tuple[str, str]:
@@ -810,6 +1062,7 @@ def build_learning_report(
                     _now_text(now),
                 ),
             )
+            _compact_old_learning_reports(conn, report_type="rule_digest", horizon_min=int(horizon_min))
 
     return payload
 

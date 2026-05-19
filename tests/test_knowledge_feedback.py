@@ -6,6 +6,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from knowledge_base import import_markdown_source
+from knowledge_base import open_knowledge_connection
 from knowledge_feedback import (
     get_feedback_push_policy,
     record_user_feedback,
@@ -149,6 +150,71 @@ def test_refresh_feedback_push_policy_persists_lightweight_notification_policy(t
     assert policy["reduce_noise"] is True
     assert policy["tighten_risk"] is True
     assert stored_policy["min_score_boost"] >= 15
+
+
+def test_refresh_feedback_push_policy_uses_objective_alert_effect_when_feedback_absent(tmp_path):
+    db_path = tmp_path / "knowledge.db"
+    with open_knowledge_connection(db_path=db_path, ensure_schema=True) as conn:
+        for idx, outcome in enumerate(["fail", "fail", "fail", "observe", "observe", "mixed"], start=1):
+            conn.execute(
+                """
+                INSERT INTO alert_effect_outcomes (
+                    alert_signature, category, title, symbol, action, occurred_at,
+                    snapshot_id, snapshot_time, horizon_min, outcome_label, signal_quality,
+                    price_change_pct, mfe_pct, mae_pct, max_favorable_r, max_adverse_r,
+                    reached_1r, meta_json, created_at
+                ) VALUES (?, 'ai', ?, 'XAUUSD', 'long', ?, 0, ?, 30, ?, 'low', 0, 0.05, 0.30, 0.20, 1.10, 0, '{}', ?)
+                """,
+                (
+                    f"ai-effect-{idx}",
+                    f"AI 提醒样本 {idx}",
+                    f"2026-04-13 10:{idx:02d}:00",
+                    f"2026-04-13 10:{idx:02d}:00",
+                    outcome,
+                    f"2026-04-13 11:{idx:02d}:00",
+                ),
+            )
+
+    policy = refresh_feedback_push_policy(db_path=db_path, days=30, now=datetime(2026, 4, 13, 13, 0, 0))
+    stored_policy = get_feedback_push_policy(db_path=db_path)
+
+    assert policy["active"] is True
+    assert policy["sample_count"] == 0
+    assert policy["effect_sample_count"] == 6
+    assert policy["reduce_noise"] is True
+    assert policy["tighten_risk"] is True
+    assert policy["min_score_boost"] >= 12
+    assert stored_policy["source"] == "user_feedback+alert_effect"
+
+
+def test_refresh_feedback_push_policy_ignores_tiny_alert_effect_sample(tmp_path):
+    db_path = tmp_path / "knowledge.db"
+    with open_knowledge_connection(db_path=db_path, ensure_schema=True) as conn:
+        for idx in range(1, 4):
+            conn.execute(
+                """
+                INSERT INTO alert_effect_outcomes (
+                    alert_signature, category, title, symbol, action, occurred_at,
+                    snapshot_id, snapshot_time, horizon_min, outcome_label, signal_quality,
+                    price_change_pct, mfe_pct, mae_pct, max_favorable_r, max_adverse_r,
+                    reached_1r, meta_json, created_at
+                ) VALUES (?, 'ai', ?, 'XAUUSD', 'long', ?, 0, ?, 30, 'fail', 'low', 0, 0.05, 0.30, 0.20, 1.10, 0, '{}', ?)
+                """,
+                (
+                    f"tiny-effect-{idx}",
+                    f"AI 小样本 {idx}",
+                    f"2026-04-13 10:{idx:02d}:00",
+                    f"2026-04-13 10:{idx:02d}:00",
+                    f"2026-04-13 11:{idx:02d}:00",
+                ),
+            )
+
+    policy = refresh_feedback_push_policy(db_path=db_path, days=30, now=datetime(2026, 4, 13, 13, 0, 0))
+
+    assert policy["active"] is False
+    assert policy["effect_sample_count"] == 3
+    assert policy["reduce_noise"] is False
+    assert policy["tighten_risk"] is False
 
 
 def test_negative_feedback_can_downgrade_validated_rule(tmp_path):

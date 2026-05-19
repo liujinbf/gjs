@@ -69,7 +69,6 @@ def _extract_row_features(row: sqlite3.Row) -> dict[str, str]:
     latest_price = float(row["latest_price"] or 0.0)
     spread_points = float(row["spread_points"] or 0.0)
     rr_ratio = float(payload.get("risk_reward_ratio", 0.0) or 0.0)
-    model_probability = float(payload.get("model_win_probability", 0.0) or 0.0)
     atr_pct = (atr14 / latest_price * 100.0) if latest_price > 0 and atr14 > 0 else 0.0
     features = {
         "symbol": _normalize_text(row["symbol"]).upper(),
@@ -91,7 +90,6 @@ def _extract_row_features(row: sqlite3.Row) -> dict[str, str]:
         "atr_pct_bucket": _bucket_numeric(atr_pct, 0.2),
         "atr_h4_bucket": _bucket_numeric(atr14_h4, 5.0 if atr14_h4 >= 1 else 1.0),
         "rr_ratio_bucket": _bucket_numeric(rr_ratio, 0.5) if rr_ratio > 0 else "missing",
-        "model_probability_bucket": _bucket_numeric(model_probability, 0.1) if model_probability > 0 else "missing",
         "sample_source": _normalize_text(payload.get("sample_source", "")) or "runtime",
     }
     return {key: value for key, value in features.items() if value and value != "unknown"}
@@ -103,7 +101,6 @@ def _extract_item_features(snapshot: dict, item: dict) -> dict[str, str]:
     atr14_h4 = float(item.get("atr14_h4", 0.0) or 0.0)
     spread_points = float(item.get("spread_points", 0.0) or 0.0)
     rr_ratio = float(item.get("risk_reward_ratio", 0.0) or 0.0)
-    model_probability = float(item.get("model_win_probability", 0.0) or 0.0)
     atr_pct = (atr14 / latest_price * 100.0) if latest_price > 0 and atr14 > 0 else 0.0
     return {
         "symbol": _normalize_text(item.get("symbol", "")).upper(),
@@ -125,7 +122,6 @@ def _extract_item_features(snapshot: dict, item: dict) -> dict[str, str]:
         "atr_pct_bucket": _bucket_numeric(atr_pct, 0.2),
         "atr_h4_bucket": _bucket_numeric(atr14_h4, 5.0 if atr14_h4 >= 1 else 1.0),
         "rr_ratio_bucket": _bucket_numeric(rr_ratio, 0.5) if rr_ratio > 0 else "missing",
-        "model_probability_bucket": _bucket_numeric(model_probability, 0.1) if model_probability > 0 else "missing",
     }
 
 
@@ -327,6 +323,10 @@ def train_execution_model(
             JOIN market_snapshots ms ON ms.id = ea.snapshot_id
             WHERE ea.snapshot_id > 0
               AND ea.decision_status IN ('opened', 'closed', 'blocked', 'rejected', 'skipped')
+              AND (
+                ea.decision_status IN ('opened', 'closed')
+                OR COALESCE(ea.reason_key, '') NOT IN ('grade_gate', 'neutral_signal', 'existing_position', 'live_auto_disabled')
+              )
             ORDER BY ea.id ASC
             """
         ).fetchall()

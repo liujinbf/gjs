@@ -10,10 +10,13 @@ sys.path.insert(0, str(ROOT))
 
 from knowledge_base import import_markdown_source, open_knowledge_connection
 from knowledge_governance import (
+    _compact_old_learning_reports,
     apply_strategy_learning_review,
     build_learning_report,
+    compact_learning_reports,
     read_latest_learning_report,
     refresh_rule_governance,
+    summarize_learning_report_storage,
     sync_strategy_learning_reviews,
     summarize_sim_trade_profiles,
     summarize_rule_governance,
@@ -133,6 +136,120 @@ def test_build_learning_report_persists_latest_digest(tmp_path):
     assert latest["summary_text"] == report["summary_text"]
     assert isinstance(latest.get("active_rules", []), list)
     assert isinstance(latest.get("governance_map", {}), dict)
+
+
+def test_compact_old_learning_reports_keeps_recent_full_payloads(tmp_path):
+    db_path = tmp_path / "knowledge.db"
+    large_rule_lines = [f"- 历史规则 {idx} " + ("细节" * 200) for idx in range(20)]
+    with open_knowledge_connection(db_path=db_path, ensure_schema=True) as conn:
+        for idx in range(5):
+            payload = {
+                "active_rules": large_rule_lines,
+                "watch_rules": large_rule_lines,
+                "frozen_rules": large_rule_lines,
+                "governance_map": {str(rule_id): {"governance_status": "active"} for rule_id in range(100)},
+                "governance_summary": {"active_count": 20, "watch_count": 20},
+                "summary_text": f"学习摘要 {idx}",
+            }
+            conn.execute(
+                """
+                INSERT INTO learning_reports (report_type, horizon_min, summary_text, payload_json, created_at)
+                VALUES ('rule_digest', 30, ?, ?, ?)
+                """,
+                (
+                    f"学习摘要 {idx}",
+                    json.dumps(payload, ensure_ascii=False),
+                    f"2026-04-13 10:0{idx}:00",
+                ),
+            )
+
+        compacted_count = _compact_old_learning_reports(conn, keep_full_count=2, batch_size=10)
+        rows = conn.execute(
+            "SELECT id, payload_json FROM learning_reports ORDER BY id ASC"
+        ).fetchall()
+
+    assert compacted_count == 3
+    payloads = [json.loads(row["payload_json"]) for row in rows]
+    assert [payload.get("compacted") is True for payload in payloads[:3]] == [True, True, True]
+    assert all("governance_map" not in payload for payload in payloads[:3])
+    assert payloads[0]["counts"]["governance_map"] == 100
+    assert payloads[3].get("compacted") is not True
+    assert isinstance(payloads[3].get("governance_map"), dict)
+    assert payloads[4].get("compacted") is not True
+
+
+def test_compact_learning_reports_public_entry_supports_dry_run_and_apply(tmp_path):
+    db_path = tmp_path / "knowledge.db"
+    large_rule_lines = ["- 历史规则 " + ("细节" * 200)]
+    with open_knowledge_connection(db_path=db_path, ensure_schema=True) as conn:
+        for idx in range(4):
+            payload = {
+                "active_rules": large_rule_lines,
+                "governance_map": {str(rule_id): {"governance_status": "active"} for rule_id in range(40)},
+                "governance_summary": {"active_count": 1},
+                "summary_text": f"学习摘要 {idx}",
+            }
+            conn.execute(
+                """
+                INSERT INTO learning_reports (report_type, horizon_min, summary_text, payload_json, created_at)
+                VALUES ('rule_digest', 30, ?, ?, ?)
+                """,
+                (
+                    f"学习摘要 {idx}",
+                    json.dumps(payload, ensure_ascii=False),
+                    f"2026-04-13 10:0{idx}:00",
+                ),
+            )
+
+    dry_run = compact_learning_reports(db_path=db_path, keep_full_count=1, batch_size=10, dry_run=True)
+    before = summarize_learning_report_storage(db_path=db_path)
+    applied = compact_learning_reports(db_path=db_path, keep_full_count=1, batch_size=10, dry_run=False)
+    after = summarize_learning_report_storage(db_path=db_path)
+
+    assert dry_run["dry_run"] is True
+    assert dry_run["candidate_count"] == 3
+    assert dry_run["compacted_count"] == 0
+    assert before["full_payload_count"] == 4
+    assert applied["compacted_count"] == 3
+    assert applied["saved_payload_bytes"] > 0
+    assert after["full_payload_count"] == 1
+    assert after["compacted_count"] == 3
+
+
+def test_compact_old_learning_reports_skips_already_compacted_rows(tmp_path):
+    db_path = tmp_path / "knowledge.db"
+    large_payload = {
+        "active_rules": ["- 历史规则 " + ("细节" * 200)],
+        "governance_map": {str(rule_id): {"governance_status": "active"} for rule_id in range(40)},
+        "summary_text": "学习摘要",
+    }
+    with open_knowledge_connection(db_path=db_path, ensure_schema=True) as conn:
+        for idx in range(4):
+            conn.execute(
+                """
+                INSERT INTO learning_reports (report_type, horizon_min, summary_text, payload_json, created_at)
+                VALUES ('rule_digest', 30, ?, ?, ?)
+                """,
+                (
+                    f"学习摘要 {idx}",
+                    json.dumps(large_payload, ensure_ascii=False),
+                    f"2026-04-13 10:0{idx}:00",
+                ),
+            )
+        first_id = conn.execute("SELECT MIN(id) FROM learning_reports").fetchone()[0]
+        conn.execute(
+            "UPDATE learning_reports SET payload_json = ? WHERE id = ?",
+            (json.dumps({"compacted": True, "summary_text": "旧摘要"}, ensure_ascii=False), first_id),
+        )
+        compacted_count = _compact_old_learning_reports(conn, keep_full_count=1, batch_size=2)
+        rows = conn.execute("SELECT payload_json FROM learning_reports ORDER BY id ASC").fetchall()
+
+    payloads = [json.loads(row["payload_json"]) for row in rows]
+    assert compacted_count == 2
+    assert payloads[0]["compacted"] is True
+    assert payloads[1]["compacted"] is True
+    assert payloads[2]["compacted"] is True
+    assert payloads[3].get("compacted") is not True
 
 
 def test_build_learning_report_groups_standard_and_exploratory_sim_stats(tmp_path):

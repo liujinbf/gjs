@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from execution_audit import (
     fetch_recent_execution_audits,
     record_execution_audit,
     summarize_execution_audits,
+    summarize_execution_block_diagnostics,
     summarize_execution_reason_counts,
     summarize_today_execution_audits,
 )
@@ -151,6 +153,77 @@ def test_summarize_execution_reason_counts_filters_symbol(tmp_path):
     assert reason_rows[0]["count"] == 1
 
 
+def test_record_execution_audit_preserves_block_diagnostics_for_neutral_meta(tmp_path):
+    db_path = tmp_path / "knowledge.db"
+    record_execution_audit(
+        source_kind="rule_engine",
+        decision_status="blocked",
+        reason_key="grade_gate",
+        snapshot={},
+        meta={
+            "symbol": "XAUUSD",
+            "action": "neutral",
+            "block_reason_key": "grade_gate",
+            "block_secondary_reason_key": "rr_not_ready",
+            "block_secondary_reason_label": "盈亏比未准备好",
+            "block_tertiary_reason_key": "no_direction",
+            "block_tertiary_reason_label": "方向基础不足",
+        },
+        result_message="XAUUSD：当前还没到可轻仓试仓级别（细分：盈亏比未准备好）",
+        db_path=db_path,
+    )
+
+    with open_knowledge_connection(db_path=db_path, ensure_schema=True) as conn:
+        row = conn.execute("SELECT meta_json FROM execution_audits").fetchone()
+    meta = json.loads(row["meta_json"])
+    assert meta["action"] == "neutral"
+    assert meta["block_reason_key"] == "grade_gate"
+    assert meta["block_secondary_reason_key"] == "rr_not_ready"
+    assert meta["block_tertiary_reason_key"] == "no_direction"
+
+
+def test_summarize_execution_block_diagnostics_counts_meta_fields(tmp_path):
+    db_path = tmp_path / "knowledge.db"
+    record_execution_audit(
+        source_kind="rule_engine",
+        decision_status="blocked",
+        reason_key="grade_gate",
+        snapshot={},
+        meta={
+            "symbol": "XAUUSD",
+            "action": "neutral",
+            "block_reason_key": "grade_gate",
+            "block_secondary_reason_key": "rr_not_ready",
+            "block_secondary_reason_label": "盈亏比未准备好",
+            "block_tertiary_reason_key": "no_direction",
+            "block_tertiary_reason_label": "方向基础不足",
+            "block_direction_components": [
+                {"reason_key": "signal_side_missing", "reason_label": "信号方向缺失"}
+            ],
+        },
+        result_message="观察级别阻塞",
+        db_path=db_path,
+    )
+    record_execution_audit(
+        source_kind="rule_engine",
+        decision_status="blocked",
+        reason_key="grade_gate",
+        snapshot={},
+        meta={"symbol": "XAUUSD", "action": "neutral"},
+        result_message="XAUUSD：当前还没到可轻仓试仓级别（细分：盈亏比未准备好）",
+        db_path=db_path,
+    )
+
+    summary = summarize_execution_block_diagnostics(hours=48, symbol="XAUUSD", db_path=db_path)
+
+    assert summary["grade_gate_count"] == 2
+    assert summary["secondary_counts"]["rr_not_ready"] == 2
+    assert summary["top_secondary_labels"][0]["reason_label"] == "盈亏比未准备好"
+    assert summary["tertiary_counts"]["no_direction"] == 1
+    assert summary["top_tertiary_labels"][0]["reason_label"] == "方向基础不足"
+    assert summary["direction_component_counts"]["signal_side_missing"] == 1
+
+
 def test_fetch_recent_execution_audits_returns_latest_rows(tmp_path):
     db_path = tmp_path / "knowledge.db"
     record_execution_audit(
@@ -176,3 +249,29 @@ def test_fetch_recent_execution_audits_returns_latest_rows(tmp_path):
     assert rows[0]["decision_status"] == "closed"
     assert rows[0]["reason_key"] == "take_profit"
     assert rows[1]["decision_status"] == "blocked"
+
+
+def test_fetch_recent_execution_audits_exposes_block_detail(tmp_path):
+    db_path = tmp_path / "knowledge.db"
+    record_execution_audit(
+        source_kind="rule_engine",
+        decision_status="blocked",
+        reason_key="grade_gate",
+        snapshot={},
+        meta={
+            "symbol": "XAUUSD",
+            "action": "neutral",
+            "block_secondary_reason_key": "rr_not_ready",
+            "block_secondary_reason_label": "盈亏比未准备好",
+            "block_tertiary_reason_key": "no_direction",
+            "block_tertiary_reason_label": "方向基础不足",
+        },
+        result_message="观察级别阻塞",
+        db_path=db_path,
+    )
+
+    rows = fetch_recent_execution_audits(hours=48, symbol="XAUUSD", limit=1, db_path=db_path)
+
+    assert rows[0]["block_secondary_reason_key"] == "rr_not_ready"
+    assert rows[0]["block_secondary_reason_label"] == "盈亏比未准备好"
+    assert rows[0]["block_tertiary_reason_key"] == "no_direction"

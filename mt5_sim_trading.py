@@ -49,6 +49,40 @@ class SimTradingEngine:
             logging.exception(f"读取无 TP2 锁盈配置失败，回退默认值：{exc}")
             return 0.5, 0.5
 
+    def _get_time_protect_settings(self) -> tuple[int, float, float]:
+        try:
+            config = get_runtime_config()
+            minutes = max(0, min(240, int(getattr(config, "sim_time_protect_minutes", 30) or 0)))
+            min_r = max(0.05, min(2.0, float(getattr(config, "sim_time_protect_min_r", 0.2) or 0.2)))
+            giveback_ratio = max(
+                0.10,
+                min(0.95, float(getattr(config, "sim_time_protect_giveback_ratio", 0.55) or 0.55)),
+            )
+            return minutes, min_r, giveback_ratio
+        except Exception as exc:
+            logging.exception(f"读取模拟盘时间保护配置失败，回退默认值：{exc}")
+            return 30, 0.2, 0.55
+
+    def _get_scalp_exit_settings(self) -> tuple[float, int]:
+        try:
+            config = get_runtime_config()
+            exit_r = max(0.0, min(5.0, float(getattr(config, "sim_scalp_exit_r", 0.55) or 0.0)))
+            min_minutes = max(0, min(240, int(getattr(config, "sim_scalp_min_minutes", 0) or 0)))
+            return exit_r, min_minutes
+        except Exception as exc:
+            logging.exception(f"读取短线套利落袋配置失败，回退默认值：{exc}")
+            return 0.55, 0
+
+    def _position_age_minutes(self, opened_at: object) -> float:
+        text = str(opened_at or "").strip()
+        if not text:
+            return 0.0
+        try:
+            opened_dt = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return 0.0
+        return max(0.0, (datetime.now() - opened_dt).total_seconds() / 60.0)
+
     def _get_initial_balance(self) -> float:
         try:
             config = get_runtime_config()
@@ -184,6 +218,7 @@ class SimTradingEngine:
                     break_even_armed INTEGER DEFAULT 0,
                     partial_closed_quantity REAL DEFAULT 0.0,
                     partial_realized_profit REAL DEFAULT 0.0,
+                    max_favorable_r REAL DEFAULT 0.0,
                     execution_profile TEXT DEFAULT 'standard',
                     strategy_family TEXT DEFAULT '',
                     strategy_param_json TEXT DEFAULT '',
@@ -220,6 +255,7 @@ class SimTradingEngine:
             self._ensure_column(conn, "sim_positions", "break_even_armed", "INTEGER DEFAULT 0")
             self._ensure_column(conn, "sim_positions", "partial_closed_quantity", "REAL DEFAULT 0.0")
             self._ensure_column(conn, "sim_positions", "partial_realized_profit", "REAL DEFAULT 0.0")
+            self._ensure_column(conn, "sim_positions", "max_favorable_r", "REAL DEFAULT 0.0")
             self._ensure_column(conn, "sim_positions", "snapshot_id", "INTEGER DEFAULT 0")
             self._ensure_column(conn, "sim_positions", "execution_profile", "TEXT DEFAULT 'standard'")
             self._ensure_column(conn, "sim_positions", "strategy_family", "TEXT DEFAULT ''")
@@ -942,32 +978,93 @@ class SimTradingEngine:
                 _, pnl = self._calculate_margin_and_pnl(
                     symbol, qty, entry, mark_price, action == "long"
                 )
+                favorable_r = self._calculate_favorable_r_multiple(action, entry, sl, trigger_price)
+                previous_max_favorable_r = (
+                    float(pos["max_favorable_r"] or 0.0)
+                    if "max_favorable_r" in pos.keys()
+                    else 0.0
+                )
+                max_favorable_r = max(previous_max_favorable_r, favorable_r)
+                age_minutes = self._position_age_minutes(pos["opened_at"])
+                tp_hit = (action == "long" and trigger_price >= tp) or (action == "short" and trigger_price <= tp)
 
                 # 风控判断必须使用本轮实时浮盈，不能等节流写库。
-                conn.execute("UPDATE sim_positions SET floating_pnl=? WHERE id=?", (pnl, pos["id"]))
+                conn.execute(
+                    "UPDATE sim_positions SET floating_pnl=?, max_favorable_r=? WHERE id=?",
+                    (pnl, max_favorable_r, pos["id"]),
+                )
+
+                lock_r_threshold, partial_close_ratio = self._get_no_tp2_lock_settings()
+                partial_qty = math.floor((qty * partial_close_ratio) * 100) / 100.0
+                can_partial_close = partial_qty >= 0.01 and (qty - partial_qty) >= 0.01
+
+                scalp_exit_r, scalp_min_minutes = self._get_scalp_exit_settings()
+                if (
+                    scalp_exit_r > 0
+                    and favorable_r >= scalp_exit_r
+                    and age_minutes >= scalp_min_minutes
+                    and not tp_hit
+                    and not can_partial_close
+                ):
+                    self._close_position_with_conn(
+                        conn,
+                        pos["id"],
+                        trigger_price,
+                        (
+                            f"短线套利浮盈达到 {favorable_r:.2f}R"
+                            f"（落袋线 {scalp_exit_r:.2f}R），先止盈释放下一次机会"
+                        ),
+                        user_id,
+                    )
+                    conn.commit()
+                    continue
 
                 if not break_even_armed:
-                    lock_r_threshold, partial_close_ratio = self._get_no_tp2_lock_settings()
-                    partial_qty = math.floor((qty * partial_close_ratio) * 100) / 100.0
-                    can_partial_close = partial_qty >= 0.01 and (qty - partial_qty) >= 0.01
-                    if tp2 > 0:
+                    if tp2 > 0 and tp_hit:
                         if can_partial_close:
-                            tp1_hit = (action == "long" and trigger_price >= tp) or (action == "short" and trigger_price <= tp)
-                            if tp1_hit:
-                                self._partially_close_position_with_conn(
-                                    conn,
-                                    pos["id"],
-                                    trigger_price,
-                                    partial_qty,
-                                    "命中目标1止盈（分批减仓并上移保本止损）",
-                                    user_id,
-                                )
-                                conn.commit()
-                                continue
+                            self._partially_close_position_with_conn(
+                                conn,
+                                pos["id"],
+                                trigger_price,
+                                partial_qty,
+                                "命中目标1止盈（分批减仓并上移保本止损）",
+                                user_id,
+                            )
+                            conn.commit()
+                            continue
+                    elif favorable_r >= lock_r_threshold and not tp_hit:
+                        if can_partial_close:
+                            self._partially_close_position_with_conn(
+                                conn,
+                                pos["id"],
+                                trigger_price,
+                                partial_qty,
+                                (
+                                    f"浮盈达到 {favorable_r:.2f}R（阈值 {lock_r_threshold:.2f}R），"
+                                    "先减仓并上移保本止损"
+                                ),
+                                user_id,
+                            )
+                            conn.commit()
+                            continue
+                        if self._arm_break_even_only_with_conn(conn, pos["id"]):
+                            conn.commit()
+                            continue
                     else:
-                        favorable_r = self._calculate_favorable_r_multiple(action, entry, sl, trigger_price)
-                        tp_hit_without_tp2 = (action == "long" and trigger_price >= tp) or (action == "short" and trigger_price <= tp)
-                        if favorable_r >= lock_r_threshold and not tp_hit_without_tp2:
+                        protect_minutes, protect_min_r, giveback_ratio = self._get_time_protect_settings()
+                        time_protect_hit = (
+                            protect_minutes > 0
+                            and age_minutes >= protect_minutes
+                            and favorable_r > 0
+                            and (
+                                favorable_r >= protect_min_r
+                                or (
+                                    max_favorable_r >= protect_min_r
+                                    and favorable_r <= max_favorable_r * giveback_ratio
+                                )
+                            )
+                        )
+                        if time_protect_hit:
                             if can_partial_close:
                                 self._partially_close_position_with_conn(
                                     conn,
@@ -975,8 +1072,8 @@ class SimTradingEngine:
                                     trigger_price,
                                     partial_qty,
                                     (
-                                        f"浮盈达到 {favorable_r:.2f}R（阈值 {lock_r_threshold:.2f}R），"
-                                        "先减仓并上移保本止损"
+                                        f"持仓 {age_minutes:.0f} 分钟后浮盈仍有 {favorable_r:.2f}R"
+                                        f"（最高 {max_favorable_r:.2f}R），先减仓并上移保本止损"
                                     ),
                                     user_id,
                                 )

@@ -7,9 +7,14 @@
 """
 
 MODEL_PRESETS = {
-    "DeepSeek 官方平台 (DeepSeek-V3)": {
+    "DeepSeek 官方平台 (DeepSeek-V4-Flash)": {
         "url": "https://api.deepseek.com",
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-flash",
+        "link": "https://platform.deepseek.com/api_keys",
+    },
+    "DeepSeek 官方平台 (DeepSeek-V4-Pro)": {
+        "url": "https://api.deepseek.com",
+        "model": "deepseek-v4-pro",
         "link": "https://platform.deepseek.com/api_keys",
     },
     "硅基流动满血版 (DeepSeek-V3)": {

@@ -30,7 +30,7 @@ from execution_audit import record_execution_audit, resolve_snapshot_binding
 from external_signal_context import apply_external_signal_context
 from knowledge_feedback import refresh_feedback_push_policy, refresh_rule_feedback_scores, summarize_feedback_stats
 from knowledge_governance import build_learning_report, refresh_rule_governance
-from learning_closure import backfill_alert_effect_outcomes, backfill_missed_opportunity_samples
+from learning_closure import backfill_ai_signal_effect_outcomes, backfill_alert_effect_outcomes, backfill_missed_opportunity_samples
 from knowledge_ai_signals import record_ai_signal, summarize_recent_ai_signals
 from knowledge_ml import (
     annotate_snapshot_with_model,
@@ -62,6 +62,7 @@ BACKGROUND_OUTBOX_DB = PROJECT_DIR / ".runtime" / "background_outbox.sqlite"
 BACKGROUND_OUTBOX_MAX_ATTEMPTS = 3
 BACKGROUND_OUTBOX_DONE_RETENTION_DAYS = 7
 BACKGROUND_OUTBOX_FAILED_RETENTION_DAYS = 30
+BACKGROUND_OUTBOX_DONE_PAYLOAD_MAX_BYTES = 4096
 MACRO_SYNC_INTERVAL_MS = 15 * 60 * 1000
 MACRO_SYNC_SLOW_THRESHOLD_MS = 3000
 MACRO_SYNC_DEGRADED_STATUSES = {"error", "stale_cache", "cache_missing"}
@@ -72,6 +73,27 @@ MACRO_SYNC_BACKOFF_MAX_SEC = 2 * 60 * 60
 def _normalize_snapshot_item(item: dict | SnapshotItem | None) -> dict:
     """统一 UI 主链消费的快照项字段契约。"""
     return SnapshotItem.from_payload(item).to_dict()
+
+
+def _get_sim_open_symbols() -> set[str]:
+    symbols: set[str] = set()
+    try:
+        positions = SIM_ENGINE.get_open_positions()
+    except Exception:
+        return symbols
+    for item in list(positions or []):
+        symbol = str((item or {}).get("symbol", "") or "").strip().upper()
+        if symbol:
+            symbols.add(symbol)
+    return symbols
+
+
+def _attach_sim_open_symbols(snapshot: dict | None) -> dict:
+    payload = dict(snapshot or {})
+    active_symbols = sorted(_get_sim_open_symbols())
+    if active_symbols:
+        payload["active_position_symbols"] = active_symbols
+    return payload
 
 
 def _is_degraded_feed_status(status: str, status_text: str) -> bool:
@@ -211,6 +233,45 @@ def _row_to_background_task(row: sqlite3.Row | dict | None) -> dict | None:
     }
 
 
+def _compact_done_background_payload(row: sqlite3.Row | dict | None, completed_at: str) -> str:
+    if not row:
+        return json.dumps({"compacted": True, "completed_at": completed_at}, ensure_ascii=False)
+    raw_payload = str(row["payload_json"] or "{}")
+    try:
+        payload = json.loads(raw_payload)
+    except json.JSONDecodeError:
+        payload = {}
+    if isinstance(payload, dict) and payload.get("compacted") is True:
+        return raw_payload
+    snapshot = dict((payload or {}).get("snapshot", {}) or {}) if isinstance(payload, dict) else {}
+    config = dict((payload or {}).get("config", {}) or {}) if isinstance(payload, dict) else {}
+    items = list(snapshot.get("items", []) or [])
+    symbols = []
+    for item in items:
+        if isinstance(item, dict):
+            symbol = str(item.get("symbol", "") or "").strip().upper()
+            if symbol and symbol not in symbols:
+                symbols.append(symbol)
+    compact_payload = {
+        "compacted": True,
+        "kind": str(row["kind"] or "").strip(),
+        "status": "done",
+        "completed_at": completed_at,
+        "created_at": str(row["created_at"] or ""),
+        "attempts": int(row["attempts"] or 0),
+        "original_payload_bytes": len(raw_payload.encode("utf-8")),
+        "snapshot_time": str(snapshot.get("last_refresh_text", "") or ""),
+        "symbols": symbols,
+        "run_backtest": bool((payload or {}).get("run_backtest", False)) if isinstance(payload, dict) else False,
+        "config_keys": sorted(str(key) for key in config.keys())[:80],
+    }
+    compact_json = json.dumps(compact_payload, ensure_ascii=False, separators=(",", ":"), default=_json_safe_default)
+    if len(compact_json.encode("utf-8")) > BACKGROUND_OUTBOX_DONE_PAYLOAD_MAX_BYTES:
+        compact_payload["config_keys"] = []
+        compact_json = json.dumps(compact_payload, ensure_ascii=False, separators=(",", ":"), default=_json_safe_default)
+    return compact_json if len(compact_json) < len(raw_payload) else raw_payload
+
+
 def _claim_background_outbox_task(
     outbox_id: int | None = None,
     db_path: str | os.PathLike | None = None,
@@ -269,16 +330,36 @@ def _mark_background_outbox_task(
     clean_status = str(status or "").strip() or "pending"
     conn = _connect_background_outbox(db_path)
     try:
-        conn.execute(
-            """
-            UPDATE background_outbox
-            SET status = ?,
-                last_error = ?,
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (clean_status, str(error_text or "")[:1000], now_text, int(outbox_id)),
-        )
+        payload_json = None
+        if clean_status == "done":
+            row = conn.execute(
+                "SELECT * FROM background_outbox WHERE id = ? LIMIT 1",
+                (int(outbox_id),),
+            ).fetchone()
+            payload_json = _compact_done_background_payload(row, completed_at=now_text)
+        if payload_json is None:
+            conn.execute(
+                """
+                UPDATE background_outbox
+                SET status = ?,
+                    last_error = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (clean_status, str(error_text or "")[:1000], now_text, int(outbox_id)),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE background_outbox
+                SET status = ?,
+                    payload_json = ?,
+                    last_error = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (clean_status, payload_json, str(error_text or "")[:1000], now_text, int(outbox_id)),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -329,6 +410,126 @@ def _cleanup_background_outbox(
         return int(cursor.rowcount or 0)
     finally:
         conn.close()
+
+
+def summarize_background_outbox_storage(db_path: str | os.PathLike | None = None) -> dict:
+    """统计后台 outbox 的行数和 payload 占用，辅助判断是否需要维护。"""
+    target = Path(db_path) if db_path else BACKGROUND_OUTBOX_DB
+    conn = _connect_background_outbox(db_path)
+    try:
+        status_rows = conn.execute(
+            """
+            SELECT
+                status,
+                COUNT(*) AS row_count,
+                COALESCE(SUM(LENGTH(payload_json)), 0) AS payload_bytes
+            FROM background_outbox
+            GROUP BY status
+            ORDER BY row_count DESC
+            """
+        ).fetchall()
+        total = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS row_count,
+                COALESCE(SUM(LENGTH(payload_json)), 0) AS payload_bytes,
+                COALESCE(AVG(LENGTH(payload_json)), 0) AS avg_payload_bytes,
+                COALESCE(MAX(LENGTH(payload_json)), 0) AS max_payload_bytes,
+                SUM(
+                    CASE
+                        WHEN payload_json LIKE '%"compacted":true%'
+                          OR payload_json LIKE '%"compacted": true%'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS compacted_count
+            FROM background_outbox
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    payload_bytes = int(total["payload_bytes"] or 0)
+    return {
+        "db_path": str(target),
+        "db_size_bytes": target.stat().st_size if target.exists() else 0,
+        "db_size_mb": round((target.stat().st_size if target.exists() else 0) / 1024 / 1024, 3),
+        "row_count": int(total["row_count"] or 0),
+        "payload_bytes": payload_bytes,
+        "payload_mb": round(payload_bytes / 1024 / 1024, 3),
+        "avg_payload_bytes": float(total["avg_payload_bytes"] or 0.0),
+        "max_payload_bytes": int(total["max_payload_bytes"] or 0),
+        "compacted_count": int(total["compacted_count"] or 0),
+        "by_status": {
+            str(row["status"] or ""): {
+                "row_count": int(row["row_count"] or 0),
+                "payload_bytes": int(row["payload_bytes"] or 0),
+                "payload_mb": round(int(row["payload_bytes"] or 0) / 1024 / 1024, 3),
+            }
+            for row in status_rows
+        },
+    }
+
+
+def compact_done_background_outbox_payloads(
+    db_path: str | os.PathLike | None = None,
+    batch_size: int = 500,
+    dry_run: bool = False,
+) -> dict:
+    """批量压缩已完成 outbox 任务的历史 payload；不处理 pending/running。"""
+    batch_limit = max(1, int(batch_size or 500))
+    before = summarize_background_outbox_storage(db_path)
+    conn = _connect_background_outbox(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM background_outbox
+            WHERE status = 'done'
+              AND payload_json NOT LIKE '%"compacted":true%'
+              AND payload_json NOT LIKE '%"compacted": true%'
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (batch_limit,),
+        ).fetchall()
+        compacted_count = 0
+        original_bytes = 0
+        compacted_bytes = 0
+        for row in rows:
+            raw_payload = str(row["payload_json"] or "{}")
+            compact_payload = _compact_done_background_payload(
+                row,
+                completed_at=str(row["updated_at"] or time.strftime("%Y-%m-%d %H:%M:%S")),
+            )
+            raw_size = len(raw_payload.encode("utf-8"))
+            compact_size = len(compact_payload.encode("utf-8"))
+            if compact_size >= raw_size:
+                continue
+            compacted_count += 1
+            original_bytes += raw_size
+            compacted_bytes += compact_size
+            if not dry_run:
+                conn.execute(
+                    "UPDATE background_outbox SET payload_json = ? WHERE id = ?",
+                    (compact_payload, int(row["id"])),
+                )
+        if not dry_run:
+            conn.commit()
+    finally:
+        conn.close()
+    after = before if dry_run else summarize_background_outbox_storage(db_path)
+    return {
+        "dry_run": bool(dry_run),
+        "candidate_count": len(rows),
+        "compacted_count": compacted_count if not dry_run else 0,
+        "estimated_compactable_count": compacted_count if dry_run else compacted_count,
+        "candidate_original_bytes": original_bytes,
+        "candidate_compacted_bytes": compacted_bytes,
+        "estimated_saved_bytes": max(0, original_bytes - compacted_bytes),
+        "estimated_saved_mb": round(max(0, original_bytes - compacted_bytes) / 1024 / 1024, 3),
+        "before": before,
+        "after": after,
+    }
 
 
 def _process_background_task(task: dict, db_path: str | os.PathLike | None = None) -> dict | None:
@@ -384,8 +585,20 @@ def _build_execution_funnel_payload(snapshot: dict, ai_state: dict | None = None
     sim_ready_count = int(sim_audit.get("ready_count", 0) or 0)
     blocked_summary = list(sim_audit.get("blocked_summary", []) or [])
     top_block = blocked_summary[0] if blocked_summary else {}
+    top_block_key = str(top_block.get("reason_key", "") or "").strip()
     top_block_label = str(top_block.get("reason_label", "") or "").strip() or "暂无明显阻断"
     top_block_count = int(top_block.get("count", 0) or 0)
+    secondary_blocked_summary = list(sim_audit.get("secondary_blocked_summary", []) or [])
+    top_secondary_block = secondary_blocked_summary[0] if secondary_blocked_summary else {}
+    top_secondary_block_key = str(top_secondary_block.get("reason_key", "") or "").strip()
+    top_secondary_block_label = str(top_secondary_block.get("reason_label", "") or "").strip()
+    top_secondary_block_count = int(top_secondary_block.get("count", 0) or 0)
+
+    def _with_secondary_diagnosis(text: str) -> str:
+        base = str(text or "").strip()
+        if top_block_key == "grade_gate" and top_secondary_block_label and top_secondary_block_count > 0:
+            return f"{base.rstrip('。')}；细分卡点：{top_secondary_block_label}（{top_secondary_block_count} 个品种）。"
+        return base
 
     ai_state = dict(ai_state or {})
     ai_status_text = str(ai_state.get("status_text", "待命") or "待命").strip()
@@ -410,6 +623,7 @@ def _build_execution_funnel_payload(snapshot: dict, ai_state: dict | None = None
         if top_block_count > 0:
             diagnosis += f"（{top_block_count} 个品种）"
         diagnosis += "。"
+    diagnosis = _with_secondary_diagnosis(diagnosis)
 
     text = (
         f"执行漏斗：活跃报价 {live_count}/{total_count} -> 结构候选 {structure_count} -> 风控就绪 {rr_ready_count} -> 方向明确 {direction_ready_count} -> 自动试仓就绪 {sim_ready_count}\n"
@@ -425,8 +639,12 @@ def _build_execution_funnel_payload(snapshot: dict, ai_state: dict | None = None
         "rr_ready_count": rr_ready_count,
         "direction_ready_count": direction_ready_count,
         "sim_ready_count": sim_ready_count,
+        "top_block_key": top_block_key,
         "top_block_label": top_block_label,
         "top_block_count": top_block_count,
+        "top_secondary_block_key": top_secondary_block_key,
+        "top_secondary_block_label": top_secondary_block_label,
+        "top_secondary_block_count": top_secondary_block_count,
         "ai_status_text": ai_status_text,
         "ai_action_text": ai_action_text,
         "ai_push_text": ai_push_text,
@@ -818,6 +1036,28 @@ def _build_meta_from_snapshot_item(item: dict, action: str = "neutral") -> dict:
     return _enrich_signal_with_snapshot_context(meta, {"items": [item]})
 
 
+def _attach_block_diagnostics_to_meta(meta: dict, blocked_row: dict | None) -> dict:
+    enriched = dict(meta or {})
+    row = dict(blocked_row or {})
+    for row_key, meta_key in (
+        ("reason_key", "block_reason_key"),
+        ("reason_label", "block_reason_label"),
+        ("reason", "block_reason_text"),
+        ("secondary_reason_key", "block_secondary_reason_key"),
+        ("secondary_reason_label", "block_secondary_reason_label"),
+        ("tertiary_reason_key", "block_tertiary_reason_key"),
+        ("tertiary_reason_label", "block_tertiary_reason_label"),
+    ):
+        value = str(row.get(row_key, "") or "").strip()
+        if value:
+            enriched[meta_key] = value
+    components = row.get("direction_components")
+    if isinstance(components, list) and components:
+        enriched["block_direction_components"] = list(components)
+        enriched["block_direction_components_json"] = json.dumps(components, ensure_ascii=False)
+    return enriched
+
+
 def _attempt_sim_execution(
     *,
     source_kind: str,
@@ -1068,6 +1308,7 @@ def process_snapshot_side_effects(
                 if blocked_row:
                     blocked_item = _pick_snapshot_item_by_symbol(snapshot, str(blocked_row.get("symbol", "") or "").strip().upper())
                     blocked_meta = _build_meta_from_snapshot_item(blocked_item, action=str(blocked_row.get("action", "neutral") or "neutral"))
+                    blocked_meta = _attach_block_diagnostics_to_meta(blocked_meta, blocked_row)
                 record_execution_audit(
                     source_kind="rule_engine",
                     decision_status="blocked",
@@ -1161,6 +1402,7 @@ def process_snapshot_side_effects(
                 if blocked_row:
                     blocked_item = _pick_snapshot_item_by_symbol(snapshot, str(blocked_row.get("symbol", "") or "").strip().upper())
                     blocked_meta = _build_meta_from_snapshot_item(blocked_item, action=str(blocked_row.get("action", "neutral") or "neutral"))
+                    blocked_meta = _attach_block_diagnostics_to_meta(blocked_meta, blocked_row)
                 record_execution_audit(
                     source_kind="rule_engine",
                     decision_status="blocked",
@@ -1191,12 +1433,16 @@ def run_knowledge_maintenance(config, snapshot_ids: list[int] | None = None) -> 
     match_result = match_rules_to_snapshots(snapshot_ids=snapshot_ids or None)
     if int(match_result.get("matched_count", 0) or 0) > 0:
         result["log_lines"].append(f"[知识库] 已新增 {match_result.get('matched_count', 0)} 条规则-样本映射。")
-    outcome_result = backfill_snapshot_outcomes()
-    alert_effect_result = backfill_alert_effect_outcomes(horizon_min=30)
+    outcome_result = backfill_snapshot_outcomes(horizons_min=(5, 15, 30, 60))
+    alert_effect_results = [backfill_alert_effect_outcomes(horizon_min=horizon) for horizon in (5, 15, 30, 60)]
+    ai_effect_results = [backfill_ai_signal_effect_outcomes(horizon_min=horizon) for horizon in (5, 15, 30, 60)]
+    alert_effect_inserted = sum(int(item.get("inserted_count", 0) or 0) for item in alert_effect_results)
+    ai_effect_inserted = sum(int(item.get("inserted_count", 0) or 0) for item in ai_effect_results)
     missed_result = backfill_missed_opportunity_samples(horizon_min=30)
     if (
         int(outcome_result.get("labeled_count", 0) or 0) <= 0
-        and int(alert_effect_result.get("inserted_count", 0) or 0) <= 0
+        and alert_effect_inserted <= 0
+        and ai_effect_inserted <= 0
         and int(missed_result.get("inserted_count", 0) or 0) <= 0
         and not result["log_lines"]
     ):
@@ -1216,9 +1462,13 @@ def run_knowledge_maintenance(config, snapshot_ids: list[int] | None = None) -> 
     result["log_lines"].append(
         f"[知识库] 已新增 {outcome_result.get('labeled_count', 0)} 条结果回标。{stats_30m.get('summary_text', '')}"
     )
-    if int(alert_effect_result.get("inserted_count", 0) or 0) > 0:
+    if alert_effect_inserted > 0:
         result["log_lines"].append(
-            f"[提醒学习] 已新增 {alert_effect_result.get('inserted_count', 0)} 条推送后效果回标。"
+            f"[提醒学习] 已新增 {alert_effect_inserted} 条结构/机会推送后效果回标。"
+        )
+    if ai_effect_inserted > 0:
+        result["log_lines"].append(
+            f"[AI提醒学习] 已新增 {ai_effect_inserted} 条 AI 动作提醒效果回标。"
         )
     if int(missed_result.get("inserted_count", 0) or 0) > 0:
         result["log_lines"].append(
@@ -1254,7 +1504,10 @@ def run_knowledge_maintenance(config, snapshot_ids: list[int] | None = None) -> 
         if feedback_policy.get("tighten_risk"):
             actions.append("收紧风险推送")
         if actions:
-            result["log_lines"].append(f"[推送学习] 已根据用户反馈调整提醒策略：{' / '.join(actions)}。")
+            source_text = "用户反馈"
+            if int(feedback_policy.get("effect_sample_count", 0) or 0) > 0:
+                source_text += f"+{int(feedback_policy.get('effect_sample_count', 0) or 0)}条效果样本"
+            result["log_lines"].append(f"[推送学习] 已根据{source_text}调整提醒策略：{' / '.join(actions)}。")
     result["log_lines"].append(f"[知识库] 学习摘要：{learning_report.get('summary_text', '')}")
     learning_push_result = send_learning_report_notification(learning_report, config)
     for line in learning_push_result.get("messages", []):
@@ -2300,7 +2553,8 @@ class MetalMonitorWindow(QMainWindow):
         content = str(result.get("content", "") or "").strip()
         model = str(result.get("model", "") or "").strip()
         is_opp = _detect_opportunity(self._last_snapshot)
-        push_result = send_ai_brief_notification(result, self._last_snapshot, self._config, is_opportunity=is_opp)
+        push_snapshot = _attach_sim_open_symbols(self._last_snapshot)
+        push_result = send_ai_brief_notification(result, push_snapshot, self._config, is_opportunity=is_opp)
         history_count = append_ai_history_entry(build_ai_history_entry(result, self._last_snapshot, push_result=push_result))
         ai_signal_result = {"inserted_count": 0}
         try:
@@ -2355,11 +2609,12 @@ class MetalMonitorWindow(QMainWindow):
 
         is_fallback = bool(result.get("is_fallback", False))
         fallback_reason = str(result.get("fallback_reason", "") or "").strip()
+        fallback_reason_text = str(result.get("fallback_reason_text", "") or "").strip() or fallback_reason
 
         if is_fallback:
             self._set_ai_funnel_state("规则降级", action="neutral", push_text="未推送", tone=AlertTone.WARNING.value)
             self.lbl_ai_status.setText(
-                f"⚠️【规则引擎降级】AI 不可用（{fallback_reason[:40] or '原因未知'}），"
+                f"⚠️【规则引擎降级】{fallback_reason_text[:42] or 'AI 不可用'}，"
                 f"已生成本地规则简报，模拟跟单已禁用。"
             )
             self._append_log(f"[AI降级] 使用规则引擎生成简报，原因：{fallback_reason}")
@@ -2460,7 +2715,8 @@ class MetalMonitorWindow(QMainWindow):
             model = str(result.get("model", "") or "").strip()
             meta = _resolve_ai_result_signal_meta(result, content)
             is_opp = _detect_opportunity(self._last_snapshot)
-            push_result = send_ai_brief_notification(result, self._last_snapshot, self._config, is_opportunity=is_opp)
+            push_snapshot = _attach_sim_open_symbols(self._last_snapshot)
+            push_result = send_ai_brief_notification(result, push_snapshot, self._config, is_opportunity=is_opp)
             history_count = append_ai_history_entry(build_ai_history_entry(result, self._last_snapshot, push_result=push_result))
             ai_signal_result = {"inserted_count": 0}
             try:

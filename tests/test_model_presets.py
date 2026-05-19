@@ -13,7 +13,13 @@ def test_find_preset_name_matches_legacy_siliconflow_r1():
 
 
 def test_model_presets_include_common_platforms():
-    assert "DeepSeek 官方平台 (DeepSeek-V3)" in MODEL_PRESETS
+    assert "DeepSeek 官方平台 (DeepSeek-V4-Flash)" in MODEL_PRESETS
+    assert "DeepSeek 官方平台 (DeepSeek-V4-Pro)" in MODEL_PRESETS
     assert "硅基流动满血版 (DeepSeek-V3)" in MODEL_PRESETS
     assert "硅基流动推理版 (DeepSeek-R1)" in MODEL_PRESETS
     assert "【自定义配置】" in MODEL_PRESETS
+
+
+def test_find_preset_name_matches_deepseek_v4_flash():
+    name = find_preset_name("https://api.deepseek.com", "deepseek-v4-flash")
+    assert name == "DeepSeek 官方平台 (DeepSeek-V4-Flash)"

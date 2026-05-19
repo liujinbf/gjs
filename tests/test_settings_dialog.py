@@ -25,19 +25,24 @@ def qapp():
 
 
 def test_build_ai_test_request_uses_bearer_for_openai_compatible():
-    url, headers = _build_ai_test_request("https://api.siliconflow.cn/v1", "demo-key")
+    url, headers, body = _build_ai_test_request("https://api.deepseek.com", "deepseek-v4-flash", "demo-key")
 
-    assert url == "https://api.siliconflow.cn/v1/models"
+    assert url == "https://api.deepseek.com/chat/completions"
     assert headers["Authorization"] == "Bearer demo-key"
+    assert headers["Content-Type"] == "application/json; charset=utf-8"
+    assert body["model"] == "deepseek-v4-flash"
+    assert body["messages"][0]["content"] == "ping"
     assert "x-api-key" not in headers
 
 
 def test_build_ai_test_request_uses_anthropic_headers():
-    url, headers = _build_ai_test_request("https://api.anthropic.com/v1", "anthropic-key")
+    url, headers, body = _build_ai_test_request("https://api.anthropic.com/v1", "claude-3-5-sonnet-20241022", "anthropic-key")
 
-    assert url == "https://api.anthropic.com/v1/models"
+    assert url == "https://api.anthropic.com/v1/messages"
     assert headers["x-api-key"] == "anthropic-key"
     assert headers["anthropic-version"] == "2023-06-01"
+    assert headers["Content-Type"] == "application/json; charset=utf-8"
+    assert body["model"] == "claude-3-5-sonnet-20241022"
     assert "Authorization" not in headers
 
 
@@ -63,6 +68,8 @@ def test_build_runtime_config_includes_sim_short_term_controls(qapp):
             sim_exploratory_base_balance=1000.0,
             sim_no_tp2_lock_r=0.5,
             sim_no_tp2_partial_close_ratio=0.5,
+            sim_scalp_exit_r=0.55,
+            sim_scalp_min_minutes=0,
             sim_min_rr=1.6,
             sim_relaxed_rr=1.3,
             sim_model_min_probability=0.68,
@@ -93,6 +100,8 @@ def test_build_runtime_config_includes_sim_short_term_controls(qapp):
     dialog.spin_sim_exploratory_base_balance.setValue(200.0)
     dialog.spin_sim_no_tp2_lock_r.setValue(0.4)
     dialog.spin_sim_no_tp2_partial_close_ratio.setValue(0.35)
+    dialog.spin_sim_scalp_exit_r.setValue(0.65)
+    dialog.spin_sim_scalp_min_minutes.setValue(3)
     dialog.spin_sim_min_rr.setValue(1.45)
     dialog.spin_sim_rr_early_momentum.setValue(1.35)
     dialog.spin_sim_rr_direct_momentum.setValue(1.50)
@@ -117,6 +126,8 @@ def test_build_runtime_config_includes_sim_short_term_controls(qapp):
     assert abs(config.sim_exploratory_base_balance - 200.0) < 1e-9
     assert abs(config.sim_no_tp2_lock_r - 0.4) < 1e-9
     assert abs(config.sim_no_tp2_partial_close_ratio - 0.35) < 1e-9
+    assert abs(config.sim_scalp_exit_r - 0.65) < 1e-9
+    assert config.sim_scalp_min_minutes == 3
     assert abs(config.sim_min_rr - 1.45) < 1e-9
     assert abs(config.sim_strategy_min_rr["early_momentum"] - 1.35) < 1e-9
     assert abs(config.sim_strategy_min_rr["direct_momentum"] - 1.50) < 1e-9

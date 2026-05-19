@@ -105,7 +105,10 @@ def test_build_execution_funnel_payload_reports_structure_gate():
     assert payload["structure_count"] == 0
     assert payload["sim_ready_count"] == 0
     assert payload["tone"] == "accent"
+    assert payload["top_block_key"] == "grade_gate"
+    assert payload["top_secondary_block_label"] == "非结构型信号"
     assert "当前没有结构放行的候选" in payload["text"]
+    assert "细分卡点：非结构型信号" in payload["text"]
 
 
 def test_build_trade_grade_display_text_marks_portfolio_grade_and_execution_block():
@@ -596,6 +599,47 @@ def test_background_outbox_persists_and_marks_snapshot_task_done(tmp_path, monke
     assert row == ("done", 1, "")
 
 
+def test_background_outbox_compacts_done_payload_after_success(tmp_path, monkeypatch):
+    db_path = tmp_path / "background_outbox.sqlite"
+    large_detail = "趋势结构说明" * 2000
+
+    def fake_process_snapshot_side_effects(snapshot, config, run_backtest=False):
+        return {"log_lines": ["ok"], "snapshot_ids": [7]}
+
+    monkeypatch.setattr(ui, "process_snapshot_side_effects", fake_process_snapshot_side_effects)
+    outbox_id = ui._persist_snapshot_side_effect_task(
+        {
+            "last_refresh_text": "2026-04-13 10:00:00",
+            "items": [{"symbol": "XAUUSD", "trade_grade_detail": large_detail}],
+        },
+        SimpleNamespace(notify_cooldown_min=18, event_feed_url="https://example.test/feed.json"),
+        run_backtest=True,
+        db_path=db_path,
+    )
+    with sqlite3.connect(str(db_path)) as conn:
+        before_payload = conn.execute(
+            "SELECT payload_json FROM background_outbox WHERE id=?",
+            (outbox_id,),
+        ).fetchone()[0]
+
+    task = ui._claim_background_outbox_task(db_path=db_path)
+    ui._process_background_task(task, db_path=db_path)
+
+    with sqlite3.connect(str(db_path)) as conn:
+        after_payload = conn.execute(
+            "SELECT payload_json FROM background_outbox WHERE id=?",
+            (outbox_id,),
+        ).fetchone()[0]
+    compacted = json.loads(after_payload)
+    assert compacted["compacted"] is True
+    assert compacted["snapshot_time"] == "2026-04-13 10:00:00"
+    assert compacted["symbols"] == ["XAUUSD"]
+    assert compacted["run_backtest"] is True
+    assert compacted["original_payload_bytes"] > len(after_payload.encode("utf-8"))
+    assert len(after_payload) < len(before_payload) / 10
+    assert large_detail not in after_payload
+
+
 def test_background_outbox_recovers_interrupted_running_task(tmp_path):
     db_path = tmp_path / "background_outbox.sqlite"
     outbox_id = ui._persist_snapshot_side_effect_task(
@@ -676,6 +720,63 @@ def test_background_outbox_cleanup_removes_old_done_and_failed_rows(tmp_path):
     assert rows == [(fresh_done_id, "done")]
 
 
+def test_compact_done_background_outbox_payloads_supports_dry_run_and_apply(tmp_path):
+    db_path = tmp_path / "background_outbox.sqlite"
+    large_detail = "趋势结构说明" * 1500
+    done_id = ui._persist_snapshot_side_effect_task(
+        {
+            "last_refresh_text": "2026-04-13 10:00:00",
+            "items": [{"symbol": "XAUUSD", "trade_grade_detail": large_detail}],
+        },
+        SimpleNamespace(notify_cooldown_min=18),
+        db_path=db_path,
+    )
+    pending_id = ui._persist_snapshot_side_effect_task(
+        {"last_refresh_text": "2026-04-13 10:01:00"},
+        SimpleNamespace(notify_cooldown_min=18),
+        db_path=db_path,
+    )
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("UPDATE background_outbox SET status='done' WHERE id=?", (done_id,))
+        conn.commit()
+        before_payload = conn.execute(
+            "SELECT payload_json FROM background_outbox WHERE id=?",
+            (done_id,),
+        ).fetchone()[0]
+
+    dry_run = ui.compact_done_background_outbox_payloads(db_path=db_path, batch_size=10, dry_run=True)
+    with sqlite3.connect(str(db_path)) as conn:
+        dry_payload = conn.execute(
+            "SELECT payload_json FROM background_outbox WHERE id=?",
+            (done_id,),
+        ).fetchone()[0]
+
+    applied = ui.compact_done_background_outbox_payloads(db_path=db_path, batch_size=10, dry_run=False)
+    summary = ui.summarize_background_outbox_storage(db_path=db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        done_payload = conn.execute(
+            "SELECT payload_json FROM background_outbox WHERE id=?",
+            (done_id,),
+        ).fetchone()[0]
+        pending_payload = conn.execute(
+            "SELECT payload_json FROM background_outbox WHERE id=?",
+            (pending_id,),
+        ).fetchone()[0]
+
+    assert dry_run["dry_run"] is True
+    assert dry_run["estimated_compactable_count"] == 1
+    assert dry_payload == before_payload
+    assert applied["compacted_count"] == 1
+    assert applied["estimated_saved_bytes"] > 0
+    assert json.loads(done_payload)["compacted"] is True
+    assert large_detail not in done_payload
+    assert json.loads(pending_payload).get("compacted") is not True
+    assert summary["row_count"] == 2
+    assert summary["compacted_count"] == 1
+    assert summary["by_status"]["done"]["row_count"] == 1
+    assert summary["by_status"]["pending"]["row_count"] == 1
+
+
 def test_enqueue_snapshot_side_effects_keeps_task_in_outbox_when_wakeup_queue_full(tmp_path, monkeypatch):
     db_path = tmp_path / "background_outbox.sqlite"
     task_queue = queue.Queue(maxsize=1)
@@ -714,7 +815,8 @@ def test_process_snapshot_side_effects_logs_reason_when_rule_signal_not_executed
     monkeypatch.setattr(ui, "send_notifications", lambda entries, config: {"messages": [], "errors": []})
     monkeypatch.setattr(ui.SIM_ENGINE, "update_prices", lambda quotes: None)
     monkeypatch.setattr(ui.SIM_ENGINE, "get_open_positions", lambda: [])
-    monkeypatch.setattr(ui, "record_execution_audit", lambda **kwargs: {"audit_id": 1})
+    captured = {}
+    monkeypatch.setattr(ui, "record_execution_audit", lambda **kwargs: captured.update({"audit": dict(kwargs)}) or {"audit_id": 1})
 
     snapshot = {
         "last_refresh_text": "2026-04-13 10:00:00",
@@ -725,15 +827,15 @@ def test_process_snapshot_side_effects_logs_reason_when_rule_signal_not_executed
                 "bid": 4779.9,
                 "ask": 4780.1,
                 "has_live_quote": True,
-                "trade_grade": "可轻仓试仓",
+                "trade_grade": "只适合观察",
                 "trade_grade_source": "structure",
-                "signal_side": "long",
-                "risk_reward_ready": True,
-                "risk_reward_ratio": 2.2,
-                "risk_reward_stop_price": 4748.0,
-                "risk_reward_target_price": 4810.0,
-                "risk_reward_entry_zone_low": 4750.0,
-                "risk_reward_entry_zone_high": 4765.0,
+                "signal_side": "",
+                "risk_reward_ready": False,
+                "risk_reward_ratio": 0.0,
+                "risk_reward_stop_price": 0.0,
+                "risk_reward_target_price": 0.0,
+                "risk_reward_entry_zone_low": 0.0,
+                "risk_reward_entry_zone_high": 0.0,
                 "atr14": 18.0,
             }
         ],
@@ -743,6 +845,12 @@ def test_process_snapshot_side_effects_logs_reason_when_rule_signal_not_executed
     result = ui.process_snapshot_side_effects(snapshot, config, run_backtest=False)
 
     assert any("模拟盘规则候选未执行" in line for line in result["log_lines"])
+    assert captured["audit"]["reason_key"] == "grade_gate"
+    assert captured["audit"]["meta"]["block_reason_key"] == "grade_gate"
+    assert captured["audit"]["meta"]["block_secondary_reason_key"] == "rr_not_ready"
+    assert captured["audit"]["meta"]["block_secondary_reason_label"] == "盈亏比未准备好"
+    assert captured["audit"]["meta"]["block_tertiary_reason_key"] == "no_direction"
+    assert "signal_side_missing" in captured["audit"]["meta"]["block_direction_components_json"]
 
 
 def test_on_deep_mining_ready_refreshes_pending_panel_without_event_bus():

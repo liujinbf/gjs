@@ -82,6 +82,9 @@ def build_ai_signal_entry(result: dict, snapshot: dict, push_result: dict | None
     push_result = push_result or {}
     snapshot_time = str((snapshot or {}).get("last_refresh_text", "") or "").strip()
     model = str((result or {}).get("model", "") or "").strip()
+    fallback_reason_key = _normalize_text((result or {}).get("fallback_reason_key", ""))
+    fallback_reason_text = _normalize_text((result or {}).get("fallback_reason_text", ""))
+    fallback_reason_detail = _normalize_text((result or {}).get("fallback_reason_detail", "") or (result or {}).get("fallback_reason", ""))
     signature = f"{model}|{summary_line}|{snapshot_time}"
     return {
         "signal_signature": signature,
@@ -104,6 +107,9 @@ def build_ai_signal_entry(result: dict, snapshot: dict, push_result: dict | None
         "model": model,
         "api_base": str((result or {}).get("api_base", "") or "").strip(),
         "is_fallback": 1 if bool((result or {}).get("is_fallback", False)) else 0,
+        "fallback_reason_key": fallback_reason_key,
+        "fallback_reason_text": fallback_reason_text,
+        "fallback_reason_detail": fallback_reason_detail,
         "push_sent": 1 if bool(list(push_result.get("messages", []) or [])) else 0,
         "summary_line": summary_line,
         "content": content,

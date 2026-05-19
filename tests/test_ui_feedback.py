@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QApplication
 
 from quote_models import SnapshotItem
 from ui_logic_editor import RuleLogicEditorDialog
-from ui_panels import LeftTabPanel, PendingRulesPanel, SimTradingPanel, WatchListTable
+from ui_panels import LeftTabPanel, PendingRulesPanel, SimTradingPanel, WatchListTable, _safe_emit_signal
 
 
 def _build_snapshot(snapshot_time: str = "2026-04-13 10:00:00") -> dict:
@@ -36,6 +36,25 @@ def _build_snapshot(snapshot_time: str = "2026-04-13 10:00:00") -> dict:
             }
         ],
     }
+
+
+def test_safe_emit_signal_ignores_deleted_qt_signal_source():
+    class _DeletedSignal:
+        @staticmethod
+        def emit(_payload):
+            raise RuntimeError("Signal source has been deleted")
+
+    assert _safe_emit_signal(_DeletedSignal(), {"ok": True}) is False
+
+
+def test_safe_emit_signal_reraises_unexpected_runtime_error():
+    class _BrokenSignal:
+        @staticmethod
+        def emit(_payload):
+            raise RuntimeError("unexpected signal failure")
+
+    with pytest.raises(RuntimeError, match="unexpected signal failure"):
+        _safe_emit_signal(_BrokenSignal(), {"ok": True})
 
 
 def test_left_tab_panel_shows_ai_signal_health(monkeypatch):
@@ -560,9 +579,9 @@ def test_pending_rules_panel_reads_governance_pending_rows(monkeypatch):
         assert "30m 轻量反思 3 条" in panel.lbl_learning_digest.text()
         assert "888 模拟盘反思 1 条" in panel.lbl_learning_digest.text()
         assert "策略参数：" in panel.lbl_strategy_param_state.text()
-        assert "回调狙击 1.45R" in panel.lbl_strategy_param_state.text()
-        assert "方向试仓 1.80R" in panel.lbl_strategy_param_state.text()
-        assert "回调狙击：1.45R / 日上限 3 次 / 冷却 10 分钟" in panel.lbl_strategy_param_state.toolTip()
+        assert "回调狙击 1.30R" in panel.lbl_strategy_param_state.text()
+        assert "方向试仓 1.55R" in panel.lbl_strategy_param_state.text()
+        assert "回调狙击：1.30R / 日上限 8 次 / 冷却 6 分钟" in panel.lbl_strategy_param_state.toolTip()
         assert "888 待反思样本 7 条" in panel.lbl_learning_health.text()
         assert "30m 可执行样本 12 条" in panel.lbl_learning_health.text()
         assert "最近24小时深度反思新增 4 条规则" in panel.lbl_learning_health.text()
@@ -1469,6 +1488,13 @@ def test_sim_trading_panel_displays_recent_execution_audit_summary(monkeypatch):
         ],
     )
     monkeypatch.setattr(
+        "ui_panels.summarize_execution_block_diagnostics",
+        lambda hours=48, symbol="", limit=3, **_kwargs: {
+            "top_secondary_labels": [{"reason_key": "rr_not_ready", "reason_label": "盈亏比未准备好", "count": 2}],
+            "top_tertiary_labels": [{"reason_key": "no_direction", "reason_label": "方向基础不足", "count": 1}],
+        },
+    )
+    monkeypatch.setattr(
         "ui_panels.fetch_recent_execution_audits",
         lambda hours=48, symbol="", limit=4, **_kwargs: [
             {
@@ -1532,6 +1558,8 @@ def test_sim_trading_panel_displays_recent_execution_audit_summary(monkeypatch):
 
         assert "最近48小时执行：已尝试 6 次 | 开仓 2 次 | 拒绝 1 次 | 阻塞 3 次" in panel.lbl_entry_audit.text()
         assert "主要阻断：已有持仓 2次 | 保证金不足 1次" in panel.lbl_entry_audit.text()
+        assert "观察细分：盈亏比未准备好 2次" in panel.lbl_entry_audit.text()
+        assert "RR细分：方向基础不足 1次" in panel.lbl_entry_audit.toolTip()
         assert "最近执行明细：" in panel.lbl_entry_trace.text()
         assert "04-22 10:18 已开仓 XAUUSD 做空" in panel.lbl_entry_trace.text()
         assert "04-22 10:12 执行拒绝 XAUUSD 做空 · 保证金不足" in panel.lbl_entry_trace.text()
@@ -1905,9 +1933,9 @@ def test_sim_trading_panel_displays_strategy_learning_summary(monkeypatch):
         assert "方向试仓 1笔 待收盘" in text
         assert "净盈亏 +$9.00" in panel.lbl_strategy_learning.toolTip()
         assert "策略参数：" in panel.lbl_strategy_params.text()
-        assert "回调狙击 1.45R" in panel.lbl_strategy_params.text()
-        assert "方向试仓 1.80R" in panel.lbl_strategy_params.text()
-        assert "回调狙击：1.45R / 日上限 3 次 / 冷却 10 分钟" in panel.lbl_strategy_params.toolTip()
+        assert "回调狙击 1.30R" in panel.lbl_strategy_params.text()
+        assert "方向试仓 1.55R" in panel.lbl_strategy_params.text()
+        assert "回调狙击：1.30R / 日上限 8 次 / 冷却 6 分钟" in panel.lbl_strategy_params.toolTip()
         assert "最近调参：04-23 10:15" in panel.lbl_strategy_apply.text()
         assert "日上限已由 3 调整为 2" in panel.lbl_strategy_apply.text()
         assert "调参看板：04-23 10:15 回调狙击 RR 1.45→1.60" in panel.lbl_strategy_apply_board.text()

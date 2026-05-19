@@ -110,7 +110,7 @@ def test_build_rule_sim_signal_skips_candidate_outside_entry_zone():
     assert signal is None
 
 
-def test_build_rule_sim_signal_allows_sim_only_exploratory_observation_candidate():
+def test_build_rule_sim_signal_blocks_exploratory_observation_when_chasing_upper():
     snapshot = {
         "items": [
             {
@@ -144,17 +144,11 @@ def test_build_rule_sim_signal_allows_sim_only_exploratory_observation_candidate
 
     assert strict_signal is None
     assert "可轻仓试仓级别" in strict_reason
-    assert exploratory_reason == ""
-    assert exploratory_signal is not None
-    assert exploratory_signal["symbol"] == "XAUUSD"
-    assert exploratory_signal["action"] == "long"
-    assert exploratory_signal["price"] == 4801.96
-    assert exploratory_signal["execution_profile"] == "exploratory"
-    assert exploratory_signal["entry_zone_side"] == "upper"
-    assert exploratory_signal["risk_decision"]["block_code"] == "exploratory_ready"
+    assert exploratory_signal is None
+    assert "上沿追价" in exploratory_reason
 
 
-def test_build_rule_sim_signal_allows_setup_early_momentum_in_exploratory_mode():
+def test_build_rule_sim_signal_blocks_setup_early_momentum_chase_in_exploratory_mode():
     snapshot = {
         "items": [
             {
@@ -187,14 +181,11 @@ def test_build_rule_sim_signal_allows_setup_early_momentum_in_exploratory_mode()
 
     assert strict_signal is None
     assert "上沿追价" in strict_reason
-    assert exploratory_reason == ""
-    assert exploratory_signal is not None
-    assert exploratory_signal["symbol"] == "XAUUSD"
-    assert exploratory_signal["execution_profile"] == "exploratory"
-    assert exploratory_signal["action"] == "long"
+    assert exploratory_signal is None
+    assert "上沿追价" in exploratory_reason
 
 
-def test_build_rule_sim_signal_allows_setup_direct_momentum_to_bypass_upper_chase_in_exploratory_mode():
+def test_build_rule_sim_signal_blocks_setup_direct_momentum_upper_chase_in_exploratory_mode():
     snapshot = {
         "items": [
             {
@@ -227,14 +218,11 @@ def test_build_rule_sim_signal_allows_setup_direct_momentum_to_bypass_upper_chas
 
     assert strict_signal is None
     assert "上沿追价" in strict_reason
-    assert exploratory_reason == ""
-    assert exploratory_signal is not None
-    assert exploratory_signal["symbol"] == "XAUUSD"
-    assert exploratory_signal["execution_profile"] == "exploratory"
-    assert exploratory_signal["entry_zone_side"] == "upper"
+    assert exploratory_signal is None
+    assert "上沿追价" in exploratory_reason
 
 
-def test_build_rule_sim_signal_allows_setup_pullback_sniper_in_exploratory_mode():
+def test_build_rule_sim_signal_blocks_setup_pullback_sniper_upper_chase_in_exploratory_mode():
     snapshot = {
         "items": [
             {
@@ -267,11 +255,8 @@ def test_build_rule_sim_signal_allows_setup_pullback_sniper_in_exploratory_mode(
 
     assert strict_signal is None
     assert "上沿追价" in strict_reason
-    assert exploratory_reason == ""
-    assert exploratory_signal is not None
-    assert exploratory_signal["symbol"] == "XAUUSD"
-    assert exploratory_signal["action"] == "long"
-    assert exploratory_signal["execution_profile"] == "exploratory"
+    assert exploratory_signal is None
+    assert "上沿追价" in exploratory_reason
 
 
 def test_build_rule_sim_signal_uses_strategy_specific_rr_threshold(monkeypatch):
@@ -684,3 +669,59 @@ def test_audit_rule_sim_signal_decision_counts_block_reasons():
     labels = {row["reason_key"]: row["reason_label"] for row in audit["blocked_summary"]}
     assert labels["entry_zone_miss"] == "未回到执行区"
     assert labels["direction_unclear"] == "方向不清晰"
+
+
+def test_audit_rule_sim_signal_decision_splits_grade_gate_secondary_reason():
+    audit = audit_rule_sim_signal_decision(
+        {
+            "items": [
+                {
+                    "symbol": "XAUUSD",
+                    "has_live_quote": True,
+                    "trade_grade": "只适合观察",
+                    "trade_grade_source": "structure",
+                    "signal_side": "",
+                    "risk_reward_ready": False,
+                    "risk_reward_ratio": 0.0,
+                    "latest_price": 4795.0,
+                    "bid": 4794.9,
+                    "ask": 4795.1,
+                }
+            ]
+        }
+    )
+
+    row = audit["rows"][0]
+    assert row["reason_key"] == "grade_gate"
+    assert row["secondary_reason_key"] == "rr_not_ready"
+    assert row["secondary_reason_label"] == "盈亏比未准备好"
+    assert row["tertiary_reason_key"] == "no_direction"
+    assert row["tertiary_reason_label"] == "方向基础不足"
+    assert audit["secondary_blocked_counts"]["rr_not_ready"] == 1
+    assert audit["secondary_blocked_summary"][0]["reason_label"] == "盈亏比未准备好"
+    assert audit["tertiary_blocked_counts"]["no_direction"] == 1
+    assert any(item["reason_key"] == "signal_side_missing" for item in row["direction_components"])
+
+
+def test_build_rule_sim_signal_decision_includes_grade_gate_detail():
+    signal, reason = build_rule_sim_signal_decision(
+        {
+            "items": [
+                {
+                    "symbol": "XAUUSD",
+                    "has_live_quote": True,
+                    "trade_grade": "只适合观察",
+                    "trade_grade_source": "structure",
+                    "signal_side": "",
+                    "risk_reward_ready": False,
+                    "latest_price": 4795.0,
+                    "bid": 4794.9,
+                    "ask": 4795.1,
+                }
+            ]
+        }
+    )
+
+    assert signal is None
+    assert "未触发任何高级智能规则" in reason
+    assert "细分：盈亏比未准备好" in reason

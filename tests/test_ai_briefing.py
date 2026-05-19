@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from ai_briefing import _post_json_with_headers, build_snapshot_prompt, request_ai_brief
+from ai_briefing import _post_json_with_headers, build_snapshot_prompt, classify_ai_failure_reason, request_ai_brief
 from app_config import MetalMonitorConfig
 from external_feed_models import MacroDataItem
 from prompt_templates import build_metal_advisor_prompt, build_metal_batch_prompt
@@ -272,6 +272,27 @@ def test_request_ai_brief_requires_api_key():
         assert "AI_API_KEY" in str(exc)
     else:
         raise AssertionError("未配置 AI_API_KEY 时应抛出异常")
+
+
+def test_classify_ai_failure_reason_detects_insufficient_balance():
+    reason = classify_ai_failure_reason('HTTP 402: {"error":{"message":"Insufficient Balance"}}')
+
+    assert reason["fallback_reason_key"] == "insufficient_balance"
+    assert reason["fallback_reason_text"] == "AI 账户余额不足"
+
+
+def test_request_ai_brief_fallback_exposes_reason(monkeypatch):
+    def fake_post(url, payload, api_key, timeout=30):
+        raise RuntimeError('HTTP 402: {"error":{"message":"Insufficient Balance"}}')
+
+    monkeypatch.setattr("ai_briefing._post_json", fake_post)
+
+    result = request_ai_brief({"summary_text": "测试快照", "items": [{"symbol": "XAUUSD"}]}, _build_config())
+
+    assert result["is_fallback"] is True
+    assert result["fallback_reason_key"] == "insufficient_balance"
+    assert result["fallback_reason_text"] == "AI 账户余额不足"
+    assert "AI不可用：AI 账户余额不足" in result["content"]
 
 
 def test_request_ai_brief_parses_response(monkeypatch):

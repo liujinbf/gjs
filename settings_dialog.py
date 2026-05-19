@@ -1,6 +1,7 @@
 import threading
+import json
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -12,6 +13,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTabWidget,
     QTextEdit,
@@ -29,20 +32,33 @@ def _is_anthropic_base_url(base_url: str) -> bool:
     return "anthropic.com" in str(base_url or "").strip().lower()
 
 
-def _build_ai_test_request(base_url: str, api_key: str) -> tuple[str, dict[str, str]]:
+def _build_ai_test_request(base_url: str, model: str, api_key: str) -> tuple[str, dict[str, str], dict]:
     clean_base_url = str(base_url or "").strip().rstrip("/")
+    clean_model = str(model or "").strip() or "deepseek-v4-flash"
     if _is_anthropic_base_url(clean_base_url):
         return (
-            f"{clean_base_url}/models",
+            f"{clean_base_url}/messages",
             {
+                "Content-Type": "application/json; charset=utf-8",
                 "x-api-key": str(api_key or "").strip(),
                 "anthropic-version": "2023-06-01",
             },
+            {
+                "model": clean_model,
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "ping"}],
+            },
         )
     return (
-        f"{clean_base_url}/models",
+        f"{clean_base_url}/chat/completions",
         {
+            "Content-Type": "application/json; charset=utf-8",
             "Authorization": f"Bearer {str(api_key or '').strip()}",
+        },
+        {
+            "model": clean_model,
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "ping"}],
         },
     )
 
@@ -58,10 +74,14 @@ class MetalSettingsDialog(QDialog):
         self.notification_test_result_ready.connect(self._on_notification_test_result)
         self.setWindowTitle("贵金属监控设置")
         self.setMinimumWidth(560)
+        self.setMinimumHeight(520)
+        self.resize(620, 720)
         self._build_ui()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
         tip = QLabel("当前项目只服务于贵金属 / 宏观品种监控。MT5、推送和 AI 关键配置会优先沿用老项目，后续只需要在这里维护。")
         tip.setWordWrap(True)
         tip.setStyleSheet("color:#475569;font-size:12px;")
@@ -74,6 +94,7 @@ class MetalSettingsDialog(QDialog):
 
         self.tabs = QTabWidget()
         self.tabs.setStyleSheet("QTabWidget::pane { border: 1px solid #e2e8f0; border-radius: 8px; background: white; }")
+        self.tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         
         # --- Tab 1: 基础与MT5设置 ---
         tab_basic = QWidget()
@@ -114,7 +135,7 @@ class MetalSettingsDialog(QDialog):
         self.entry_mt5_server = QLineEdit(self._config.mt5_server)
         form_basic.addRow("MT5 服务器：", self.entry_mt5_server)
 
-        self.tabs.addTab(tab_basic, "基础与MT5设置")
+        self.tabs.addTab(self._wrap_scroll_tab(tab_basic), "基础与MT5设置")
 
         # --- Tab 2: 事件与提醒 ---
         tab_event = QWidget()
@@ -166,7 +187,7 @@ class MetalSettingsDialog(QDialog):
         self.spin_event_feed_refresh.setSuffix(" 分钟")
         form_event.addRow("事件源缓存：", self.spin_event_feed_refresh)
 
-        self.tabs.addTab(tab_event, "事件与提醒")
+        self.tabs.addTab(self._wrap_scroll_tab(tab_event), "事件与提醒")
 
         # --- Tab 3: AI与推送 ---
         tab_ai = QWidget()
@@ -229,7 +250,7 @@ class MetalSettingsDialog(QDialog):
         self.spin_notify_cooldown.setSuffix(" 分钟")
         form_ai.addRow("推送冷却：", self.spin_notify_cooldown)
 
-        self.tabs.addTab(tab_ai, "AI与推送")
+        self.tabs.addTab(self._wrap_scroll_tab(tab_ai), "AI与推送")
 
         # --- Tab 4: 交易与风控 ---
         tab_trading = QWidget()
@@ -284,6 +305,20 @@ class MetalSettingsDialog(QDialog):
         self.spin_sim_no_tp2_partial_close_ratio.setSuffix(" 仓")
         form_trading.addRow("无 TP2 首次减仓：", self.spin_sim_no_tp2_partial_close_ratio)
 
+        self.spin_sim_scalp_exit_r = QDoubleSpinBox()
+        self.spin_sim_scalp_exit_r.setRange(0.00, 5.00)
+        self.spin_sim_scalp_exit_r.setDecimals(2)
+        self.spin_sim_scalp_exit_r.setSingleStep(0.05)
+        self.spin_sim_scalp_exit_r.setValue(float(getattr(self._config, "sim_scalp_exit_r", 0.55) or 0.0))
+        self.spin_sim_scalp_exit_r.setSuffix(" R（0=关闭）")
+        form_trading.addRow("短线落袋线：", self.spin_sim_scalp_exit_r)
+
+        self.spin_sim_scalp_min_minutes = QSpinBox()
+        self.spin_sim_scalp_min_minutes.setRange(0, 240)
+        self.spin_sim_scalp_min_minutes.setValue(int(getattr(self._config, "sim_scalp_min_minutes", 0) or 0))
+        self.spin_sim_scalp_min_minutes.setSuffix(" 分钟")
+        form_trading.addRow("落袋最短持仓：", self.spin_sim_scalp_min_minutes)
+
         self.spin_sim_min_rr = QDoubleSpinBox()
         self.spin_sim_min_rr.setRange(0.50, 10.00)
         self.spin_sim_min_rr.setDecimals(2)
@@ -293,13 +328,13 @@ class MetalSettingsDialog(QDialog):
         form_trading.addRow("自动试仓标准 RR：", self.spin_sim_min_rr)
 
         strategy_rr = dict(getattr(self._config, "sim_strategy_min_rr", {}) or {})
-        self.spin_sim_rr_early_momentum = self._build_rr_spin(strategy_rr.get("early_momentum", 1.30))
+        self.spin_sim_rr_early_momentum = self._build_rr_spin(strategy_rr.get("early_momentum", 1.15))
         form_trading.addRow("早期动能 RR：", self.spin_sim_rr_early_momentum)
-        self.spin_sim_rr_direct_momentum = self._build_rr_spin(strategy_rr.get("direct_momentum", 1.40))
+        self.spin_sim_rr_direct_momentum = self._build_rr_spin(strategy_rr.get("direct_momentum", 1.25))
         form_trading.addRow("直线动能 RR：", self.spin_sim_rr_direct_momentum)
-        self.spin_sim_rr_pullback_sniper = self._build_rr_spin(strategy_rr.get("pullback_sniper_probe", 1.45))
+        self.spin_sim_rr_pullback_sniper = self._build_rr_spin(strategy_rr.get("pullback_sniper_probe", 1.30))
         form_trading.addRow("回调狙击 RR：", self.spin_sim_rr_pullback_sniper)
-        self.spin_sim_rr_directional_probe = self._build_rr_spin(strategy_rr.get("directional_probe", 1.80))
+        self.spin_sim_rr_directional_probe = self._build_rr_spin(strategy_rr.get("directional_probe", 1.55))
         form_trading.addRow("方向试仓 RR：", self.spin_sim_rr_directional_probe)
 
         self.spin_sim_relaxed_rr = QDoubleSpinBox()
@@ -323,44 +358,45 @@ class MetalSettingsDialog(QDialog):
         self.spin_sim_exploratory_daily_limit = QSpinBox()
         self.spin_sim_exploratory_daily_limit.setRange(0, 50)
         self.spin_sim_exploratory_daily_limit.setValue(
-            int(getattr(self._config, "sim_exploratory_daily_limit", 3) or 0)
+            int(getattr(self._config, "sim_exploratory_daily_limit", 12) or 0)
         )
         self.spin_sim_exploratory_daily_limit.setSuffix(" 次/日")
         form_trading.addRow("探索试仓上限：", self.spin_sim_exploratory_daily_limit)
 
         strategy_daily_limit = dict(getattr(self._config, "sim_strategy_daily_limit", {}) or {})
-        self.spin_sim_limit_early_momentum = self._build_limit_spin(strategy_daily_limit.get("early_momentum", 3), suffix=" 次/日")
+        self.spin_sim_limit_early_momentum = self._build_limit_spin(strategy_daily_limit.get("early_momentum", 10), suffix=" 次/日")
         form_trading.addRow("早期动能日上限：", self.spin_sim_limit_early_momentum)
-        self.spin_sim_limit_direct_momentum = self._build_limit_spin(strategy_daily_limit.get("direct_momentum", 3), suffix=" 次/日")
+        self.spin_sim_limit_direct_momentum = self._build_limit_spin(strategy_daily_limit.get("direct_momentum", 8), suffix=" 次/日")
         form_trading.addRow("直线动能日上限：", self.spin_sim_limit_direct_momentum)
-        self.spin_sim_limit_pullback_sniper = self._build_limit_spin(strategy_daily_limit.get("pullback_sniper_probe", 3), suffix=" 次/日")
+        self.spin_sim_limit_pullback_sniper = self._build_limit_spin(strategy_daily_limit.get("pullback_sniper_probe", 8), suffix=" 次/日")
         form_trading.addRow("回调狙击日上限：", self.spin_sim_limit_pullback_sniper)
-        self.spin_sim_limit_directional_probe = self._build_limit_spin(strategy_daily_limit.get("directional_probe", 3), suffix=" 次/日")
+        self.spin_sim_limit_directional_probe = self._build_limit_spin(strategy_daily_limit.get("directional_probe", 6), suffix=" 次/日")
         form_trading.addRow("方向试仓日上限：", self.spin_sim_limit_directional_probe)
 
         self.spin_sim_exploratory_cooldown_min = QSpinBox()
         self.spin_sim_exploratory_cooldown_min.setRange(0, 240)
         self.spin_sim_exploratory_cooldown_min.setValue(
-            int(getattr(self._config, "sim_exploratory_cooldown_min", 10) or 0)
+            int(getattr(self._config, "sim_exploratory_cooldown_min", 5) or 0)
         )
         self.spin_sim_exploratory_cooldown_min.setSuffix(" 分钟")
         form_trading.addRow("探索同向冷却：", self.spin_sim_exploratory_cooldown_min)
 
         strategy_cooldown = dict(getattr(self._config, "sim_strategy_cooldown_min", {}) or {})
-        self.spin_sim_cooldown_early_momentum = self._build_limit_spin(strategy_cooldown.get("early_momentum", 10), maximum=240, suffix=" 分钟")
+        self.spin_sim_cooldown_early_momentum = self._build_limit_spin(strategy_cooldown.get("early_momentum", 3), maximum=240, suffix=" 分钟")
         form_trading.addRow("早期动能冷却：", self.spin_sim_cooldown_early_momentum)
-        self.spin_sim_cooldown_direct_momentum = self._build_limit_spin(strategy_cooldown.get("direct_momentum", 10), maximum=240, suffix=" 分钟")
+        self.spin_sim_cooldown_direct_momentum = self._build_limit_spin(strategy_cooldown.get("direct_momentum", 4), maximum=240, suffix=" 分钟")
         form_trading.addRow("直线动能冷却：", self.spin_sim_cooldown_direct_momentum)
-        self.spin_sim_cooldown_pullback_sniper = self._build_limit_spin(strategy_cooldown.get("pullback_sniper_probe", 10), maximum=240, suffix=" 分钟")
+        self.spin_sim_cooldown_pullback_sniper = self._build_limit_spin(strategy_cooldown.get("pullback_sniper_probe", 6), maximum=240, suffix=" 分钟")
         form_trading.addRow("回调狙击冷却：", self.spin_sim_cooldown_pullback_sniper)
-        self.spin_sim_cooldown_directional_probe = self._build_limit_spin(strategy_cooldown.get("directional_probe", 10), maximum=240, suffix=" 分钟")
+        self.spin_sim_cooldown_directional_probe = self._build_limit_spin(strategy_cooldown.get("directional_probe", 8), maximum=240, suffix=" 分钟")
         form_trading.addRow("方向试仓冷却：", self.spin_sim_cooldown_directional_probe)
 
-        self.tabs.addTab(tab_trading, "交易与风控")
+        self.tabs.addTab(self._wrap_scroll_tab(tab_trading), "交易与风控")
 
-        layout.addWidget(self.tabs)
+        layout.addWidget(self.tabs, 1)
 
         btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 4, 0, 0)
         self.btn_test_notification = QPushButton("测试消息推送")
         self.btn_test_notification.clicked.connect(self._test_notification)
         btn_row.addWidget(self.btn_test_notification)
@@ -378,6 +414,14 @@ class MetalSettingsDialog(QDialog):
         self._sync_ai_push_controls()
         self._sync_event_auto_controls()
         self._refresh_notify_status()
+
+    def _wrap_scroll_tab(self, widget: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(widget)
+        return scroll
 
     def _build_rr_spin(self, value: float) -> QDoubleSpinBox:
         spin = QDoubleSpinBox()
@@ -440,7 +484,7 @@ class MetalSettingsDialog(QDialog):
             notify_cooldown_min=int(self.spin_notify_cooldown.value()),
             ai_api_key=self.entry_ai_key.text().strip(),
             ai_api_base=self.entry_ai_base.text().strip() or "https://api.siliconflow.cn/v1",
-            ai_model=self.entry_ai_model.text().strip() or "deepseek-ai/DeepSeek-R1",
+            ai_model=self.entry_ai_model.text().strip() or "deepseek-v4-flash",
             ai_push_enabled=bool(self.chk_ai_push_enabled.isChecked()),
             ai_push_summary_only=bool(self.chk_ai_push_summary_only.isChecked()),
             ai_auto_interval_min=max(0, int(self.spin_ai_auto_interval.value())),
@@ -475,6 +519,16 @@ class MetalSettingsDialog(QDialog):
                 float(getattr(self, "spin_sim_no_tp2_partial_close_ratio", None).value())
                 if getattr(self, "spin_sim_no_tp2_partial_close_ratio", None)
                 else 0.5
+            ),
+            sim_scalp_exit_r=(
+                float(getattr(self, "spin_sim_scalp_exit_r", None).value())
+                if getattr(self, "spin_sim_scalp_exit_r", None)
+                else 0.55
+            ),
+            sim_scalp_min_minutes=(
+                int(getattr(self, "spin_sim_scalp_min_minutes", None).value())
+                if getattr(self, "spin_sim_scalp_min_minutes", None)
+                else 0
             ),
             sim_min_rr=float(getattr(self, "spin_sim_min_rr", None).value()) if getattr(self, "spin_sim_min_rr", None) else 1.6,
             sim_strategy_min_rr={
@@ -584,7 +638,7 @@ class MetalSettingsDialog(QDialog):
 
     def _test_ai_key(self):
         base_url = self.entry_ai_base.text().strip() or "https://api.siliconflow.cn/v1"
-        model = self.entry_ai_model.text().strip() or "deepseek-ai/DeepSeek-R1"
+        model = self.entry_ai_model.text().strip() or "deepseek-v4-flash"
         api_key = self.entry_ai_key.text().strip()
         
         if not api_key:
@@ -599,13 +653,13 @@ class MetalSettingsDialog(QDialog):
         threading.Thread(target=worker, daemon=True, name="settings-ai-key-test").start()
 
     def _run_ai_key_test_worker(self, base_url: str, model: str, api_key: str) -> None:
-        import json
         from urllib import request as url_request
         from urllib.error import HTTPError, URLError
 
         try:
-            url, headers = _build_ai_test_request(base_url, api_key)
-            req = url_request.Request(url, method="GET")
+            url, headers, body = _build_ai_test_request(base_url, model, api_key)
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            req = url_request.Request(url, data=data, method="POST")
             for key, value in headers.items():
                 req.add_header(key, value)
              
@@ -621,11 +675,13 @@ class MetalSettingsDialog(QDialog):
         except HTTPError as e:
             if e.code == 401:
                 message = "API 密钥无效或已过期 (HTTP 401)。\n请检查您输入的字母是否正确或是否带有空格。"
+            elif e.code == 402:
+                message = "AI 账户余额不足 (HTTP 402)。\n请先到平台控制台充值或更换有额度的 API Key。"
             elif e.code == 404:
-                # Some providers don't have a /models endpoint, fallback test
-                message = "接口地址可能不正确 (HTTP 404)，找不到模型列表端点。"
+                message = "接口地址或模型名称可能不正确 (HTTP 404)。\n请检查 Base URL 和模型名。"
             else:
-                message = f"接口返回错误代码：{e.code}\n{e.reason}"
+                detail = e.read().decode("utf-8", errors="ignore")
+                message = f"接口返回错误代码：{e.code}\n{detail or e.reason}"
             self.ai_test_result_ready.emit({"ok": False, "title": "测试失败", "message": message})
         except URLError as e:
             self.ai_test_result_ready.emit(
@@ -694,7 +750,7 @@ class MetalSettingsDialog(QDialog):
             f"自动事件：{'已开启' if bool(runtime_config.event_auto_mode_enabled) else '未开启'} | "
             f"外部事件源：{'已开启' if bool(getattr(runtime_config, 'event_feed_enabled', False)) else '未开启'} | "
             f"AI 配置：{'已配置' if bool((runtime_config.ai_api_key or '').strip()) else '未配置'} | "
-            f"{runtime_config.ai_model or 'deepseek-ai/DeepSeek-R1'} | "
+            f"{runtime_config.ai_model or 'deepseek-v4-flash'} | "
             f"AI推送：{'已开启' if bool(runtime_config.ai_push_enabled) else '未开启'} | "
             f"AI自动间隔：{'每 ' + str(runtime_config.ai_auto_interval_min) + ' 分钟' if int(runtime_config.ai_auto_interval_min) > 0 else '手动触发'}"
         )

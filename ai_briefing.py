@@ -29,6 +29,20 @@ AI_RESPONSE_AUDIT_FILE = RUNTIME_DIR / "ai_response_audit.jsonl"
 MAX_AI_RESPONSE_AUDIT_LINES = 300
 MAX_AI_RESPONSE_TEXT_CHARS = 8000
 
+AI_FAILURE_REASON_TEXT = {
+    "missing_key": "AI 密钥未配置",
+    "insufficient_balance": "AI 账户余额不足",
+    "unauthorized": "AI 密钥无效或已过期",
+    "forbidden": "AI 密钥权限不足",
+    "rate_limited": "AI 请求频率超限",
+    "model_not_found": "AI 模型或接口地址不存在",
+    "timeout": "AI 请求超时",
+    "parse_error": "AI 响应解析失败",
+    "empty_response": "AI 返回内容为空",
+    "network_error": "AI 网络连接失败",
+    "unknown": "AI 请求失败",
+}
+
 
 def build_snapshot_prompt(snapshot: dict, rulebook: dict | None = None) -> str:
     # N-003 修复：操作副本而非原始 snapshot，避免污染 self._last_snapshot
@@ -51,6 +65,56 @@ def build_snapshot_prompt(snapshot: dict, rulebook: dict | None = None) -> str:
         or build_rulebook(current_regime_tag=str(snapshot_copy.get("regime_tag", "") or "").strip())
     )
     return build_metal_brief_prompt(snapshot_copy, rulebook=effective_rulebook)
+
+
+def classify_ai_failure_reason(error_text: object) -> dict:
+    """把底层异常转成用户可理解、可统计的 AI 失败原因。"""
+    raw = str(error_text or "").strip()
+    lowered = raw.lower()
+    reason_key = "unknown"
+    if not raw:
+        reason_key = "unknown"
+    elif "api_key" in lowered or "api key" in lowered or "密钥未配置" in raw:
+        reason_key = "missing_key"
+    elif "insufficient balance" in lowered or "http 402" in lowered or "余额不足" in raw:
+        reason_key = "insufficient_balance"
+    elif "http 401" in lowered or "unauthorized" in lowered or "invalid api key" in lowered:
+        reason_key = "unauthorized"
+    elif "http 403" in lowered or "forbidden" in lowered or "permission" in lowered:
+        reason_key = "forbidden"
+    elif "http 429" in lowered or "rate limit" in lowered or "too many requests" in lowered:
+        reason_key = "rate_limited"
+    elif "http 404" in lowered or "model_not_found" in lowered or "model not found" in lowered:
+        reason_key = "model_not_found"
+    elif "timed out" in lowered or "timeout" in lowered or "超时" in raw:
+        reason_key = "timeout"
+    elif "无法解析" in raw or "未返回合法 json" in raw or ("json" in lowered and "parse" in lowered):
+        reason_key = "parse_error"
+    elif "模型返回为空" in raw or ("empty" in lowered and "response" in lowered):
+        reason_key = "empty_response"
+    elif "urlopen error" in lowered or "connection" in lowered or "network" in lowered:
+        reason_key = "network_error"
+    return {
+        "fallback_reason_key": reason_key,
+        "fallback_reason_text": AI_FAILURE_REASON_TEXT.get(reason_key, AI_FAILURE_REASON_TEXT["unknown"]),
+        "fallback_reason_detail": raw,
+    }
+
+
+def _apply_fallback_reason(result: dict, reason: object) -> dict:
+    payload = dict(result or {})
+    reason_payload = classify_ai_failure_reason(reason)
+    payload.update(reason_payload)
+    detail = str(reason_payload.get("fallback_reason_detail", "") or "").strip()
+    text = str(reason_payload.get("fallback_reason_text", "") or "").strip()
+    payload["fallback_reason"] = detail or text
+    content = str(payload.get("content", "") or "")
+    if content and "AI 离线" in content:
+        content = content.replace("AI 离线", f"AI不可用：{text}", 1)
+    if content and "AI 研判当前不可用" in content:
+        content = content.replace("AI 研判当前不可用", f"AI 研判当前不可用（{text}）", 1)
+    payload["content"] = content
+    return payload
 
 
 def _post_json(url: str, payload: dict, api_key: str, timeout: int = 90) -> dict:
@@ -464,8 +528,7 @@ def request_ai_brief(
         if allow_fallback:
             logger.warning("AI API Key 未配置，启用规则引擎降级模式")
             result = _rule_engine_fallback(snapshot)
-            result["fallback_reason"] = "AI API Key 未配置"
-            return result
+            return _apply_fallback_reason(result, "AI API Key 未配置")
         raise RuntimeError("当前未配置 AI_API_KEY，无法执行 AI 研判。")
 
     api_base = str(config.ai_api_base or "https://api.siliconflow.cn/v1").strip().rstrip("/")
@@ -515,8 +578,7 @@ def request_ai_brief(
             reason = str(exc)
             logger.warning(f"AI 研判失败，启用规则引擎降级模式：{reason}")
             result = _rule_engine_fallback(snapshot)
-            result["fallback_reason"] = reason
-            return result
+            return _apply_fallback_reason(result, reason)
         raise
 
 
@@ -541,4 +603,5 @@ def _rule_engine_fallback(snapshot: dict) -> dict:
             "rulebook_summary_text": "",
             "is_fallback": True,
             "fallback_reason": str(exc),
+            **classify_ai_failure_reason(str(exc)),
         }

@@ -7,7 +7,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from knowledge_runtime import backfill_snapshot_outcomes, record_snapshot
+from knowledge_ai_signals import record_ai_signal
 from learning_closure import (
+    backfill_ai_signal_effect_outcomes,
     backfill_alert_effect_outcomes,
     backfill_missed_opportunity_samples,
     summarize_alert_effect_outcomes,
@@ -109,6 +111,80 @@ def test_backfill_alert_effect_outcomes_ignores_non_trade_alerts(tmp_path):
     )
 
     result = backfill_alert_effect_outcomes(history_file=history_file, db_path=db_path, horizon_min=30)
+
+    assert result["checked_count"] == 0
+    assert result["inserted_count"] == 0
+
+
+def test_backfill_ai_signal_effect_outcomes_links_pushed_ai_signal_to_future_move(tmp_path):
+    db_path = tmp_path / "knowledge.db"
+    snapshots = [
+        _snapshot("2026-04-24 10:00:00", 100.00),
+        _snapshot("2026-04-24 10:10:00", 100.30),
+        _snapshot("2026-04-24 10:30:00", 100.85),
+    ]
+    for snapshot in snapshots:
+        record_snapshot(snapshot, db_path=db_path)
+
+    record_ai_signal(
+        {
+            "content": "当前结论：XAUUSD 偏多，可轻仓试多。",
+            "signal_meta": {"symbol": "XAUUSD", "action": "long", "price": 100.0, "sl": 99.6, "tp": 101.2},
+            "signal_schema_version": "signal-meta-v1",
+            "signal_meta_valid": True,
+            "signal_meta_reason": "做多信号结构有效",
+            "model": "deepseek-v4-flash",
+            "api_base": "https://api.deepseek.com/v1",
+        },
+        snapshots[0],
+        push_result={"messages": ["AI 研判已投递到 1 个渠道"]},
+        db_path=db_path,
+    )
+
+    result = backfill_ai_signal_effect_outcomes(
+        db_path=db_path,
+        horizon_min=30,
+        now=datetime(2026, 4, 24, 10, 40, 0),
+    )
+    summary = summarize_alert_effect_outcomes(db_path=db_path, horizon_min=30)
+
+    assert result["checked_count"] == 1
+    assert result["inserted_count"] == 1
+    assert summary["total_count"] == 1
+    assert summary["success_count"] == 1
+    assert summary["reached_1r_count"] == 1
+    assert summary["recent_rows"][0]["title"] == "XAUUSD AI动作提醒：做多"
+
+
+def test_backfill_ai_signal_effect_outcomes_ignores_unpushed_signal_by_default(tmp_path):
+    db_path = tmp_path / "knowledge.db"
+    snapshots = [
+        _snapshot("2026-04-24 11:00:00", 100.00),
+        _snapshot("2026-04-24 11:30:00", 100.85),
+    ]
+    for snapshot in snapshots:
+        record_snapshot(snapshot, db_path=db_path)
+
+    record_ai_signal(
+        {
+            "content": "当前结论：XAUUSD 偏多。",
+            "signal_meta": {"symbol": "XAUUSD", "action": "long", "price": 100.0, "sl": 99.6, "tp": 101.2},
+            "signal_schema_version": "signal-meta-v1",
+            "signal_meta_valid": True,
+            "signal_meta_reason": "做多信号结构有效",
+            "model": "deepseek-v4-flash",
+            "api_base": "https://api.deepseek.com/v1",
+        },
+        snapshots[0],
+        push_result={"messages": []},
+        db_path=db_path,
+    )
+
+    result = backfill_ai_signal_effect_outcomes(
+        db_path=db_path,
+        horizon_min=30,
+        now=datetime(2026, 4, 24, 11, 40, 0),
+    )
 
     assert result["checked_count"] == 0
     assert result["inserted_count"] == 0

@@ -616,8 +616,27 @@ def send_ai_brief_notification(
         return {"sent_count": 0, "messages": [], "errors": [], "skipped_reason": "ai_push_disabled"}
 
     normalized_signal_meta = normalize_signal_meta((result or {}).get("signal_meta"))
-    if str(normalized_signal_meta.get("action", "neutral") or "neutral").strip().lower() == "neutral":
+    action = str(normalized_signal_meta.get("action", "neutral") or "neutral").strip().lower()
+    if action == "neutral":
         return {"sent_count": 0, "messages": [], "errors": [], "skipped_reason": "ai_neutral_suppressed"}
+
+    active_symbols = {
+        str(symbol or "").strip().upper()
+        for symbol in list((snapshot or {}).get("active_position_symbols", []) or [])
+        if str(symbol or "").strip()
+    }
+    signal_symbol = str(normalized_signal_meta.get("symbol", "") or "").strip().upper()
+    if action in {"long", "short"} and signal_symbol and signal_symbol in active_symbols:
+        return {"sent_count": 0, "messages": [], "errors": [], "skipped_reason": "ai_existing_position_suppressed"}
+
+    entry = _build_ai_brief_entry(result, snapshot, config)
+    if entry.get("ai_rule_eligible") is not True:
+        return {
+            "sent_count": 0,
+            "messages": [],
+            "errors": [],
+            "skipped_reason": "ai_not_actionable_suppressed",
+        }
 
     # ── 机会快速通道 vs 普通冷却 ──────────────────────────────────────
     auto_interval_min = int(getattr(config, "ai_auto_interval_min", 60) or 60)
@@ -644,7 +663,6 @@ def send_ai_brief_notification(
             "skipped_reason": f"{cooldown_label}_cooldown（冷却中，还需 {remaining} 分钟）",
         }
 
-    entry = _build_ai_brief_entry(result, snapshot, config)
     worker = get_notification_worker()
     enqueued_count = 0
 
