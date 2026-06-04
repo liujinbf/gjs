@@ -64,9 +64,47 @@ def test_runtime_config_has_notify_defaults():
     assert hasattr(config, "live_order_precheck_only")
     assert hasattr(config, "live_max_open_positions")
     assert hasattr(config, "live_max_orders_per_day")
+    assert hasattr(config, "live_scalp_max_risk_pct")
     assert isinstance(config.live_order_precheck_only, bool)
     assert int(config.live_max_open_positions) >= 1
     assert int(config.live_max_orders_per_day) >= 1
+    assert 0 < float(config.live_scalp_max_risk_pct) <= 0.02
+    assert hasattr(config, "tick_shock_guard_enabled")
+    assert hasattr(config, "tick_shock_window_sec")
+    assert hasattr(config, "tick_shock_cooldown_sec")
+    assert hasattr(config, "tick_shock_thresholds")
+    assert float(config.tick_shock_thresholds["XAU"]) > 0
+
+
+def test_runtime_config_supports_tick_shock_settings(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "TICK_SHOCK_GUARD_ENABLED='1'",
+                "TICK_SHOCK_WINDOW_SEC='4'",
+                "TICK_SHOCK_COOLDOWN_SEC='45'",
+                'TICK_SHOCK_THRESHOLDS_JSON=\'{"XAU":0.7,"XAG":0.12}\'',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(app_config, "ENV_FILE", env_file)
+    for key in (
+        "TICK_SHOCK_GUARD_ENABLED",
+        "TICK_SHOCK_WINDOW_SEC",
+        "TICK_SHOCK_COOLDOWN_SEC",
+        "TICK_SHOCK_THRESHOLDS_JSON",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    config = app_config.get_runtime_config()
+
+    assert config.tick_shock_guard_enabled is True
+    assert config.tick_shock_window_sec == 4.0
+    assert config.tick_shock_cooldown_sec == 45.0
+    assert config.tick_shock_thresholds["XAU"] == 0.7
+    assert config.tick_shock_thresholds["XAG"] == 0.12
 
 
 def test_get_quote_risk_thresholds_supports_env_override(monkeypatch):
@@ -423,6 +461,116 @@ def test_runtime_config_supports_strategy_exploratory_controls_json(tmp_path, mo
     content = env_file.read_text(encoding="utf-8")
     assert "SIM_STRATEGY_DAILY_LIMIT_JSON=" in content
     assert "SIM_STRATEGY_COOLDOWN_JSON=" in content
+
+
+def test_runtime_config_supports_disabled_strategy_json(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(app_config, "ENV_FILE", env_file)
+    monkeypatch.delenv("SIM_DISABLED_STRATEGIES_JSON", raising=False)
+
+    app_config.save_runtime_config(
+        app_config.MetalMonitorConfig(
+            symbols=["XAUUSD"],
+            refresh_interval_sec=30,
+            event_risk_mode="normal",
+            mt5_path="",
+            mt5_login="",
+            mt5_password="",
+            mt5_server="",
+            dingtalk_webhook="",
+            pushplus_token="",
+            notify_cooldown_min=30,
+            ai_api_key="",
+            ai_api_base="https://api.siliconflow.cn/v1",
+            ai_model="deepseek-ai/DeepSeek-R1",
+            ai_push_enabled=False,
+            ai_push_summary_only=True,
+            sim_disabled_strategies=["direct_momentum", "event", "direct_momentum"],
+        )
+    )
+
+    monkeypatch.setenv("SIM_DISABLED_STRATEGIES_JSON", '["direct_momentum", "event"]')
+    config = app_config.get_runtime_config()
+
+    assert config.sim_disabled_strategies == ["direct_momentum", "event"]
+    content = env_file.read_text(encoding="utf-8")
+    assert "SIM_DISABLED_STRATEGIES_JSON=" in content
+
+
+def test_runtime_config_supports_disabled_strategy_action_json(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(app_config, "ENV_FILE", env_file)
+    monkeypatch.delenv("SIM_DISABLED_STRATEGY_ACTIONS_JSON", raising=False)
+
+    app_config.save_runtime_config(
+        app_config.MetalMonitorConfig(
+            symbols=["XAUUSD"],
+            refresh_interval_sec=30,
+            event_risk_mode="normal",
+            mt5_path="",
+            mt5_login="",
+            mt5_password="",
+            mt5_server="",
+            dingtalk_webhook="",
+            pushplus_token="",
+            notify_cooldown_min=30,
+            ai_api_key="",
+            ai_api_base="https://api.siliconflow.cn/v1",
+            ai_model="deepseek-ai/DeepSeek-R1",
+            ai_push_enabled=False,
+            ai_push_summary_only=True,
+            sim_disabled_strategy_actions=["structure:long", "structure/long", "event:short"],
+        )
+    )
+
+    monkeypatch.setenv("SIM_DISABLED_STRATEGY_ACTIONS_JSON", '["structure:long", "event:short"]')
+    config = app_config.get_runtime_config()
+
+    assert config.sim_disabled_strategy_actions == ["structure:long", "event:short"]
+    content = env_file.read_text(encoding="utf-8")
+    assert "SIM_DISABLED_STRATEGY_ACTIONS_JSON=" in content
+
+
+def test_runtime_config_supports_strategic_gold_plan(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(app_config, "ENV_FILE", env_file)
+    monkeypatch.delenv("STRATEGIC_GOLD_PLAN_LEVELS_JSON", raising=False)
+
+    app_config.save_runtime_config(
+        app_config.MetalMonitorConfig(
+            symbols=["XAUUSD"],
+            refresh_interval_sec=30,
+            event_risk_mode="normal",
+            mt5_path="",
+            mt5_login="",
+            mt5_password="",
+            mt5_server="",
+            dingtalk_webhook="",
+            pushplus_token="",
+            notify_cooldown_min=30,
+            ai_api_key="",
+            ai_api_base="https://api.siliconflow.cn/v1",
+            ai_model="deepseek-ai/DeepSeek-R1",
+            ai_push_enabled=False,
+            ai_push_summary_only=True,
+            strategic_gold_plan_enabled=True,
+            strategic_gold_plan_symbol="XAUUSD",
+            strategic_gold_plan_levels=[4100, 4400, 4250],
+            strategic_gold_plan_band=20,
+        )
+    )
+
+    monkeypatch.setenv("STRATEGIC_GOLD_PLAN_LEVELS_JSON", "[4400, 4250, 4100]")
+    monkeypatch.setenv("STRATEGIC_GOLD_PLAN_BAND", "20")
+    config = app_config.get_runtime_config()
+
+    assert config.strategic_gold_plan_levels == [4400.0, 4250.0, 4100.0]
+    assert config.strategic_gold_plan_band == 20
+    content = env_file.read_text(encoding="utf-8")
+    assert "STRATEGIC_GOLD_PLAN_LEVELS_JSON=" in content
 
 
 def test_runtime_config_supports_exploratory_base_balance(tmp_path, monkeypatch):

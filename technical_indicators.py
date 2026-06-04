@@ -2,19 +2,22 @@
 技术指标计算模块 —— 纯 Python，无需 TA-Lib / numpy。
 
 提供：
-  - RSI (14周期)
-  - SMA / EMA (MA20, MA50)
-  - 布林带 (20, 2σ)
+  - RSI (14周期) / RSI (6周期, 短线动能)
+  - SMA / EMA (MA20, MA50) / EMA(9, 21, M5快慢线)
+  - 布林带 (20, 2σ) 含 %B 值（位置百分比）
   - MACD (12, 26, 9) —— 含完整 signal_line / histogram
+  - ATR(14, H1) / ATR(5, M1) —— M1 ATR5 用于短线动态止损
   - 24h涨跌幅
   - H4 趋势级指标（RSI14 / MA20 / MA50 / 布林带）
+  - M5 短线指标（EMA9/EMA21快慢线 / RSI6 / 布林带%B / ATR5）
 
 输入：mt5.copy_rates_from_pos() 返回的 rates 数组或 list[dict]。
 
 周期分工：
   H1 → 节奏指标（短期 RSI/MA/布林带，用于日内出手时机）
   H4 → 趋势指标（中期方向判断，防止"逆大势"入场）
-  M5 → 24h涨跌幅
+  M5 → 短线快轨指标（EMA9/21快慢线 / RSI6 / 布林带%B）+ 24h涨跌幅
+  M1 → 极速止损锚（ATR5，用于计算分钟级止损距离）
 """
 from __future__ import annotations
 
@@ -200,6 +203,89 @@ def calc_atr(rates, period: int = 14) -> float | None:
     return round(atr, 6)
 
 
+def calc_adx(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> float | None:
+    """
+    Wilder 平滑 ADX(14) 指标计算，纯 Python 实现。
+    需要至少 2 * period + 1 根 K 线以获得足够平滑度。
+    """
+    min_bars = period * 2 + 1
+    if len(highs) < min_bars or len(lows) < min_bars or len(closes) < min_bars:
+        return None
+
+    # 1. 计算 TR, +DM, -DM
+    tr_series: list[float] = []
+    pdm_series: list[float] = []
+    ndm_series: list[float] = []
+
+    for i in range(1, len(closes)):
+        high_diff = highs[i] - highs[i - 1]
+        low_diff = lows[i - 1] - lows[i]
+
+        # TR
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1])
+        )
+        tr_series.append(max(tr, 0.0))
+
+        # +DM & -DM
+        if high_diff > low_diff and high_diff > 0:
+            pdm_series.append(high_diff)
+        else:
+            pdm_series.append(0.0)
+
+        if low_diff > high_diff and low_diff > 0:
+            ndm_series.append(low_diff)
+        else:
+            ndm_series.append(0.0)
+
+    # 2. 对 TR, +DM, -DM 进行 Wilder 平滑
+    tr_smooth = sum(tr_series[:period])
+    pdm_smooth = sum(pdm_series[:period])
+    ndm_smooth = sum(ndm_series[:period])
+
+    dx_series: list[float] = []
+
+    # 首个 DI 值的计算
+    if tr_smooth > 1e-8:
+        plus_di = 100.0 * (pdm_smooth / tr_smooth)
+        minus_di = 100.0 * (ndm_smooth / tr_smooth)
+    else:
+        plus_di, minus_di = 0.0, 0.0
+
+    di_sum = plus_di + minus_di
+    dx = 100.0 * (abs(plus_di - minus_di) / di_sum) if di_sum > 1e-8 else 0.0
+    dx_series.append(dx)
+
+    # 平滑计算其余 DX 值
+    for i in range(period, len(tr_series)):
+        tr_smooth = tr_smooth - (tr_smooth / period) + tr_series[i]
+        pdm_smooth = pdm_smooth - (pdm_smooth / period) + pdm_series[i]
+        ndm_smooth = ndm_smooth - (ndm_smooth / period) + ndm_series[i]
+
+        if tr_smooth > 1e-8:
+            p_di = 100.0 * (pdm_smooth / tr_smooth)
+            n_di = 100.0 * (ndm_smooth / tr_smooth)
+        else:
+            p_di, n_di = 0.0, 0.0
+
+        d_sum = p_di + n_di
+        dx_val = 100.0 * (abs(p_di - n_di) / d_sum) if d_sum > 1e-8 else 0.0
+        dx_series.append(dx_val)
+
+    # 3. 对 DX 序列进行 Wilder 平滑移动平均得到 ADX
+    if len(dx_series) < period:
+        return None
+
+    adx = mean(dx_series[:period])
+    for value in dx_series[period:]:
+        adx = ((adx * (period - 1)) + value) / period
+
+    return round(adx, 2)
+
+
+
 def build_technical_indicators(rates_by_timeframe: dict) -> dict:
     """
     输入：{
@@ -227,7 +313,7 @@ def build_technical_indicators(rates_by_timeframe: dict) -> dict:
         "change_pct_24h": None,
         "atr14": None,
         "tech_summary": "",
-        # H4 趋势指标（新增）
+        # H4 趋势指标
         "rsi14_h4": None,
         "ma20_h4": None,
         "ma50_h4": None,
@@ -236,7 +322,29 @@ def build_technical_indicators(rates_by_timeframe: dict) -> dict:
         "bollinger_lower_h4": None,
         "atr14_h4": None,
         "tech_summary_h4": "",
+        # M5 短线快轨指标（新增）
+        "ema9_m5": None,
+        "ema21_m5": None,
+        "prev_ema9_m5": None,
+        "prev_ema21_m5": None,
+        "rsi6_m5": None,
+        "bb_pct_m5": None,       # 布林带 %B（0=下轨，0.5=中轨，1=上轨）
+        "bb_upper_m5": None,
+        "bb_mid_m5": None,
+        "bb_lower_m5": None,
+        "bb_width_m5": None,     # 布林带宽度（上轨-下轨）/中轨，衡量波动收窄
+        "atr5_m5": None,         # M5 ATR(5)，短线止损参考
+        "atr5_m1": None,         # M1 ATR(5)，极速止损锚
+        "m5_last_high": None,
+        "m5_last_low": None,
+        "m5_last_close": None,
+        "m5_prev_high": None,
+        "m5_prev_low": None,
+        "m5_prev_close": None,
+        "m5_scalp_summary": "",  # M5 短线摘要（供 AI prompt 使用）
+        "adx_m5": None,          # M5 趋势强度 ADX(14)
     }
+
 
     # ------------------------------------------------------------------ #
     # H1 节奏指标：RSI14 / MA20 / MA50 / 布林带 / MACD                  #
@@ -260,11 +368,60 @@ def build_technical_indicators(rates_by_timeframe: dict) -> dict:
         result["atr14"] = calc_atr(rates_by_timeframe.get("h1"), period=14)
 
     # ------------------------------------------------------------------ #
-    # M5：24h 涨跌幅（M5 × 288 ≈ 24h）                                  #
+    # M5：24h 涨跌幅 + 短线快轨指标（EMA9/EMA21 / RSI6 / 布林带%B）    #
     # ------------------------------------------------------------------ #
     m5_closes = _extract_closes(rates_by_timeframe.get("m5"))
     if m5_closes:
         result["change_pct_24h"] = calc_change_pct(m5_closes, lookback=288)
+        # EMA 快慢线
+        result["ema9_m5"]  = calc_ema(m5_closes, 9)
+        result["ema21_m5"] = calc_ema(m5_closes, 21)
+        if len(m5_closes) > 9:
+            result["prev_ema9_m5"] = calc_ema(m5_closes[:-1], 9)
+        if len(m5_closes) > 21:
+            result["prev_ema21_m5"] = calc_ema(m5_closes[:-1], 21)
+        # RSI6：比 RSI14 更灵敏，专为分钟级动能设计
+        result["rsi6_m5"] = calc_rsi(m5_closes, period=6)
+        # M5 布林带（20周期）及 %B 位置
+        boll_m5 = calc_bollinger(m5_closes, period=20)
+        if boll_m5:
+            upper_m5 = boll_m5["upper"]
+            mid_m5   = boll_m5["mid"]
+            lower_m5 = boll_m5["lower"]
+            result["bb_upper_m5"] = upper_m5
+            result["bb_mid_m5"]   = mid_m5
+            result["bb_lower_m5"] = lower_m5
+            band_width = upper_m5 - lower_m5
+            result["bb_width_m5"] = round(band_width / mid_m5, 6) if mid_m5 > 0 else None
+            if band_width > 1e-8:
+                last_m5 = m5_closes[-1]
+                result["bb_pct_m5"] = round((last_m5 - lower_m5) / band_width, 4)
+        # M5 ATR(5)：短线止损参考
+        result["atr5_m5"] = calc_atr(rates_by_timeframe.get("m5"), period=5)
+        m5_hlc = _extract_hlc(rates_by_timeframe.get("m5"))
+        if m5_hlc:
+            high, low, close = m5_hlc[-1]
+            result["m5_last_high"] = high
+            result["m5_last_low"] = low
+            result["m5_last_close"] = close
+        if len(m5_hlc) >= 2:
+            high, low, close = m5_hlc[-2]
+            result["m5_prev_high"] = high
+            result["m5_prev_low"] = low
+            result["m5_prev_close"] = close
+
+        # 动态计算 M5 周期 ADX(14) 趋势强度指标
+        highs = [float(h) for h, l, c in m5_hlc]
+        lows = [float(l) for h, l, c in m5_hlc]
+        closes = [float(c) for h, l, c in m5_hlc]
+        result["adx_m5"] = calc_adx(highs, lows, closes, period=14)
+
+
+    # ------------------------------------------------------------------ #
+    # M1：极速止损锚 ATR(5)                                              #
+    # ------------------------------------------------------------------ #
+    if rates_by_timeframe.get("m1") is not None:
+        result["atr5_m1"] = calc_atr(rates_by_timeframe.get("m1"), period=5)
 
     # ------------------------------------------------------------------ #
     # H4 趋势指标：RSI14 / MA20 / MA50 / 布林带                          #
@@ -349,4 +506,46 @@ def build_technical_indicators(rates_by_timeframe: dict) -> dict:
         h4_parts.append(f"H4 ATR(14)={result['atr14_h4']:.4f}")
 
     result["tech_summary_h4"] = " | ".join(h4_parts) if h4_parts else ""
+
+    # ------------------------------------------------------------------ #
+    # M5 短线摘要（供 AI prompt / 短线信号引擎使用）                     #
+    # ------------------------------------------------------------------ #
+    m5_parts = []
+    ema9 = result.get("ema9_m5")
+    ema21 = result.get("ema21_m5")
+    if ema9 is not None and ema21 is not None:
+        cross_text = "EMA9>EMA21(多头排列)" if ema9 > ema21 else "EMA9<EMA21(空头排列)"
+        gap_pct = abs(ema9 - ema21) / ema21 * 100 if ema21 > 0 else 0
+        m5_parts.append(f"M5 {cross_text} 乖离{gap_pct:.3f}%")
+    rsi6 = result.get("rsi6_m5")
+    if rsi6 is not None:
+        rsi6_tag = (
+            "超买（短线注意反转）" if rsi6 > 80
+            else "超卖（短线注意反弹）" if rsi6 < 20
+            else "强势" if rsi6 > 60
+            else "弱势" if rsi6 < 40
+            else "中性"
+        )
+        m5_parts.append(f"M5 RSI(6)={rsi6}({rsi6_tag})")
+    bb_pct = result.get("bb_pct_m5")
+    bb_width = result.get("bb_width_m5")
+    if bb_pct is not None:
+        if bb_pct > 0.95:
+            bb_pos_text = "触及上轨（超买扩张）"
+        elif bb_pct < 0.05:
+            bb_pos_text = "触及下轨（超卖扩张）"
+        elif 0.45 <= bb_pct <= 0.55:
+            bb_pos_text = "中轨附近（等待方向）"
+        else:
+            bb_pos_text = f"%B={bb_pct:.2f}"
+        width_text = f" 带宽{bb_width*100:.2f}%" if bb_width is not None else ""
+        m5_parts.append(f"M5布林{bb_pos_text}{width_text}")
+    atr5_m5 = result.get("atr5_m5")
+    atr5_m1 = result.get("atr5_m1")
+    if atr5_m5 is not None:
+        m5_parts.append(f"M5 ATR(5)={atr5_m5:.4f}")
+    if atr5_m1 is not None:
+        m5_parts.append(f"M1 ATR(5)={atr5_m1:.4f}（极速止损参考）")
+    result["m5_scalp_summary"] = " | ".join(m5_parts) if m5_parts else ""
+
     return result

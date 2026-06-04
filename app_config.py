@@ -17,7 +17,7 @@ DEFAULT_SIM_STRATEGY_MIN_RR = {
     "early_momentum": 1.15,
     "direct_momentum": 1.25,
     "pullback_sniper_probe": 1.30,
-    "directional_probe": 1.55,
+    "directional_probe": 1.85,
     "structure": 1.55,
 }
 DEFAULT_SIM_STRATEGY_DAILY_LIMIT = {
@@ -178,6 +178,7 @@ class MetalMonitorConfig:
     live_order_precheck_only: bool = True
     live_max_open_positions: int = 1
     live_max_orders_per_day: int = 3
+    live_scalp_max_risk_pct: float = 0.005
     sim_initial_balance: float = 1000.0
     sim_no_tp2_lock_r: float = 0.5
     sim_no_tp2_partial_close_ratio: float = 0.5
@@ -195,6 +196,31 @@ class MetalMonitorConfig:
     sim_strategy_min_rr: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_SIM_STRATEGY_MIN_RR))
     sim_strategy_daily_limit: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_SIM_STRATEGY_DAILY_LIMIT))
     sim_strategy_cooldown_min: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_SIM_STRATEGY_COOLDOWN_MIN))
+    # ── 短线套利专用配置（阶段三）──
+    sim_scalp_max_hold_min: int = 15           # 短线最大持仓时间（分钟），超出则时间止损
+    sim_scalp_atr_tp_ratio: float = 1.5        # ATR极速止盈倍数（浮盈 >= atr5_m5 * ratio 即止盈）
+    sim_scalp_decay_exit_enabled: bool = True  # 是否启用动量衰竭出场（EMA9/21反向交叉）
+    scalp_enabled: bool = True                 # 是否启用短线信号层
+    scalp_min_rr: float = 1.2                  # 短线最低 R/R 阈値
+    scalp_au_ag_arbitrage: bool = True         # 是否启用 Au/Ag 比价套利信号
+    scalp_ai_steering_enabled: bool = True     # 是否启用 AI 异步舵手多空过滤器
+    scalp_max_spread_multiplier: float = 1.5   # 允许开仓的最大点差倍数（当前点差 / 历史均值）
+    scalp_min_reward_cost_ratio: float = 3.0   # 止盈波幅空间必须大于摩擦成本的倍数
+    scalp_commission_per_lot: float = 5.0      # 单边每手固定手续费预设（用于折算开仓总摩擦）
+    sim_adaptive_evolution_enabled: bool = False  # 开启自适应策略进化
+
+    # ── 补充：Tick Shock, Disabled Strategies 与 战略黄金计划 ──
+    tick_shock_guard_enabled: bool = False
+    tick_shock_window_sec: float = 5.0
+    tick_shock_cooldown_sec: float = 60.0
+    tick_shock_thresholds: dict[str, float] = field(default_factory=lambda: {"XAU": 45.0, "XAG": 80.0})
+    sim_disabled_strategies: list[str] = field(default_factory=list)
+    sim_disabled_strategy_actions: list[str] = field(default_factory=list)
+    strategic_gold_plan_enabled: bool = False
+    strategic_gold_plan_symbol: str = "XAUUSD"
+    strategic_gold_plan_levels: list[float] = field(default_factory=list)
+    strategic_gold_plan_band: float = 15.0
+
 
 
 def _clean_env_value(value: object) -> str:
@@ -404,6 +430,72 @@ def normalize_sim_strategy_cooldown_min(value: object | None = None) -> dict[str
     return result
 
 
+def normalize_sim_disabled_strategies(value: object | None = None) -> list[str]:
+    payload = value
+    if payload is None:
+        payload = os.getenv("SIM_DISABLED_STRATEGIES_JSON", "")
+    if isinstance(payload, str):
+        text = payload.strip()
+        if not text:
+            return []
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(payload, list):
+        return []
+    result = [str(x).strip() for x in payload if x]
+    return _dedupe_keep_order(result)
+
+
+def normalize_sim_disabled_strategy_actions(value: object | None = None) -> list[str]:
+    payload = value
+    if payload is None:
+        payload = os.getenv("SIM_DISABLED_STRATEGY_ACTIONS_JSON", "")
+    if isinstance(payload, str):
+        text = payload.strip()
+        if not text:
+            return []
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(payload, list):
+        return []
+    result = []
+    for x in payload:
+        s = str(x).strip()
+        if ":" in s:
+            result.append(s)
+    return _dedupe_keep_order(result)
+
+
+def normalize_strategic_gold_plan_levels(value: object | None = None) -> list[float]:
+    payload = value
+    if payload is None:
+        payload = os.getenv("STRATEGIC_GOLD_PLAN_LEVELS_JSON", "")
+    if isinstance(payload, str):
+        text = payload.strip()
+        if not text:
+            return []
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(payload, list):
+        return []
+    result = []
+    for item in payload:
+        try:
+            result.append(float(item))
+        except (TypeError, ValueError):
+            continue
+    result = _dedupe_keep_order(result)
+    result.sort(reverse=True)
+    return result
+
+
+
 def get_sim_strategy_min_rr(strategy_family: str, default: float | None = None, config: MetalMonitorConfig | None = None) -> float:
     clean_key = str(strategy_family or "").strip().lower()
     fallback = float(default if default is not None else DEFAULT_SIM_STRATEGY_MIN_RR.get(clean_key, 1.60))
@@ -499,6 +591,13 @@ def get_runtime_config() -> MetalMonitorConfig:
     except ValueError:
         live_max_drawdown_pct = 0.05
     try:
+        live_scalp_max_risk_pct = max(
+            0.001,
+            min(0.02, float(str(os.getenv("LIVE_SCALP_MAX_RISK_PCT", "0.005") or "0.005").strip())),
+        )
+    except ValueError:
+        live_scalp_max_risk_pct = 0.005
+    try:
         sim_initial_balance = max(
             100.0,
             min(1000000.0, float(str(os.getenv("SIM_INITIAL_BALANCE", "1000") or "1000").strip())),
@@ -566,6 +665,82 @@ def get_runtime_config() -> MetalMonitorConfig:
         )
     except ValueError:
         sim_exploratory_base_balance = sim_initial_balance
+    # ── 短线套利专用配置读取 ──
+    sim_scalp_max_hold_min = _parse_int_env("SIM_SCALP_MAX_HOLD_MIN", default=15, minimum=0, maximum=240)
+    try:
+        sim_scalp_atr_tp_ratio = max(
+            0.0, min(10.0, float(str(os.getenv("SIM_SCALP_ATR_TP_RATIO", "1.5") or "1.5").strip()))
+        )
+    except ValueError:
+        sim_scalp_atr_tp_ratio = 1.5
+    sim_scalp_decay_exit_enabled = _parse_bool_env("SIM_SCALP_DECAY_EXIT_ENABLED", default=True)
+    scalp_enabled = _parse_bool_env("SCALP_ENABLED", default=True)
+    try:
+        scalp_min_rr = max(
+            0.5, min(5.0, float(str(os.getenv("SCALP_MIN_RR", "1.2") or "1.2").strip()))
+        )
+    except ValueError:
+        scalp_min_rr = 1.2
+    scalp_au_ag_arbitrage = _parse_bool_env("SCALP_AU_AG_ARBITRAGE", default=True)
+    scalp_ai_steering_enabled = _parse_bool_env("SCALP_AI_STEERING_ENABLED", default=True)
+    try:
+        scalp_max_spread_multiplier = max(
+            0.5, min(10.0, float(str(os.getenv("SCALP_MAX_SPREAD_MULTIPLIER", "1.5") or "1.5").strip()))
+        )
+    except ValueError:
+        scalp_max_spread_multiplier = 1.5
+    try:
+        scalp_min_reward_cost_ratio = max(
+            1.0, min(20.0, float(str(os.getenv("SCALP_MIN_REWARD_COST_RATIO", "3.0") or "3.0").strip()))
+        )
+    except ValueError:
+        scalp_min_reward_cost_ratio = 3.0
+    try:
+        scalp_commission_per_lot = max(
+            0.0, min(100.0, float(str(os.getenv("SCALP_COMMISSION_PER_LOT", "5.0") or "5.0").strip()))
+        )
+    except ValueError:
+        scalp_commission_per_lot = 5.0
+
+    sim_adaptive_evolution_enabled = _parse_bool_env("SIM_ADAPTIVE_EVOLUTION_ENABLED", default=False)
+
+    # Tick Shock
+    tick_shock_guard_enabled = _parse_bool_env("TICK_SHOCK_GUARD_ENABLED", default=False)
+    try:
+        tick_shock_window_sec = float(str(os.getenv("TICK_SHOCK_WINDOW_SEC", "5.0")).strip())
+    except (TypeError, ValueError):
+        tick_shock_window_sec = 5.0
+    try:
+        tick_shock_cooldown_sec = float(str(os.getenv("TICK_SHOCK_COOLDOWN_SEC", "60.0")).strip())
+    except (TypeError, ValueError):
+        tick_shock_cooldown_sec = 60.0
+        
+    tick_shock_thresholds = {"XAU": 45.0, "XAG": 80.0}
+    ts_json = os.getenv("TICK_SHOCK_THRESHOLDS_JSON", "")
+    if ts_json:
+        try:
+            ts_data = json.loads(ts_json)
+            if isinstance(ts_data, dict):
+                for k, v in ts_data.items():
+                    tick_shock_thresholds[k] = float(v)
+        except Exception:
+            pass
+
+    # Disabled Strategies
+    sim_disabled_strategies = normalize_sim_disabled_strategies()
+    sim_disabled_strategy_actions = normalize_sim_disabled_strategy_actions()
+
+
+    # Strategic Gold Plan
+    strategic_gold_plan_enabled = _parse_bool_env("STRATEGIC_GOLD_PLAN_ENABLED", default=False)
+    strategic_gold_plan_symbol = str(os.getenv("STRATEGIC_GOLD_PLAN_SYMBOL", "XAUUSD")).strip()
+    strategic_gold_plan_levels = normalize_strategic_gold_plan_levels()
+    try:
+        strategic_gold_plan_band = float(str(os.getenv("STRATEGIC_GOLD_PLAN_BAND", "15.0")).strip())
+    except (TypeError, ValueError):
+        strategic_gold_plan_band = 15.0
+
+
 
     return MetalMonitorConfig(
         symbols=symbols,
@@ -610,6 +785,7 @@ def get_runtime_config() -> MetalMonitorConfig:
         live_order_precheck_only=_parse_bool_env("LIVE_ORDER_PRECHECK_ONLY", default=True),
         live_max_open_positions=_parse_int_env("LIVE_MAX_OPEN_POSITIONS", default=1, minimum=1, maximum=20),
         live_max_orders_per_day=_parse_int_env("LIVE_MAX_ORDERS_PER_DAY", default=3, minimum=1, maximum=100),
+        live_scalp_max_risk_pct=live_scalp_max_risk_pct,
         sim_initial_balance=sim_initial_balance,
         sim_no_tp2_lock_r=sim_no_tp2_lock_r,
         sim_no_tp2_partial_close_ratio=sim_no_tp2_partial_close_ratio,
@@ -627,6 +803,27 @@ def get_runtime_config() -> MetalMonitorConfig:
         sim_strategy_min_rr=sim_strategy_min_rr,
         sim_strategy_daily_limit=sim_strategy_daily_limit,
         sim_strategy_cooldown_min=sim_strategy_cooldown_min,
+        sim_scalp_max_hold_min=sim_scalp_max_hold_min,
+        sim_scalp_atr_tp_ratio=sim_scalp_atr_tp_ratio,
+        sim_scalp_decay_exit_enabled=sim_scalp_decay_exit_enabled,
+        scalp_enabled=scalp_enabled,
+        scalp_min_rr=scalp_min_rr,
+        scalp_au_ag_arbitrage=scalp_au_ag_arbitrage,
+        scalp_ai_steering_enabled=scalp_ai_steering_enabled,
+        scalp_max_spread_multiplier=scalp_max_spread_multiplier,
+        scalp_min_reward_cost_ratio=scalp_min_reward_cost_ratio,
+        scalp_commission_per_lot=scalp_commission_per_lot,
+        sim_adaptive_evolution_enabled=sim_adaptive_evolution_enabled,
+        tick_shock_guard_enabled=tick_shock_guard_enabled,
+        tick_shock_window_sec=tick_shock_window_sec,
+        tick_shock_cooldown_sec=tick_shock_cooldown_sec,
+        tick_shock_thresholds=tick_shock_thresholds,
+        sim_disabled_strategies=sim_disabled_strategies,
+        sim_disabled_strategy_actions=sim_disabled_strategy_actions,
+        strategic_gold_plan_enabled=strategic_gold_plan_enabled,
+        strategic_gold_plan_symbol=strategic_gold_plan_symbol,
+        strategic_gold_plan_levels=strategic_gold_plan_levels,
+        strategic_gold_plan_band=strategic_gold_plan_band,
     )
 
 
@@ -698,6 +895,7 @@ def save_runtime_config(config: MetalMonitorConfig) -> None:
             "LIVE_ORDER_PRECHECK_ONLY": "1" if bool(config.live_order_precheck_only) else "0",
             "LIVE_MAX_OPEN_POSITIONS": str(max(1, min(20, int(config.live_max_open_positions)))),
             "LIVE_MAX_ORDERS_PER_DAY": str(max(1, min(100, int(config.live_max_orders_per_day)))),
+            "LIVE_SCALP_MAX_RISK_PCT": str(max(0.001, min(0.02, float(getattr(config, "live_scalp_max_risk_pct", 0.005))))),
             "SIM_INITIAL_BALANCE": str(max(100.0, min(1000000.0, float(config.sim_initial_balance)))),
             "SIM_NO_TP2_LOCK_R": str(max(0.10, min(5.0, float(config.sim_no_tp2_lock_r)))),
             "SIM_NO_TP2_PARTIAL_CLOSE_RATIO": str(
@@ -734,5 +932,52 @@ def save_runtime_config(config: MetalMonitorConfig) -> None:
                 sort_keys=True,
             ),
             LEGACY_MIGRATION_DONE_KEY: "1",
+            "SIM_SCALP_MAX_HOLD_MIN": str(max(0, min(240, int(getattr(config, "sim_scalp_max_hold_min", 15))))),
+            "SIM_SCALP_ATR_TP_RATIO": str(max(0.0, min(10.0, float(getattr(config, "sim_scalp_atr_tp_ratio", 1.5))))),
+            "SIM_SCALP_DECAY_EXIT_ENABLED": "1" if bool(getattr(config, "sim_scalp_decay_exit_enabled", True)) else "0",
+            "SCALP_ENABLED": "1" if bool(getattr(config, "scalp_enabled", True)) else "0",
+            "SCALP_MIN_RR": str(max(0.5, min(5.0, float(getattr(config, "scalp_min_rr", 1.2))))),
+            "SCALP_AU_AG_ARBITRAGE": "1" if bool(getattr(config, "scalp_au_ag_arbitrage", True)) else "0",
+            "SCALP_AI_STEERING_ENABLED": "1" if bool(getattr(config, "scalp_ai_steering_enabled", True)) else "0",
+            "SCALP_MAX_SPREAD_MULTIPLIER": str(max(0.5, min(10.0, float(getattr(config, "scalp_max_spread_multiplier", 1.5))))),
+            "SCALP_MIN_REWARD_COST_RATIO": str(max(1.0, min(20.0, float(getattr(config, "scalp_min_reward_cost_ratio", 3.0))))),
+            "SCALP_COMMISSION_PER_LOT": str(max(0.0, min(100.0, float(getattr(config, "scalp_commission_per_lot", 5.0))))),
+            "SIM_ADAPTIVE_EVOLUTION_ENABLED": "1" if bool(getattr(config, "sim_adaptive_evolution_enabled", False)) else "0",
+            "TICK_SHOCK_GUARD_ENABLED": "1" if bool(getattr(config, "tick_shock_guard_enabled", False)) else "0",
+            "TICK_SHOCK_WINDOW_SEC": str(float(getattr(config, "tick_shock_window_sec", 5.0))),
+            "TICK_SHOCK_COOLDOWN_SEC": str(float(getattr(config, "tick_shock_cooldown_sec", 60.0))),
+            "TICK_SHOCK_THRESHOLDS_JSON": json.dumps(getattr(config, "tick_shock_thresholds", {"XAU": 0.5, "XAG": 0.1})),
+            "SIM_DISABLED_STRATEGIES_JSON": json.dumps(normalize_sim_disabled_strategies(getattr(config, "sim_disabled_strategies", []))),
+            "SIM_DISABLED_STRATEGY_ACTIONS_JSON": json.dumps(normalize_sim_disabled_strategy_actions(getattr(config, "sim_disabled_strategy_actions", []))),
+            "STRATEGIC_GOLD_PLAN_ENABLED": "1" if bool(getattr(config, "strategic_gold_plan_enabled", False)) else "0",
+            "STRATEGIC_GOLD_PLAN_SYMBOL": str(getattr(config, "strategic_gold_plan_symbol", "XAUUSD")).strip(),
+            "STRATEGIC_GOLD_PLAN_LEVELS_JSON": json.dumps(normalize_strategic_gold_plan_levels(getattr(config, "strategic_gold_plan_levels", []))),
+            "STRATEGIC_GOLD_PLAN_BAND": str(float(getattr(config, "strategic_gold_plan_band", 15.0))),
         }
     )
+
+
+def load_ai_steering_cache() -> dict:
+    """读取异步 AI 舵手多空意志缓存，返回 dict。"""
+    cache_path = PROJECT_DIR / ".runtime" / "ai_steering.json"
+    if not cache_path.exists():
+        return {"action": "neutral", "score": 50.0, "timestamp": 0.0}
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {"action": "neutral", "score": 50.0, "timestamp": 0.0}
+
+
+def save_ai_steering_cache(steering: dict) -> None:
+    """写入异步 AI 舵手多空意志缓存。"""
+    cache_path = PROJECT_DIR / ".runtime" / "ai_steering.json"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        temp_file = cache_path.with_name(f"{cache_path.name}.tmp")
+        temp_file.write_text(json.dumps(steering, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp_file.replace(cache_path)
+    except Exception:
+        pass

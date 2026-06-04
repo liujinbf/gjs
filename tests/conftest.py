@@ -57,6 +57,23 @@ def tmp_path(tmp_path_factory: LocalTmpPathFactory) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def isolate_runtime_env(tmp_path, monkeypatch):
+    """单元测试默认不读取真实 .env，避免运行策略配置污染逻辑断言。"""
+    try:
+        import app_config
+
+        env_file = tmp_path / ".env"
+        env_file.write_text("", encoding="utf-8")
+        monkeypatch.setattr(app_config, "ENV_FILE", env_file)
+        monkeypatch.setenv("SIM_DISABLED_STRATEGIES_JSON", "[]")
+        monkeypatch.setenv("SIM_DISABLED_STRATEGY_ACTIONS_JSON", "[]")
+        monkeypatch.setenv("SIM_STRATEGY_VALIDATION_ENABLED", "0")
+    except Exception:  # noqa: BLE001
+        pass
+    yield
+
+
+@pytest.fixture(autouse=True)
 def sync_notification_worker(request, monkeypatch):
     """测试期间将 NotificationWorker.enqueue 替换为同步立即执行。
 

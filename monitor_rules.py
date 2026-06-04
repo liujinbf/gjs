@@ -295,8 +295,7 @@ def _build_direct_momentum_candidate(symbol_key: str, family: str, row: dict) ->
 
 
 def _build_directional_probe_candidate(symbol_key: str, family: str, row: dict) -> dict[str, str] | None:
-    if family != "metal":
-        return None
+    return None
 
     intraday_ready = bool(row.get("intraday_context_ready", False))
     intraday_bias = str(row.get("intraday_bias", "unknown") or "unknown").strip()
@@ -886,6 +885,193 @@ def build_quote_risk_note(symbol: str, row: dict) -> tuple[str, str]:
         return AlertTone.ACCENT.value, f"点差偏宽（{spread_points:.0f}点 / {spread_text}），顺势单也先等点差回落再跟。"
     return AlertTone.SUCCESS.value, f"报价相对平稳（点差 {spread_points:.0f}点 / {spread_text}），适合继续观察关键位。"
 
+_SPREAD_AVG_CACHE = {}  # {symbol: (update_timestamp, avg_value)}
+
+def _get_24h_avg_spread(symbol: str) -> float:
+    import time
+    symbol_key = str(symbol or "").strip().upper()
+    now = time.time()
+    
+    # 缓存有效期 15 分钟
+    if symbol_key in _SPREAD_AVG_CACHE:
+        cache_time, val = _SPREAD_AVG_CACHE[symbol_key]
+        if now - cache_time < 900:
+            return val
+            
+    # 默认健康均值
+    val = 12.0
+    if symbol_key.startswith("XAU"):
+        val = 18.0
+    elif symbol_key.startswith("XAG"):
+        val = 30.0
+        
+    try:
+        from datetime import datetime, timedelta
+        from knowledge_base import KNOWLEDGE_DB_FILE, open_knowledge_connection
+        t_limit = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+        with open_knowledge_connection(KNOWLEDGE_DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT AVG(spread_points) FROM market_snapshots WHERE symbol = ? AND snapshot_time >= ?",
+                (symbol_key, t_limit)
+            )
+            res = cursor.fetchone()
+            if res and res[0] is not None:
+                val = float(res[0])
+    except Exception:
+        pass
+        
+    _SPREAD_AVG_CACHE[symbol_key] = (now, val)
+    return val
+
+def _build_scalp_ready_candidate(symbol_key: str, row: dict) -> dict | None:
+    """
+    短线高优放行辅助函数。
+
+    在原先基础上扩展三大拦截过滤：
+    1. AI宏观舵手过滤器 (零延迟意志对齐)
+    2. 自适应点差风控拦截 (超24h点差均值1.5倍)
+    3. 摩擦成本空间补偿 (ATR利润比成本高3倍)
+    """
+    if not bool(row.get("scalp_ready", False)):
+        return None
+    scalp_rr = float(row.get("scalp_rr", 0.0) or 0.0)
+    
+    from app_config import get_runtime_config
+    cfg = get_runtime_config()
+    if not bool(getattr(cfg, "scalp_enabled", True)):
+        return None
+    
+    # ── 优化一：AI宏观偏向零延迟过滤器 ──
+    if getattr(cfg, "scalp_ai_steering_enabled", True):
+        from app_config import load_ai_steering_cache
+        ai_steering = load_ai_steering_cache()
+        ai_action = str(ai_steering.get("action", "neutral") or "neutral").strip().lower()
+        direction = str(row.get("scalp_direction", "") or "").strip().lower()
+        
+        if ai_action in ("long", "short") and direction in ("long", "short"):
+            if ai_action != direction:
+                return {
+                    "grade": TradeGrade.OBSERVE_ONLY.value,
+                    "detail": f"{symbol_key} 短线 {direction.upper()} 信号与 AI 宏观意志 ({ai_action.upper()}) 冲突，已被零延迟拦截避险。",
+                    "next_review": "等待 AI 大局观方向调整或短线信号对齐。",
+                    "tone": AlertTone.ACCENT.value,
+                    "source": "structure",
+                    "setup_kind": "scalp_filter",
+                    "scalp_setup_kind": "scalp_ai_filter",
+                    "scalp_rr": scalp_rr,
+                }
+
+    # ── 优化二：动态点差自适应拦截器 ──
+    avg_spread = _get_24h_avg_spread(symbol_key)
+    current_spread = float(row.get("spread_points", 0.0) or 0.0)
+    multiplier = getattr(cfg, "scalp_max_spread_multiplier", 1.5)
+    max_spread_allowed = avg_spread * multiplier
+    
+    if current_spread > max_spread_allowed:
+        return {
+            "grade": TradeGrade.NO_TRADE.value,
+            "detail": f"{symbol_key} 当前点差（{current_spread:.1f}点）超过24h均值（{avg_spread:.1f}点）的 {multiplier:.1f} 倍上限，避险拦截。",
+            "next_review": "等待报价环境恢复平稳、点差收窄后再复核。",
+            "tone": AlertTone.WARNING.value,
+            "source": "spread",
+            "setup_kind": "scalp_filter",
+            "scalp_setup_kind": "scalp_spread_guard",
+            "scalp_rr": scalp_rr,
+        }
+
+    # ── 优化三：摩擦成本空间补偿器 ──
+    atr5_m5 = float(row.get("atr5_m5", 0.0) or 0.0)
+    point = float(row.get("point", 0.0) or 0.0001)
+    if point <= 0:
+        point = 0.01 if symbol_key.startswith(("XAU", "XAG")) else 0.0001
+        
+    contract_size = float(row.get("contract_size", 0.0) or 0.0)
+    if contract_size <= 0:
+        if symbol_key.startswith("XAU"):
+            contract_size = 100.0
+        elif symbol_key.startswith("XAG"):
+            contract_size = 5000.0
+        else:
+            contract_size = 100000.0
+
+    commission = getattr(cfg, "scalp_commission_per_lot", 5.0)
+    commission_price_range = commission / contract_size
+    commission_points = commission_price_range / point
+    
+    # 短线交易吃成本，按往返手续费 + 开平两侧点差缓冲评估。
+    total_friction_points = current_spread * 2.0 + commission_points * 2.0
+    atr_points = atr5_m5 / point
+    
+    min_ratio = getattr(cfg, "scalp_min_reward_cost_ratio", 3.0)
+    if atr_points < min_ratio * total_friction_points:
+        return {
+            "grade": TradeGrade.OBSERVE_ONLY.value,
+            "detail": f"{symbol_key} 短线波动空间 ATR({atr_points:.1f}点) 未能覆盖往返摩擦成本（点差{current_spread:.1f}点×2+手续费{commission_points:.1f}点×2）的 {min_ratio:.1f} 倍，性价比不足拦截。",
+            "next_review": "等待市场短线波动扩大或摩擦成本降低。",
+            "tone": AlertTone.ACCENT.value,
+            "source": "structure",
+            "setup_kind": "scalp_filter",
+            "scalp_setup_kind": "scalp_cost_guard",
+            "scalp_rr": scalp_rr,
+        }
+
+    # ── 获取自适应动态门槛比率 ──
+    from runtime_utils import get_adaptive_filter_ratio
+    adaptive_ratio = get_adaptive_filter_ratio()
+
+    # ── 优化四：ADX 震荡避险防线 ──
+    min_adx = float(getattr(cfg, "scalp_min_adx", 22.0)) * adaptive_ratio
+    adx_m5 = row.get("adx_m5")
+    if adx_m5 is not None:
+        try:
+            adx_val = float(adx_m5)
+            if adx_val > 0 and adx_val < min_adx:
+                return {
+                    "grade": TradeGrade.OBSERVE_ONLY.value,
+                    "detail": f"{symbol_key} 避开震荡扫损：当前 M5 趋势强度不足 (ADX={adx_val:.1f} < 阈值 {min_adx:.1f})，静默观望。",
+                    "next_review": "等待趋势动能转强、ADX 指数升破阈值后再复核。",
+                    "tone": AlertTone.ACCENT.value,
+                    "source": "structure",
+                    "setup_kind": "scalp_filter",
+                    "scalp_setup_kind": "scalp_adx_filter",
+                    "scalp_rr": scalp_rr,
+                }
+        except (ValueError, TypeError):
+            pass
+
+    # ── 满足所有条件，放行短线轻仓 ──
+    min_scalp_rr = float(getattr(cfg, "scalp_min_rr", 1.2)) * adaptive_ratio
+    if scalp_rr < min_scalp_rr:
+        return None
+    confidence = str(row.get("scalp_confidence", "") or "").strip().lower()
+    if confidence not in {"medium", "high"}:
+        return None
+    signal_text = str(row.get("scalp_signal_text", "") or "").strip()
+    inval_text = str(row.get("scalp_invalidation_text", "") or "").strip()
+    direction = str(row.get("scalp_direction", "") or "").strip()
+    signal_type = str(row.get("scalp_signal_type", "") or "").strip()
+    setup_kind_text = str(row.get("scalp_setup_kind", "") or signal_type or "").strip()
+    return {
+        "grade": TradeGrade.LIGHT_POSITION.value,
+        "detail": (
+            signal_text
+            or f"{symbol_key} M5短线信号就绪（{signal_type}/{direction}），R/R={scalp_rr:.2f}，可轻仓试探。"
+        ),
+        "next_review": inval_text or "盯紧下一根M5K线的方向确认或失效信号。",
+        "tone": AlertTone.SUCCESS.value,
+        "source": "structure",
+        "setup_kind": "scalp",
+        "scalp_setup_kind": setup_kind_text,
+        "scalp_signal_text": signal_text,
+        "scalp_invalidation_text": inval_text,
+        "scalp_rr": scalp_rr,
+        "scalp_confidence": confidence,
+    }
+
+
+
+
 def build_trade_grade(
     symbol: str,
     row: dict,
@@ -980,18 +1166,38 @@ def build_trade_grade(
             "tone": AlertTone.ACCENT.value,
             "source": "spread",
         }
-    result = _build_clean_quote_grade_with_context(symbol_key, family, row)
-    if post_event_continuation is not None and str(result.get("grade", "") or "").strip() == TradeGrade.LIGHT_POSITION.value:
+    # 优先执行慢速常规结构评估，若判定为可出手的 LIGHT_POSITION，则优先返回，防止被短线 scalp 吞噬
+    structure_result = _build_clean_quote_grade_with_context(symbol_key, family, row)
+    if str(structure_result.get("grade", "") or "").strip() == TradeGrade.LIGHT_POSITION.value:
+        if post_event_continuation is not None:
+            detail_prefix = str(post_event_continuation.get("detail_prefix", "") or "").strip()
+            if detail_prefix:
+                structure_result["detail"] = f"{detail_prefix} {structure_result['detail']}".strip()
+            next_review_prefix = str(post_event_continuation.get("next_review_prefix", "") or "").strip()
+            if next_review_prefix:
+                structure_result["next_review"] = next_review_prefix
+            structure_result["event_override_kind"] = str(post_event_continuation.get("event_override_kind", "") or "").strip()
+            structure_result["event_override_note"] = str(post_event_continuation.get("event_override_note", "") or "").strip()
+        structure_result.setdefault("source", "structure")
+        return structure_result
+
+    # 若常规策略无出手信号，短线套利信号作为辅助机会高优检查直接放行
+    scalp_candidate = _build_scalp_ready_candidate(symbol_key, row)
+    if scalp_candidate is not None:
+        return scalp_candidate
+
+    # 如果都没有，则返回常规策略的其他评估结果
+    if post_event_continuation is not None and str(structure_result.get("grade", "") or "").strip() == TradeGrade.LIGHT_POSITION.value:
         detail_prefix = str(post_event_continuation.get("detail_prefix", "") or "").strip()
         if detail_prefix:
-            result["detail"] = f"{detail_prefix} {result['detail']}".strip()
+            structure_result["detail"] = f"{detail_prefix} {structure_result['detail']}".strip()
         next_review_prefix = str(post_event_continuation.get("next_review_prefix", "") or "").strip()
         if next_review_prefix:
-            result["next_review"] = next_review_prefix
-        result["event_override_kind"] = str(post_event_continuation.get("event_override_kind", "") or "").strip()
-        result["event_override_note"] = str(post_event_continuation.get("event_override_note", "") or "").strip()
-    result.setdefault("source", "structure")
-    return result
+            structure_result["next_review"] = next_review_prefix
+        structure_result["event_override_kind"] = str(post_event_continuation.get("event_override_kind", "") or "").strip()
+        structure_result["event_override_note"] = str(post_event_continuation.get("event_override_note", "") or "").strip()
+    structure_result.setdefault("source", "structure")
+    return structure_result
 
 
 def _build_portfolio_event_mode_adjustment(

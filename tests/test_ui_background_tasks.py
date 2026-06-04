@@ -18,6 +18,25 @@ pytest.importorskip("PySide6")
 import ui
 
 
+@pytest.fixture(autouse=True)
+def clean_sim_signal_bridge_env(monkeypatch):
+    import sim_signal_bridge
+    # 强制将活跃规则缓存设为空，并且每次都返回空，防范脏数据库规则污染
+    monkeypatch.setattr(sim_signal_bridge, "_get_active_structured_rules", lambda: [])
+    # 强制重置其他缓存与状态，防范策略回撤或治理状态污染
+    monkeypatch.setattr(sim_signal_bridge, "_STRATEGY_DRAWDOWN_CACHE", {})
+    monkeypatch.setattr(sim_signal_bridge, "_STRATEGY_LEARNING_GOV_CACHE", {})
+    sim_signal_bridge._ACTIVE_RULES_CACHE = []
+    sim_signal_bridge._ACTIVE_RULES_CACHE_TIME = 0
+
+    # 强制 mock 三大状态拦截，避免受全局测试时数据库中的脏交易历史影响
+    monkeypatch.setattr(sim_signal_bridge, "_get_strategy_drawdown_lock", lambda family: {"locked": False})
+    monkeypatch.setattr(sim_signal_bridge, "_get_strategy_learning_governance_state", lambda family: {"blocked": False})
+    monkeypatch.setattr(sim_signal_bridge, "_get_strategy_validation_state", lambda strategy_family, action, config=None: {"passed": True})
+
+
+
+
 def test_detect_opportunity_prefers_lightweight_opportunity_score():
     snapshot = {
         "items": [
@@ -144,7 +163,8 @@ def test_build_trade_grade_display_text_marks_portfolio_grade_and_execution_bloc
     assert "当前拦截" in text
 
 
-def test_build_trade_grade_display_text_marks_execution_ready():
+def test_build_trade_grade_display_text_marks_execution_ready(monkeypatch):
+    monkeypatch.setattr(ui, "_resolve_sim_profit_protect_state", lambda config: {"locked": False, "peak_profit": 0.0, "current_profit": 0.0, "giveback": 0.0, "giveback_limit": 100.0})
     text = ui._build_trade_grade_display_text(
         {
             "trade_grade": "可轻仓试仓",
@@ -178,6 +198,7 @@ def test_build_trade_grade_display_text_marks_execution_ready():
 
 
 def test_process_snapshot_side_effects_runs_io_chain(monkeypatch):
+    monkeypatch.setattr(ui, "_resolve_sim_profit_protect_state", lambda config: {"locked": False, "peak_profit": 0.0, "current_profit": 0.0, "giveback": 0.0, "giveback_limit": 100.0})
     captured = {
         "quotes": None,
         "notified": None,
@@ -334,6 +355,7 @@ def test_attempt_sim_execution_fills_missing_ai_levels_from_snapshot(monkeypatch
 
 
 def test_process_snapshot_side_effects_runs_exploratory_sim_candidate(monkeypatch):
+    monkeypatch.setattr(ui, "_resolve_sim_profit_protect_state", lambda config: {"locked": False, "peak_profit": 0.0, "current_profit": 0.0, "giveback": 0.0, "giveback_limit": 100.0})
     captured = {}
 
     monkeypatch.setattr(
@@ -382,8 +404,8 @@ def test_process_snapshot_side_effects_runs_exploratory_sim_candidate(monkeypatc
                     "risk_reward_stop_price": 4776.48,
                     "risk_reward_target_price": 4852.58,
                     "risk_reward_target_price_2": 4877.94,
-                    "risk_reward_entry_zone_low": 4792.33,
-                    "risk_reward_entry_zone_high": 4805.02,
+                    "risk_reward_entry_zone_low": 4791.85,
+                    "risk_reward_entry_zone_high": 4811.85,
                     "atr14": 21.14,
                     "risk_reward_atr": 21.14,
                 }
@@ -404,6 +426,7 @@ def test_process_snapshot_side_effects_runs_exploratory_sim_candidate(monkeypatc
 
 
 def test_process_snapshot_side_effects_blocks_exploratory_when_daily_limit_reached(monkeypatch):
+    monkeypatch.setattr(ui, "_resolve_sim_profit_protect_state", lambda config: {"locked": False, "peak_profit": 0.0, "current_profit": 0.0, "giveback": 0.0, "giveback_limit": 100.0})
     captured = {}
 
     monkeypatch.setattr(
@@ -447,8 +470,8 @@ def test_process_snapshot_side_effects_blocks_exploratory_when_daily_limit_reach
                     "risk_reward_stop_price": 4776.48,
                     "risk_reward_target_price": 4852.58,
                     "risk_reward_target_price_2": 4877.94,
-                    "risk_reward_entry_zone_low": 4792.33,
-                    "risk_reward_entry_zone_high": 4805.02,
+                    "risk_reward_entry_zone_low": 4791.85,
+                    "risk_reward_entry_zone_high": 4811.85,
                     "atr14": 21.14,
                     "risk_reward_atr": 21.14,
                 }
@@ -466,6 +489,7 @@ def test_process_snapshot_side_effects_blocks_exploratory_when_daily_limit_reach
 
 
 def test_process_snapshot_side_effects_blocks_exploratory_when_cooldown_active(monkeypatch):
+    monkeypatch.setattr(ui, "_resolve_sim_profit_protect_state", lambda config: {"locked": False, "peak_profit": 0.0, "current_profit": 0.0, "giveback": 0.0, "giveback_limit": 100.0})
     captured = {}
 
     monkeypatch.setattr(
@@ -510,8 +534,8 @@ def test_process_snapshot_side_effects_blocks_exploratory_when_cooldown_active(m
                     "risk_reward_stop_price": 4776.48,
                     "risk_reward_target_price": 4852.58,
                     "risk_reward_target_price_2": 4877.94,
-                    "risk_reward_entry_zone_low": 4792.33,
-                    "risk_reward_entry_zone_high": 4805.02,
+                    "risk_reward_entry_zone_low": 4791.85,
+                    "risk_reward_entry_zone_high": 4811.85,
                     "atr14": 21.14,
                     "risk_reward_atr": 21.14,
                 }

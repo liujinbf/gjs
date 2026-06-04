@@ -96,6 +96,7 @@ python main.py
 - `LIVE_ORDER_PRECHECK_ONLY`
 - `LIVE_MAX_OPEN_POSITIONS`
 - `LIVE_MAX_ORDERS_PER_DAY`
+- `LIVE_SCALP_MAX_RISK_PCT`
 - `SIM_INITIAL_BALANCE`
 - `SIM_NO_TP2_LOCK_R`
 - `SIM_NO_TP2_PARTIAL_CLOSE_RATIO`
@@ -201,6 +202,7 @@ python main.py
 - `LIVE_ORDER_PRECHECK_ONLY=1` 时，实盘链路只执行 MT5 `order_check` 预检，不会执行 `order_send`；确认稳定后才建议改为 `0`
 - `LIVE_MAX_OPEN_POSITIONS` 控制实盘最大同时持仓数，达到上限后禁止继续开仓
 - `LIVE_MAX_ORDERS_PER_DAY` 控制实盘每日 AI 订单上限，防止异常信号在同一天反复开仓
+- `LIVE_SCALP_MAX_RISK_PCT` 控制实盘短线策略单笔最大风险预算，默认 `0.005`（0.5%），避免分钟级信号沿用较高的标准仓位预算
 - `SIM_INITIAL_BALANCE` 控制模拟盘起始本金
 - `SIM_NO_TP2_LOCK_R` 与 `SIM_NO_TP2_PARTIAL_CLOSE_RATIO` 控制浮盈锁定保护和首次减仓比例；有第二目标位时也会先保护浮盈，剩余仓位继续看第二目标
 - `SIM_SCALP_EXIT_R / SIM_SCALP_MIN_MINUTES` 控制短线套利落袋：当 0.01 手等无法拆分仓位已经达到小目标浮盈时，先止盈释放同品种下一次机会；`SIM_SCALP_EXIT_R=0` 可关闭

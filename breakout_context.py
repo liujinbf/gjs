@@ -70,8 +70,13 @@ def analyze_breakout_signal(key_level_context: dict | None, bars) -> dict:
     if not bool(key_context.get("key_level_ready", False)):
         return build_empty_breakout_context()
 
+    try:
+        bars_list = list(bars) if bars is not None else []
+    except (TypeError, ValueError):
+        bars_list = []
+
     normalized = []
-    for bar in (list(bars) if bars is not None and hasattr(bars, '__len__') and len(bars) > 0 else []):
+    for bar in bars_list:
         high_price = _bar_value(bar, "high")
         low_price = _bar_value(bar, "low")
         close_price = _bar_value(bar, "close")

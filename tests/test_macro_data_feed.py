@@ -67,6 +67,7 @@ def test_load_macro_data_feed_supports_fred_and_bls_specs(monkeypatch, tmp_path)
         refresh_min=60,
         symbols=["XAUUSD", "EURUSD"],
         now=datetime(2026, 4, 13, 18, 0, 0),
+        cache_file=tmp_path / "macro_cache.json",
         env={"FRED_API_KEY": "demo-key"},
     )
 

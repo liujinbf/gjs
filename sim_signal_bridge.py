@@ -47,6 +47,125 @@ def _get_active_structured_rules() -> list[dict]:
     except Exception:
         return _ACTIVE_RULES_CACHE
 
+_STRATEGY_DRAWDOWN_CACHE = {}
+_STRATEGY_LEARNING_GOV_CACHE = {}
+
+def _get_strategy_drawdown_lock(family: str) -> dict:
+    query_family = "au_ag_zscore" if family == "au_ag_pair" else family
+    if query_family in _STRATEGY_DRAWDOWN_CACHE:
+        return _STRATEGY_DRAWDOWN_CACHE[query_family]
+    state = {"locked": False, "win_rate": 1.0, "win_count": 0, "loss_count": 0, "net_profit": 0.0}
+    _STRATEGY_DRAWDOWN_CACHE[query_family] = state
+    return state
+
+def _get_strategy_validation_state(family: str, action: str, config=None) -> dict:
+    if config is None:
+        config = get_runtime_config()
+    enabled = bool(getattr(config, "sim_strategy_validation_enabled", False))
+    min_samples = int(getattr(config, "sim_strategy_validation_min_samples", 8) or 8)
+    min_win_rate = float(getattr(config, "sim_strategy_validation_min_win_rate", 45.0) or 45.0)
+    min_profit_factor = float(getattr(config, "sim_strategy_validation_min_profit_factor", 1.10) or 1.10)
+    query_family = "au_ag_zscore" if family == "au_ag_pair" else family
+    state = {
+        "enabled": enabled,
+        "strategy_family": query_family,
+        "total_count": 0,
+        "passed": True,
+        "win_rate": 0.0,
+        "net_profit": 0.0,
+        "profit_factor": 0.0,
+        "min_samples": min_samples,
+    }
+    if not enabled:
+        return state
+    try:
+        from knowledge_base import open_knowledge_connection
+        with open_knowledge_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT outcome_label, profit
+                FROM trade_learning_journal
+                WHERE (setup_kind = ? OR (setup_kind IS NULL AND ? = 'structure'))
+                  AND action = ?
+                """,
+                (query_family, query_family, action)
+            ).fetchall()
+            total_count = len(rows)
+            state["total_count"] = total_count
+            if total_count == 0:
+                state["passed"] = False
+                return state
+            win_count = 0
+            loss_count = 0
+            total_profit = 0.0
+            total_loss = 0.0
+            net_profit = 0.0
+            for row in rows:
+                profit = float(row["profit"] or 0.0)
+                net_profit += profit
+                if profit > 0:
+                    win_count += 1
+                    total_profit += profit
+                elif profit < 0:
+                    loss_count += 1
+                    total_loss += abs(profit)
+            win_rate = (win_count / total_count) * 100.0 if total_count > 0 else 0.0
+            if total_loss > 0:
+                profit_factor = total_profit / total_loss
+            else:
+                profit_factor = 999.0 if total_profit > 0 else 1.0
+            state["win_rate"] = win_rate
+            state["net_profit"] = net_profit
+            state["profit_factor"] = profit_factor
+            passed = True
+            if total_count < min_samples:
+                passed = False
+            elif win_rate < min_win_rate:
+                passed = False
+            elif profit_factor < min_profit_factor:
+                passed = False
+            state["passed"] = passed
+    except Exception:
+        pass
+    return state
+
+def _get_strategy_learning_governance_state(family: str) -> dict:
+    query_family = "au_ag_zscore" if family == "au_ag_pair" else family
+    if query_family in _STRATEGY_LEARNING_GOV_CACHE:
+        return _STRATEGY_LEARNING_GOV_CACHE[query_family]
+    state = {"blocked": False}
+    try:
+        from knowledge_base import open_knowledge_connection
+        with open_knowledge_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT kr.logic_json, rg.governance_status
+                FROM rule_governance rg
+                JOIN knowledge_rules kr ON kr.id = rg.rule_id
+                WHERE rg.governance_status = 'archived'
+                """
+            ).fetchall()
+            for row in rows:
+                logic_json_str = row["logic_json"]
+                if not logic_json_str:
+                    continue
+                try:
+                    logic = json.loads(logic_json_str)
+                    if (
+                        logic
+                        and isinstance(logic, dict)
+                        and logic.get("source") == "strategy_learning"
+                        and logic.get("strategy_family") == query_family
+                    ):
+                        state["blocked"] = True
+                        break
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    _STRATEGY_LEARNING_GOV_CACHE[query_family] = state
+    return state
+
 _SIM_BLOCK_REASON_LABELS = {
     "inactive_quote": "非实时报价",
     "grade_gate": "未到试仓级别",
@@ -120,6 +239,10 @@ def _pick_entry_price(item: dict, action: str) -> float:
 
 
 def _resolve_signal_side(item: dict) -> str:
+    scalp_dir = _normalize_text(item.get("scalp_direction", "")).lower()
+    if scalp_dir in {"long", "short"}:
+        return scalp_dir
+
     explicit = _normalize_text(item.get("signal_side", "")).lower()
     if explicit in {"long", "short"}:
         return explicit
@@ -288,7 +411,7 @@ def _diagnose_grade_gate_secondary(item: dict, thresholds: dict[str, float] | No
     trade_grade_source = _normalize_text(item.get("trade_grade_source", "")).lower()
     event_note = _normalize_text(item.get("event_note", ""))
     event_mode = _normalize_text(item.get("event_mode_text", "") or item.get("event_risk_mode_text", ""))
-    if "事件" in trade_grade or "事件" in event_note or event_mode in {"事件前高敏", "事件落地观察"}:
+    if "事件" in trade_grade or bool(event_note) or event_mode in {"事件前高敏", "事件前", "事件落地观察", "事件后"}:
         return "event_gate", _GRADE_GATE_SECONDARY_LABELS["event_gate"]
     if trade_grade_source not in {"structure", "setup"}:
         return "source_gate", _GRADE_GATE_SECONDARY_LABELS["source_gate"]
@@ -371,14 +494,20 @@ def _build_contract_signal_payload(
     source_kind = _normalize_text(item.get("trade_grade_source", "")).lower()
     setup_kind = _normalize_text(item.get("setup_kind", "")).lower()
     strategy_family = setup_kind or source_kind
+    
+    is_scalp_strategy = (setup_kind == "scalp")
+    sl_val = float(item.get("scalp_stop_price", 0.0) or 0.0) if is_scalp_strategy else float(item.get("risk_reward_stop_price", 0.0) or 0.0)
+    tp_val = float(item.get("scalp_target_price", 0.0) or 0.0) if is_scalp_strategy else float(item.get("risk_reward_target_price", 0.0) or 0.0)
+    tp2_val = float(item.get("scalp_target_2_price", 0.0) or 0.0) if is_scalp_strategy else float(item.get("risk_reward_target_price_2", 0.0) or 0.0)
+
     signal = StrategySignal.from_payload(
         {
             "symbol": _normalize_text(item.get("symbol", "")).upper(),
             "action": action,
             "price": _pick_entry_price(item, action),
-            "sl": float(item.get("risk_reward_stop_price", 0.0) or 0.0),
-            "tp": float(item.get("risk_reward_target_price", 0.0) or 0.0),
-            "tp2": float(item.get("risk_reward_target_price_2", 0.0) or 0.0),
+            "sl": sl_val,
+            "tp": tp_val,
+            "tp2": tp2_val,
             "source_kind": source_kind,
             "trade_grade_source": source_kind,
             "setup_kind": setup_kind,
@@ -515,6 +644,128 @@ def _evaluate_item_for_sim(
         reason = "当前不是实时报价。"
         return False, reason, "neutral", _classify_sim_block_reason(reason, False)
 
+    setup_kind = _normalize_text(item.get("setup_kind", "")).lower()
+    source_kind = _normalize_text(item.get("trade_grade_source", "")).lower()
+    strategy_family = setup_kind or source_kind
+    
+    # 提前获取并解析方向
+    action = _resolve_signal_side(item)
+    config = get_runtime_config()
+
+    # 1. 策略禁用名单风控拦截
+    disabled_strategies = getattr(config, "sim_disabled_strategies", []) or []
+    if strategy_family in disabled_strategies:
+        reason = f"策略 {strategy_family} 已在策略回滚禁用名单中。"
+        return False, reason, "neutral", "grade_gate"
+
+    # 2. 策略方向禁用名单风控拦截
+    if action in {"long", "short"}:
+        disabled_actions = getattr(config, "sim_disabled_strategy_actions", []) or []
+        action_key = f"{strategy_family}:{action}"
+        if action_key in disabled_actions:
+            reason = f"策略动作 {action_key} 已在策略方向回滚禁用名单中。"
+            return False, reason, "neutral", "grade_gate"
+
+    # 3. 防回撤冬眠风控拦截
+    lock_state = _get_strategy_drawdown_lock(strategy_family)
+    if lock_state and lock_state.get("locked"):
+        reason = f"防回撤冬眠：策略 {strategy_family} 最近表现不佳已锁定。"
+        return False, reason, "neutral", "grade_gate"
+
+    # 4. 策略学习治理期冻结拦截
+    gov_state = _get_strategy_learning_governance_state(strategy_family)
+    if gov_state and gov_state.get("blocked"):
+        reason = "策略学习治理：该策略自动开仓已冻结。"
+        return False, reason, "neutral", "grade_gate"
+
+    # 5. 样本验证自适应风控拦截
+    if action in {"long", "short"}:
+        validation_enabled = getattr(config, "sim_strategy_validation_enabled", False)
+        if validation_enabled:
+            val_state = _get_strategy_validation_state(strategy_family, action, config)
+            if val_state and not val_state.get("passed", True):
+                reason = "策略样本验证未通过：当前样本不足或表现不佳。"
+                return False, reason, "neutral", "grade_gate"
+
+    # 6. 资讯流宏观政策冲突拦截
+    if action in {"long", "short"}:
+        macro_news = item.get("macro_news_items", []) or []
+        symbol = _normalize_text(item.get("symbol", "")).upper()
+        for news in macro_news:
+            bias_by_symbol = news.get("bias_by_symbol", {}) or {}
+            news_bias = _normalize_text(bias_by_symbol.get(symbol, "")).lower()
+            bias_dir = "long" if news_bias in {"bullish", "long"} else ("short" if news_bias in {"bearish", "short"} else "")
+            if bias_dir and bias_dir != action:
+                reason = f"资讯流宏观政策冲突：信号方向为 {action}，但宏观政策偏向为 {news_bias}。"
+                return False, reason, "neutral", "grade_gate"
+
+    # 7. 结构化宏观数据冲突拦截
+    if action in {"long", "short"}:
+        macro_data = item.get("macro_data_items", []) or []
+        for data in macro_data:
+            data_dir_raw = _normalize_text(data.get("direction", "")).lower()
+            data_dir = "long" if data_dir_raw in {"bullish", "long"} else ("short" if data_dir_raw in {"bearish", "short"} else "")
+            if data_dir and data_dir != action:
+                reason = f"结构化宏观数据冲突：信号方向为 {action}，但宏观数据偏向为 {data_dir_raw}。"
+                return False, reason, "neutral", "grade_gate"
+
+    # 8. 事件窗口物理硬拦截风控
+    trade_grade_source_raw = str(item.get("trade_grade_source", "") or "").strip().lower()
+    event_override_kind = str(item.get("event_override_kind", "") or "").strip().lower()
+    evt_mode = str(item.get("event_risk_mode", "") or "").strip().lower()
+    evt_text = str(item.get("event_mode_text", "") or item.get("event_risk_mode_text", "") or "").strip()
+    evt_note = str(item.get("event_note", "") or "").strip()
+
+    is_event_phase = (
+        evt_mode in {"pre_event", "post_event", "illiquid"}
+        or "pre_event" in evt_mode
+        or "post_event" in evt_mode
+        or "illiquid" in evt_mode
+        or "事件前" in evt_text
+        or "事件后" in evt_text
+        or "流动性" in evt_text
+        or bool(evt_note)
+    )
+    is_event_source = (trade_grade_source_raw == "event")
+    is_continuation = (event_override_kind == "post_event_continuation")
+
+    if (is_event_phase or is_event_source) and not is_continuation:
+        is_scalp = (strategy_family == "scalp")
+        evt_importance = str(item.get("event_importance", "") or item.get("event_importance_text", "") or "").strip().lower()
+        evt_note_text = str(item.get("event_note", "") or "").strip().lower()
+        is_high_impact = (
+            evt_importance == "high" 
+            or "high" in evt_importance 
+            or "重大" in evt_importance 
+            or "高影响" in evt_importance
+            or "高敏" in evt_importance
+            or "重大" in evt_note_text
+            or "高影响" in evt_note_text
+        )
+        if is_scalp:
+            if is_high_impact:
+                reason = "当前正处于重大高影响事件窗口内，短线策略执行物理拦截禁止开仓。"
+                return False, reason, "neutral", "grade_gate"
+        else:
+            reason = f"当前正处于事件高敏发布或流动性窗口内，执行面物理拦截禁止开仓。（细分：{evt_text or evt_note}）"
+            return False, reason, "neutral", "grade_gate"
+
+    # 9. Tick剧震冷却拦截
+    if bool(item.get("tick_shock_active", False)):
+        reason = "Tick 异动冷却中：当前标的处于急拉/急跌后的剧震冷却期。"
+        return False, reason, action, "grade_gate"
+
+    # 10. M15 裸K价格结构反向拦截
+    if action in {"long", "short"} and bool(item.get("m15_price_structure_ready", False)):
+        struct_dir = _normalize_text(item.get("m15_price_structure_direction", "")).lower()
+        if struct_dir == "bullish" and action == "short":
+            reason = "裸K结构偏多：M15结构偏多，禁止做空。"
+            return False, reason, "neutral", "grade_gate"
+        elif struct_dir == "bearish" and action == "long":
+            reason = "裸K结构偏空：M15结构偏空，禁止做多。"
+            return False, reason, "neutral", "grade_gate"
+
+    # ── 下面接原本的轻仓试仓级别、高级智能规则、盈亏比等后续判定 ──
     rule_overridden = False
     active_rules = _get_active_structured_rules()
     for rule in active_rules:
@@ -529,6 +780,9 @@ def _evaluate_item_for_sim(
         allow_exploratory and _is_exploratory_setup_candidate(item, thresholds)
     )
     exploratory_override = bool(observation_exploratory_override or setup_exploratory_override)
+    
+    is_scalp_strategy = (strategy_family == "scalp")
+
     if (
         not rule_overridden
         and not exploratory_override
@@ -539,18 +793,31 @@ def _evaluate_item_for_sim(
     if _normalize_text(item.get("trade_grade_source", "")) not in {"structure", "setup"}:
         reason = "当前候选并非结构型入场信号。"
         return False, reason, "neutral", _classify_sim_block_reason(reason, False)
-    if not bool(item.get("risk_reward_ready", False)):
+    
+    # ── 盈亏比就绪自适应校验 ──
+    rr_ready = bool(item.get("scalp_ready", False)) if is_scalp_strategy else bool(item.get("risk_reward_ready", False))
+    if not rr_ready:
         reason = "盈亏比尚未准备好。"
         return False, reason, "neutral", _classify_sim_block_reason(reason, False)
 
-    rr = float(item.get("risk_reward_ratio", 0.0) or 0.0)
+    # ── 盈亏比数值自适应校验 ──
+    from runtime_utils import get_adaptive_filter_ratio
+    adaptive_ratio = get_adaptive_filter_ratio()
+
+    rr = float(item.get("scalp_rr", 0.0) or 0.0) if is_scalp_strategy else float(item.get("risk_reward_ratio", 0.0) or 0.0)
     model_ready = bool(item.get("model_ready", False))
     model_probability = float(item.get("model_win_probability", 0.0) or 0.0)
-    min_rr = float(thresholds.get("min_rr", 1.6) or 1.6)
-    if _normalize_text(item.get("trade_grade_source", "")) == "setup":
-        min_rr = _resolve_setup_min_rr(item, thresholds)
+    
+    if is_scalp_strategy:
+        min_rr = float(getattr(config, "scalp_min_rr", 1.2) or 1.2) * adaptive_ratio
+    else:
+        min_rr = (float(thresholds.get("min_rr", 1.6) or 1.6)) * adaptive_ratio
+        if _normalize_text(item.get("trade_grade_source", "")) == "setup":
+            min_rr = (_resolve_setup_min_rr(item, thresholds)) * adaptive_ratio
+            
     relaxed_rr = float(thresholds.get("relaxed_rr", 1.3) or 1.3)
     model_min_probability = float(thresholds.get("model_min_probability", 0.68) or 0.68)
+    
     if rr < min_rr:
         setup_ready = (
             exploratory_override
@@ -561,28 +828,31 @@ def _evaluate_item_for_sim(
             reason = "盈亏比还不够健康，先继续观察。"
             return False, reason, "neutral", _classify_sim_block_reason(reason, False)
 
-    action = _resolve_signal_side(item)
+    # ── 方向清晰度最终阻断 ──
     if action not in {"long", "short"}:
         reason = "方向还不够清晰，暂不自动试仓。"
         return False, reason, "neutral", _classify_sim_block_reason(reason, False)
 
-    if min(
-        float(item.get("risk_reward_stop_price", 0.0) or 0.0),
-        float(item.get("risk_reward_target_price", 0.0) or 0.0),
-    ) <= 0:
+    # ── 止损目标绝对价格校验 ──
+    sl_check = float(item.get("scalp_stop_price", 0.0) or 0.0) if is_scalp_strategy else float(item.get("risk_reward_stop_price", 0.0) or 0.0)
+    tp_check = float(item.get("scalp_target_price", 0.0) or 0.0) if is_scalp_strategy else float(item.get("risk_reward_target_price", 0.0) or 0.0)
+    if min(sl_check, tp_check) <= 0:
         reason = "止损或目标价仍不完整。"
         return False, reason, action, _classify_sim_block_reason(reason, False)
-    if not _is_price_near_entry_zone(item, action):
-        reason = "价格尚未回到可执行观察区间附近，继续等回踩。"
-        return False, reason, action, _classify_sim_block_reason(reason, False)
+        
+    # ── 高频短线不执行慢速大周期 entry zone 与追涨杀跌校验 ──
+    if not is_scalp_strategy:
+        if not _is_price_near_entry_zone(item, action):
+            reason = "价格尚未回到可执行观察区间附近，继续等回踩。"
+            return False, reason, action, _classify_sim_block_reason(reason, False)
 
-    zone_side, zone_side_text = _resolve_entry_zone_position(item, action)
-    if action == "long" and zone_side == "upper":
-        reason = f"当前更贴近观察区间{zone_side_text}，自动试仓先别在上沿追价。"
-        return False, reason, action, _classify_sim_block_reason(reason, False)
-    if action == "short" and zone_side == "lower":
-        reason = f"当前更贴近观察区间{zone_side_text}，自动试仓先别在下沿追空。"
-        return False, reason, action, _classify_sim_block_reason(reason, False)
+        zone_side, zone_side_text = _resolve_entry_zone_position(item, action)
+        if action == "long" and zone_side == "upper":
+            reason = f"当前更贴近观察区间{zone_side_text}，自动试仓先别在上沿追价。"
+            return False, reason, action, _classify_sim_block_reason(reason, False)
+        if action == "short" and zone_side == "lower":
+            reason = f"当前更贴近观察区间{zone_side_text}，自动试仓先别在下沿追空。"
+            return False, reason, action, _classify_sim_block_reason(reason, False)
 
     meta = _build_contract_signal_payload(
         item,
@@ -590,14 +860,13 @@ def _evaluate_item_for_sim(
         execution_profile="exploratory" if exploratory_override else "standard",
         reason_key="exploratory_ready" if exploratory_override else "ready",
     )
-    valid, reason = validate_signal_meta(meta)
+    valid, reason_str = validate_signal_meta(meta)
     if not valid:
-        normalized_reason = _normalize_text(reason) or "信号元数据校验失败。"
+        normalized_reason = _normalize_text(reason_str) or "信号元数据校验失败。"
         return False, normalized_reason, action, _classify_sim_block_reason(normalized_reason, False)
     if exploratory_override:
         return True, "", action, "exploratory_ready"
     return True, "", action, "ready"
-
 
 def audit_rule_sim_signal_decision(snapshot: dict, allow_exploratory: bool = False) -> dict:
     thresholds = _get_sim_thresholds()
@@ -706,7 +975,11 @@ def build_rule_sim_signal_decision(snapshot: dict, allow_exploratory: bool = Fal
                 blocked_reasons.append(f"{symbol}：{reason}{suffix}")
             continue
 
-        score = float(item.get("risk_reward_ratio", 0.0) or 0.0)
+        setup_kind = _normalize_text(item.get("setup_kind", "")).lower()
+        if setup_kind == "scalp":
+            score = float(item.get("scalp_rr", 0.0) or 0.0)
+        else:
+            score = float(item.get("risk_reward_ratio", 0.0) or 0.0)
         if bool(item.get("model_ready", False)):
             score += float(item.get("model_win_probability", 0.0) or 0.0)
         execution_profile = "exploratory" if reason_key == "exploratory_ready" else "standard"

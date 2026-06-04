@@ -861,6 +861,133 @@ def send_learning_health_notification(
     return {"sent_count": enqueued_count, "messages": messages, "errors": []}
 
 
+def send_scalp_signal_notification(
+    item: dict,
+    config: MetalMonitorConfig,
+    state_file: Path | None = None,
+    now: datetime | None = None,
+    cooldown_sec: int = 90,
+) -> dict:
+    """短线信号专用推送通道（纯规则直推，不等 AI）。
+
+    设计原则：
+    - 独立冷却键 scalp::{symbol}::last_push，冷却 90 秒（≈3 根 M5 K线）
+    - 不走普通 entry 冷却体系，不受 notify_cooldown_min 限制
+    - 推送内容精简：品种 / 方向 / 入场 / 止损 / 止盈 / 信号类型 / 失效条件
+    - 通过 NotificationWorker 异步投递，不阻塞主线程
+    """
+    if not bool(getattr(config, "scalp_enabled", True)):
+        return {"sent_count": 0, "messages": [], "errors": [], "skipped_reason": "scalp_disabled"}
+    if not bool(getattr(config, "notify_dingtalk_enabled", True) or str(config.dingtalk_webhook or "").strip() or str(config.pushplus_token or "").strip()):
+        return {"sent_count": 0, "messages": [], "errors": [], "skipped_reason": "no_channel"}
+
+    symbol = str(item.get("symbol", "") or "").strip().upper()
+    scalp_ready = bool(item.get("scalp_ready", False))
+    scalp_direction = str(item.get("scalp_direction", "") or "").strip().lower()
+    scalp_signal_type = str(item.get("scalp_signal_type", "") or "").strip()
+    scalp_rr = float(item.get("scalp_rr", 0.0) or 0.0)
+
+    if not symbol or not scalp_ready or scalp_direction not in {"long", "short"}:
+        return {"sent_count": 0, "messages": [], "errors": [], "skipped_reason": "scalp_not_ready"}
+
+    # ── 冷却判断：90 秒内同品种同方向不重复推送 ─────────────────────────
+    cooldown_key = f"scalp::{symbol}::last_push"
+    state = _read_state(state_file=state_file)
+    current = now or datetime.now()
+    last_push_time = _parse_time(str(state.get(cooldown_key, "") or "").strip())
+    if last_push_time is not None and (current - last_push_time).total_seconds() < max(30, int(cooldown_sec or 90)):
+        remaining = max(0, int(cooldown_sec or 90) - int((current - last_push_time).total_seconds()))
+        return {
+            "sent_count": 0,
+            "messages": [],
+            "errors": [],
+            "skipped_reason": f"scalp_cooldown（{symbol} 冷却中，还需 {remaining} 秒）",
+        }
+
+    # ── 构建推送内容 ──────────────────────────────────────────────────
+    direction_text = "🟢 做多" if scalp_direction == "long" else "🔴 做空"
+    signal_type_map = {
+        "pullback_ema21": "EMA21回调狙击",
+        "ema_crossover": "EMA9/21金叉死叉",
+        "bollinger_breakout": "布林带收窄爆破",
+        "liquidity_hunt": "流动性猎取",
+    }
+    signal_type_text = signal_type_map.get(scalp_signal_type, scalp_signal_type or "短线信号")
+
+    entry_price = float(item.get("scalp_entry_price", 0.0) or item.get("latest_price", 0.0) or 0.0)
+    sl_price = float(item.get("scalp_sl_price", 0.0) or 0.0)
+    tp_price = float(item.get("scalp_tp_price", 0.0) or 0.0)
+    point = float(item.get("point", 0.0) or 0.0)
+
+    def _fmt(p: float) -> str:
+        if p <= 0:
+            return "--"
+        if point > 0 and point < 0.1:
+            return f"{p:.5f}"
+        return f"{p:.2f}"
+
+    scalp_confidence = str(item.get("scalp_confidence", "") or "").strip().lower()
+    confidence_emoji = {"high": "⭐⭐⭐", "medium": "⭐⭐", "low": "⭐"}.get(scalp_confidence, "")
+    scalp_signal_text = str(item.get("scalp_signal_text", "") or "").strip()
+    invalidation_text = str(item.get("scalp_invalidation_text", "") or scalp_signal_text or "").strip()
+    rr_text = f"R:R ≈ {scalp_rr:.1f}" if scalp_rr > 0 else ""
+
+    title = f"⚡ {symbol} M5短线信号 {direction_text}"
+    lines = [
+        f"**{symbol}** | {direction_text} | {signal_type_text} {confidence_emoji}",
+        "",
+        f"- 入场参考：{_fmt(entry_price)}",
+        f"- 止损：{_fmt(sl_price)}",
+        f"- 止盈：{_fmt(tp_price)}",
+    ]
+    if rr_text:
+        lines.append(f"- {rr_text}")
+    if invalidation_text:
+        lines.append(f"- ⚠️ 失效条件：{invalidation_text}")
+    lines += [
+        "",
+        f"⏱️ 信号时效：约 1-3 根 M5 K线，超时作废",
+        f"🕐 发出时间：{current.strftime('%H:%M:%S')}",
+    ]
+    entry = {
+        "occurred_at": current.strftime("%Y-%m-%d %H:%M:%S"),
+        "category": "scalp",
+        "title": title,
+        "detail": "\n".join(lines),
+        "tone": "success",
+        "signature": f"scalp::{symbol}::{scalp_direction}::{current.strftime('%Y%m%d%H%M')}",
+    }
+
+    # ── 异步投递 ──────────────────────────────────────────────────────
+    worker = get_notification_worker()
+    enqueued_count = 0
+
+    def _make_scalp_cb(channel_label: str) -> object:
+        def _cb(ok: bool, detail: str) -> None:
+            if ok:
+                logger.info("[短线信号] %s 已推送到%s", symbol, channel_label)
+            else:
+                logger.warning("[短线信号] %s 推送到%s失败：%s", symbol, channel_label, detail)
+        return _cb
+
+    if str(config.dingtalk_webhook or "").strip():
+        worker.enqueue({"send_fn": send_dingtalk, "args": (entry, config.dingtalk_webhook), "on_result": _make_scalp_cb("钉钉")})
+        enqueued_count += 1
+    if str(config.pushplus_token or "").strip():
+        worker.enqueue({"send_fn": send_pushplus, "args": (entry, config.pushplus_token), "on_result": _make_scalp_cb("PushPlus")})
+        enqueued_count += 1
+
+    if enqueued_count > 0:
+        # 乐观写入冷却时间戳
+        state[cooldown_key] = current.strftime("%Y-%m-%d %H:%M:%S")
+        _update_last_result(state, f"M5短线信号已投递：{symbol} {direction_text}", _normalize_text, now=current)
+        _write_state(state, state_file=state_file, now=current)
+        return {"sent_count": enqueued_count, "messages": [f"M5短线信号已投递：{symbol} {direction_text}"], "errors": []}
+
+    _write_state(state, state_file=state_file, now=current)
+    return {"sent_count": 0, "messages": [], "errors": ["未配置任何推送渠道"]}
+
+
 def get_notification_status(config: MetalMonitorConfig, state_file: Path | None = None) -> dict:
     state = _read_state(state_file=state_file)
     channels = []

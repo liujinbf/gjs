@@ -63,6 +63,10 @@ def _build_user_facing_title(entry: dict) -> str:
         if symbol:
             return f"{symbol} 状态更新：继续观望"
         return "状态更新：继续观望"
+    if category == "strategic_plan":
+        if symbol:
+            return f"{symbol} 战略计划：分批观察"
+        return "战略计划：分批观察"
     if category == "source":
         return "系统状态更新：外部数据降级"
     if category == "session":

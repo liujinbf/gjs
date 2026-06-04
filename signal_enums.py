@@ -91,6 +91,7 @@ class AlertStateText(str, Enum):
     SETUP_CANDIDATE  = "结构候选"
     EVENT_WINDOW     = "事件窗口观察"
     NORMAL_WATCH     = "报价正常观察"
+    SCALP_READY      = "短线就绪"       # M5 短线信号就绪
 
 
 class AlertGradeSource(str, Enum):

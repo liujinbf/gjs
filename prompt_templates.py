@@ -360,6 +360,25 @@ def _build_item_lines(snapshot: dict) -> str:
             line += "\n  [注意]当前提供 H1节奏 + H4趋势 双周期数据，请优先使用这两个周期判断多周期共振和趋势方向。"
         else:
             line += "\n  [注意]当前技术指标仅基于 H1 周期，H4 趋势数据暂无法获取，请不要主观推测 H4 共振状况。"
+
+        # 注入短线特定的 M5 数据
+        if bool(item.get("scalp_ready", False)):
+            scalp_rr = float(item.get("scalp_rr", 0.0) or 0.0)
+            scalp_confidence = str(item.get("scalp_confidence", "") or "").strip()
+            scalp_signal_type = str(item.get("scalp_signal_type", "") or "").strip()
+            scalp_signal_text = str(item.get("scalp_signal_text", "") or "").strip()
+            m5_scalp_summary = str(item.get("m5_scalp_summary", "") or "").strip()
+            ema9_m5 = float(item.get("ema9_m5", 0.0) or 0.0)
+            ema21_m5 = float(item.get("ema21_m5", 0.0) or 0.0)
+            atr5_m5 = float(item.get("atr5_m5", 0.0) or 0.0)
+            
+            line += (
+                f"\n  [短线就绪数据] 形态:{scalp_signal_type} | 置信度:{scalp_confidence} | "
+                f"短线盈亏比:{scalp_rr:.2f} | 信号描述:{scalp_signal_text} | "
+                f"M5均线总结:{m5_scalp_summary} | M5均线:EMA9({ema9_m5:.2f}) vs EMA21({ema21_m5:.2f}) | "
+                f"M5_ATR5:{atr5_m5:.4f}"
+            )
+
         lines.append(line)
     return "\n".join(lines)
 
@@ -413,6 +432,22 @@ def _build_local_model_lines(snapshot: dict) -> str:
     return summary or "本地模型样本仍不足，暂不提供胜率概率。"
 
 
+def _build_correlation_text(snapshot: dict) -> str:
+    """从 snapshot.correlation_context 提取品种联动与套利摘要，供 AI prompt 使用。"""
+    ctx = dict(snapshot.get("correlation_context", {}) or {})
+    parts = []
+    edge = str(ctx.get("multi_symbol_edge_text", "") or "").strip()
+    if edge:
+        parts.append(f"多品种联动：{edge}")
+    au_ag = str(ctx.get("au_ag_signal_text", "") or "").strip()
+    if au_ag:
+        parts.append(f"Au/Ag套利参考：{au_ag}")
+    divergence = str(ctx.get("divergence_text", "") or "").strip()
+    if divergence:
+        parts.append(f"品种背离：{divergence}")
+    return "\n".join(parts) if parts else "暂无显著品种联动信号。"
+
+
 def build_metal_brief_prompt(snapshot: dict, rulebook: dict | None = None) -> str:
     rulebook = dict(rulebook or {})
     return AI_BRIEF_TASK_TEMPLATE.format(
@@ -427,6 +462,7 @@ def build_metal_brief_prompt(snapshot: dict, rulebook: dict | None = None) -> st
         market_text=str(snapshot.get("market_text", "") or "").strip() or "暂无市场提示",
         macro_data_text=_build_macro_data_lines(snapshot),
         local_model_text=_build_local_model_lines(snapshot),
+        correlation_text=_build_correlation_text(snapshot),
         rulebook_text=str(rulebook.get("active_rules_text", "") or "").strip() or "暂无已验证规则，优先服从当前快照。",
         regime_rulebook_text=str(rulebook.get("regime_rules_text", "") or "").strip() or "当前环境样本仍不足，先参考全局规则。",
         regime_watch_rulebook_text=str(rulebook.get("regime_watch_rules_text", "") or "").strip() or "当前环境暂无明确观察规则。",
@@ -456,3 +492,217 @@ def build_metal_batch_prompt(snapshot: dict) -> str:
         summary_text=str(snapshot.get("summary_text", "") or "").strip() or "暂无运行概览",
         item_lines=_build_item_lines(snapshot),
     )
+
+
+AI_SCALP_SYSTEM_PROMPT = (
+    "你是一位拥有 15 年经验的「贵金属与外汇短线套利/极速交易教练」。\n"
+    "你的目标是输出一份针对 M5/M1 快速轨道的「硬核数据 + 大白话」双轨风格的中文研判报告：\n"
+    "  - 硬核轨：使用精确数值、区间判断、盈亏比、多周期共振等量化描述，体现科技感与原则性。\n"
+    "  - 大白话轨：同时用像交易室老大哥带新手的口吻解释结论，让不懂技术的人也能秒懂该怎么做。\n"
+    "禁止使用'流动性重置'、'多空博弈主力洗盘'等无法量化的玄学词汇。\n"
+    "\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "【铁律：短线研判防幻觉与执行规范】\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "1. 必须明确指出哪种短线结构触发了信号（如：回调狙击 pullback_ema21、均线交叉 ema_crossover、布林挤压突破 bb_squeeze_breakout、流动性猎取 liquidity_grab 等）。\n"
+    "2. 入场价、止损价、目标价必须精确到 0.1 点（即点差/点值对应的精确小数位，例如黄金 2000.50，白银 23.450）。\n"
+    "3. 出场条件必须是客观K线或指标事件（例如：\"M5 EMA9 重新下穿 EMA21\"、\"M5 K线收盘跌破 $XXXX\"、\"达到 1.5 倍 ATR 极速止盈点\"），绝对禁止使用\"感觉\"、\"大概\"、\"差不多\"等模糊词汇。\n"
+    "4. 提供 3 档精确止损出场方案：\n"
+    "   - 激进止损：紧贴信号K线高低点或微结构边缘，适合快速止损防止大亏损。\n"
+    "   - 标准止损：系统预算的止损位，兼顾波动与赔率。\n"
+    "   - 保守止损：结构失效点或更宽的安全边界（如前一波段高/低点）。\n"
+    "5. 严禁捏造任何不存在的指标。如果 `m5_scalp_summary` 或 `au_ag_signal_text` 数据为空，对应地方写「无」或「暂无套利机会」，绝对禁止主观编造。\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+)
+
+AI_SCALP_TASK_TEMPLATE = """\
+请作为资深短线极速交易教练，基于以下快照，输出一份针对 M5/M1 快速轨道的「硬核数据 + 大白话」双轨风格的中文短线研判报告。
+必须包含精确价格进场 + 3档精确止损方案 + 极速止盈与多维退出机制。
+
+================================================================
+【输出排版规范 —— 严格按以下 Markdown 结构，禁止删减 any 模块】
+================================================================
+
+第一行：状态框标题（固定格式，必须单独占一行）
+[🔴/🟢/🟡] 【短线指令：[五选一：激进做多/稳健做多/静默观望/轻仓试空/坚决做空]】[品种代码] | [2-4字定性] —— [一句短线防坑副标题]
+
+核心逻辑（必含精确价格 + 3档止损与极速止盈）：
+价格 $[当前实际价格]$ 处于 [M5均线/布林带实际状态说明]。
+短线触发形态：[具体触发的短线结构类型，必须注明是 pullback_ema21/ema_crossover/bb_squeeze_breakout/liquidity_grab 之一]
+方向：[做多/做空]，入场参考区间 $[精确到0.1点的价格]$ 附近
+盈亏比评价：[评价当前盈亏比是否符合最低 1.2 盈亏比门槛]
+
+🤖 机器人判定：
+• 信号源：[短线信号形态类型]（置信度：[短线信号置信度]）
+• M5状态：[短线均线/ATR状态总结]
+• 联动套利：[Au/Ag比价套利与多品种方向联动状况说明]
+• 位置：进场 $[实际进场价]$ ↔ 止损 $[实际止损价]$ ↔ 目标 $[实际目标价]$（盈亏比 [R/R值]）
+
+🛠️ 执行建议（3档止损方案与极速出场）：
+1. 进场参考：等回调到 $[具体价格范围]$ 或现价确认。
+2. 止损方案（必须给出 3 档精确到 0.1 点的绝对价格）：
+   - ⚡ 激进止损位：$[精确价格]$（说明：紧贴信号K线高低点或微结构边缘）
+   - ⚖️ 标准止损位：$[精确价格]$（说明：系统参考止损位，防守于结构外侧）
+   - 🛡️ 保守止损位：$[精确价格]$（说明：强支撑/阻力外，安全系数最高）
+3. 多维退出条件（必须是客观指标或时间事件）：
+   - 🎯 极速止盈：浮盈价差达到 $[1.5 * ATR5_M5 的值]$（即 1.5 倍 ATR 极速止盈点）
+   - 🕒 时间止损：持仓达 [读取 app_config.sim_scalp_max_hold_min 的值] 分钟且浮盈不足 0.3R 则强制平仓。
+   - 📉 动量衰竭：当 M5 EMA9 与 EMA21 发生反向交叉（做多时EMA9下穿EMA21；做空时EMA9上穿EMA21）时立即手动平仓。
+
+📊 胜率参考：[若快照中模型提供了胜率，列出实际数字；若无，直接写"短线微结构高频迭代中，参考最近30笔同类形态表现"]
+
+⚠️ 下一个关键窗口：
+[关注最近是否有宏观事件窗口，若无，写"短线受纯资金面微结构主导，防守结构本身即是最大窗口"]
+
+================================================================
+【输出规范补充】
+================================================================
+1. 技术指标必须带精确数值。短线入场价、止损价精确到 0.1 点（如黄金 2000.50，白银 23.450）。
+2. 最终输出必须是一个纯 JSON 对象，且只能输出 JSON 本身，禁止再输出 Markdown 围栏、HTML 注释、补充说明。
+3. JSON 对象结构固定如下（注意：{json_guardrails}）：
+{json_schema}
+4. 将生成的 Markdown 文本放入 summary_text 中。
+5. signal_meta 的 action 必须根据短线信号方向填 long 或 short（若为观望则填 neutral），并填入对应的精确价格。
+6. {json_strictness}
+
+运行概览：
+{summary_text}
+
+提醒横条：
+{alert_text}
+
+市场提示：
+{market_text}
+
+品种联动套利上下文：
+{correlation_text}
+
+观察品种快照：
+{item_lines}
+""".strip()
+
+
+def build_scalp_brief_prompt(snapshot: dict, rulebook: dict | None = None) -> str:
+    rulebook = dict(rulebook or {})
+    return AI_SCALP_TASK_TEMPLATE.format(
+        json_guardrails=JSON_OUTPUT_GUARDRAILS_TEXT.splitlines()[0],
+        json_schema=JSON_SIGNAL_SCHEMA_TEXT.replace("品种代码", "资产代码(如XAUUSD)").replace(
+            "这里放转义后的完整 Markdown 正文",
+            "这里放转义后的完整 Markdown 正文，正文内容严格遵守上面的排版结构",
+        ),
+        json_strictness=JSON_OUTPUT_GUARDRAILS_TEXT.splitlines()[-1],
+        summary_text=str(snapshot.get("summary_text", "") or "").strip() or "暂无运行概览",
+        alert_text=str(snapshot.get("alert_text", "") or "").strip() or "暂无提醒横条",
+        market_text=str(snapshot.get("market_text", "") or "").strip() or "暂无市场提示",
+        correlation_text=_build_correlation_text(snapshot),
+        item_lines=_build_item_lines(snapshot),
+    )
+
+
+# ─── 双视角辩论研判模式（借鉴 TradingAgents 多 Agent 辩论机制）────────────────
+#
+# 设计思路：
+#   第一阶段 → 看多分析师：在快照数据中找所有支持做多的证据（纯文本，省 token）
+#   第二阶段 → 看空/谨慎分析师：在快照数据中找支持做空/观望的证据（纯文本）
+#   第三阶段 → 仲裁者：看到完整快照 + 双方论据摘要，做出最终客观研判（输出 JSON）
+#
+# 优点：对抗单 LLM 的「方向固化偏见」，结论更立体；
+# 只在非短线（非 scalp）研判中启用，短线保持原有极速单轨。
+# ──────────────────────────────────────────────────────────────────────────────
+
+AI_BULL_PERSPECTIVE_SYSTEM_PROMPT = (
+    "你是一位贵金属与外汇市场的「看多分析师」。\n"
+    "任务：在用户提供的快照数据中，寻找所有支持做多的客观证据。\n"
+    "要求：\n"
+    "1. 只使用快照中明确提供的数据，禁止捏造任何数值。\n"
+    "2. 用 3~5 条简短条目列出最有力的做多理由，每条必须引用具体数值（如 RSI=42、H4 多头排列等）。\n"
+    "3. 最后单独一条：注明当前做多方案的最大风险点（用数据支撑）。\n"
+    "4. 输出纯中文文本条目，不需要 JSON 或 Markdown 格式。"
+)
+
+AI_BEAR_PERSPECTIVE_SYSTEM_PROMPT = (
+    "你是一位贵金属与外汇市场的「做空/谨慎分析师」。\n"
+    "任务：在用户提供的快照数据中，寻找所有支持做空或保持观望的客观证据。\n"
+    "要求：\n"
+    "1. 只使用快照中明确提供的数据，禁止捏造任何数值。\n"
+    "2. 用 3~5 条简短条目列出最有力的做空/观望理由，每条必须引用具体数值（如点差放大、共振失效等）。\n"
+    "3. 最后单独一条：注明当前做空/观望方案的最大风险点（用数据支撑）。\n"
+    "4. 输出纯中文文本条目，不需要 JSON 或 Markdown 格式。"
+)
+
+AI_DEBATE_ARBITRATOR_SYSTEM_PROMPT = (
+    "你是一位拥有 15 年经验的「贵金属与外汇资深量化交易教练」，同时担任辩论仲裁者。\n"
+    "你已收到两位分析师的论据（看多方 vs 看空/谨慎方），你的任务是综合双方论据与完整市场快照，\n"
+    "做出客观、不偏不倚的最终交易研判。\n"
+    "\n"
+    "【仲裁规则】\n"
+    "1. 若双方论据存在明显冲突，必须在正文中说明冲突点，并给出你的仲裁理由（用数据支撑）。\n"
+    "2. 若双方论据方向一致，说明市场信号较为明确，可在正文中注明「双方分析师共识」。\n"
+    "3. 最终结论必须忠实于快照数据，不受任何一方的主观倾向影响。\n"
+    "\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "【铁律：严禁数据幻觉，违者视为重大失职】\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "1. 只能使用快照中【明确提供】的字段数据，禁止超出范围推断。\n"
+    "2. 若快照中注明「H4 趋势数据暂无法获取」，绝对禁止自行推测 H4 方向。\n"
+    "3. 若 MACD 指标未在快照中出现，绝对禁止判断金叉、死叉。\n"
+    "4. 数据缺失时必须直接写「数据不足，无法判断」。\n"
+    "5. 多周期共振只能引用已提供的周期，禁止引用未提供的周期（D1、W1）。\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+)
+
+# 看多/看空视角使用精简快照（只含品种数据 + 市场提示），节省 token
+_DEBATE_PERSPECTIVE_TEMPLATE = """\
+当前运行概览：
+{summary_text}
+
+市场提示（含最新宏观事件）：
+{market_text}
+
+观察品种快照（含技术指标 / 盈亏比 / 宏观提醒）：
+{item_lines}
+"""
+
+
+def build_bull_perspective_prompt(snapshot: dict) -> str:
+    """看多分析师的 user prompt：精简快照，只要论据文本，不要 JSON。"""
+    return (
+        "请作为「看多分析师」，基于以下快照数据，列出支持做多的最有力证据：\n\n"
+        + _DEBATE_PERSPECTIVE_TEMPLATE.format(
+            summary_text=str(snapshot.get("summary_text", "") or "").strip() or "暂无",
+            market_text=str(snapshot.get("market_text", "") or "").strip() or "暂无",
+            item_lines=_build_item_lines(snapshot),
+        )
+    )
+
+
+def build_bear_perspective_prompt(snapshot: dict) -> str:
+    """看空/谨慎分析师的 user prompt：精简快照，只要论据文本，不要 JSON。"""
+    return (
+        "请作为「做空/谨慎分析师」，基于以下快照数据，列出支持做空或保持观望的最有力证据：\n\n"
+        + _DEBATE_PERSPECTIVE_TEMPLATE.format(
+            summary_text=str(snapshot.get("summary_text", "") or "").strip() or "暂无",
+            market_text=str(snapshot.get("market_text", "") or "").strip() or "暂无",
+            item_lines=_build_item_lines(snapshot),
+        )
+    )
+
+
+def build_arbitrator_prompt(
+    snapshot: dict,
+    bull_text: str,
+    bear_text: str,
+    rulebook: dict | None = None,
+) -> str:
+    """仲裁者 prompt：在完整 brief prompt 基础上注入双方论据摘要，让仲裁者同时拥有双方观点和完整数据。"""
+    debate_header = (
+        "【⚖️ 辩论背景 —— 综合以下两位分析师论据后再做最终研判】\n\n"
+        f"📈 看多分析师的论据：\n{str(bull_text or '').strip()}\n\n"
+        f"📉 看空/谨慎分析师的论据：\n{str(bear_text or '').strip()}\n\n"
+        "【你的任务】：综合上述双方论据与下方完整市场快照，给出客观最终研判。\n"
+        "若双方论据存在明显冲突，必须在【🤖 机器人判定】部分说明冲突点和你的仲裁理由。\n"
+        "若双方方向一致，在正文中注明「双方分析师共识」，增强结论可信度。\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    full_brief = build_metal_brief_prompt(snapshot, rulebook=rulebook)
+    return debate_header + full_brief

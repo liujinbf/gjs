@@ -43,3 +43,7 @@ def test_build_technical_indicators_includes_atr_fields():
     assert indicators["atr14_h4"] == 10.0
     assert "ATR(14)=10.0000" in indicators["tech_summary"]
     assert "H4 ATR(14)=10.0000" in indicators["tech_summary_h4"]
+    assert indicators["prev_ema9_m5"] is not None
+    assert indicators["prev_ema21_m5"] is not None
+    assert indicators["m5_last_high"] == indicators["m5_last_close"] + 5.0
+    assert indicators["m5_prev_low"] == indicators["m5_prev_close"] - 5.0

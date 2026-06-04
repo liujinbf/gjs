@@ -548,6 +548,28 @@ def test_pending_rules_panel_reads_governance_pending_rows(monkeypatch):
             assert "rg.governance_status = 'manual_review'" in sql
             return _FakeRows()
 
+    from app_config import MetalMonitorConfig
+    fake_config = MetalMonitorConfig(
+        symbols=["XAUUSD"],
+        refresh_interval_sec=30,
+        event_risk_mode="normal",
+        mt5_path="",
+        mt5_login="",
+        mt5_password="",
+        mt5_server="",
+        dingtalk_webhook="",
+        pushplus_token="",
+        notify_cooldown_min=30,
+        ai_api_key="",
+        ai_api_base="",
+        ai_model="",
+        ai_push_enabled=False,
+        ai_push_summary_only=True,
+    )
+    monkeypatch.setattr(
+        "ui_panels.get_runtime_config",
+        lambda: fake_config,
+    )
     monkeypatch.setattr(
         "knowledge_base.open_knowledge_connection",
         lambda *_args, **_kwargs: _FakeConn(),
@@ -580,7 +602,7 @@ def test_pending_rules_panel_reads_governance_pending_rows(monkeypatch):
         assert "888 模拟盘反思 1 条" in panel.lbl_learning_digest.text()
         assert "策略参数：" in panel.lbl_strategy_param_state.text()
         assert "回调狙击 1.30R" in panel.lbl_strategy_param_state.text()
-        assert "方向试仓 1.55R" in panel.lbl_strategy_param_state.text()
+        assert "方向试仓 1.85R" in panel.lbl_strategy_param_state.text()
         assert "回调狙击：1.30R / 日上限 8 次 / 冷却 6 分钟" in panel.lbl_strategy_param_state.toolTip()
         assert "888 待反思样本 7 条" in panel.lbl_learning_health.text()
         assert "30m 可执行样本 12 条" in panel.lbl_learning_health.text()
@@ -691,6 +713,18 @@ def test_rule_logic_editor_save_activates_governance_instead_of_confidence(monke
     monkeypatch.setattr("ui_logic_editor.QMessageBox.information", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("ui_logic_editor.QMessageBox.critical", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("ui_logic_editor.RuleLogicEditorDialog._start_load_worker", lambda self, worker: None)
+    monkeypatch.setattr(
+        "ui_logic_editor.simulate_rule_performance",
+        lambda logic_dict, limit=500: {
+            "sandbox_samples": 500,
+            "total_matches": 18,
+            "success": 12,
+            "mixed": 2,
+            "fail": 4,
+            "win_rate": 0.72,
+            "score": 45.0,
+        },
+    )
 
     dialog = RuleLogicEditorDialog(rule_id=66)
     try:
@@ -747,6 +781,98 @@ def test_rule_logic_editor_applies_loaded_rule(monkeypatch):
         assert dialog.btn_save.isEnabled() is True
         assert "回踩下沿确认后试多" in dialog.info_lbl.text()
         assert dialog.tree.topLevelItem(0).childCount() == 1
+    finally:
+        dialog.close()
+        app.processEvents()
+
+
+def test_rule_logic_editor_strategy_learning_uses_dedicated_projection(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+
+    monkeypatch.setattr("ui_logic_editor.RuleLogicEditorDialog._start_load_worker", lambda self, worker: None)
+    dialog = RuleLogicEditorDialog(7855)
+    try:
+        dialog._on_load_result(
+            {
+                "ok": True,
+                "rule_text": "策略学习建议：收紧直线动能探索入场阈值",
+                "source_type": "strategy_learning",
+                "rationale": "近7天直线动能共 8 笔，1胜7负。",
+                "logic_dict": {
+                    "source": "strategy_learning",
+                    "strategy_family": "direct_momentum",
+                    "strategy_label": "直线动能",
+                    "action_kind": "tighten",
+                    "days": 7,
+                    "total_count": 8,
+                    "decided_count": 8,
+                    "win_count": 1,
+                    "loss_count": 7,
+                    "win_rate": 12.5,
+                    "net_profit": -64.8,
+                    "avg_rr": 2.0,
+                },
+                "error": "",
+            }
+        )
+
+        root = dialog.tree.topLevelItem(0)
+        assert root.text(0) == "strategy_learning"
+        assert root.text(2) == "tighten"
+        assert dialog.btn_save.text() == "✅ 应用策略调参"
+        assert dialog.btn_simulate.text() == "▶ 策略调参推演"
+        assert "策略学习推演" in dialog.lbl_sandbox_result.text()
+        assert "RR：" in dialog.lbl_sandbox_result.text()
+        assert "unknown" not in root.text(0)
+    finally:
+        dialog.close()
+        app.processEvents()
+
+
+def test_rule_logic_editor_strategy_learning_save_applies_review(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    captured = {"applied": False, "sql": []}
+
+    class _Result:
+        rowcount = 1
+
+    class _FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params=()):
+            captured["sql"].append((" ".join(str(sql).split()), params))
+            return _Result()
+
+    monkeypatch.setattr("ui_logic_editor.RuleLogicEditorDialog._start_load_worker", lambda self, worker: None)
+    monkeypatch.setattr("ui_logic_editor.open_knowledge_connection", lambda *_args, **_kwargs: _FakeConn())
+    monkeypatch.setattr("ui_logic_editor.QMessageBox.information", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("ui_logic_editor.QMessageBox.critical", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "ui_logic_editor.apply_strategy_learning_review",
+        lambda rule_id, approved=True, db_path=None: captured.update({"applied": True, "rule_id": rule_id}) or {
+            "applied": True,
+            "message": "直线动能 最小 RR 已由 2.20 调整为 2.40",
+        },
+    )
+
+    dialog = RuleLogicEditorDialog(7855)
+    try:
+        dialog.rule_source_type = "strategy_learning"
+        dialog.logic_dict = {
+            "source": "strategy_learning",
+            "strategy_family": "direct_momentum",
+            "action_kind": "tighten",
+        }
+        dialog._run_save_and_activate(dict(dialog.logic_dict))
+
+        assert captured["applied"] is True
+        assert captured["rule_id"] == 7855
+        assert any("INSERT INTO rule_governance" in sql for sql, _ in captured["sql"])
+        assert any("UPDATE rule_scores" in sql for sql, _ in captured["sql"])
     finally:
         dialog.close()
         app.processEvents()
@@ -1013,6 +1139,40 @@ def test_rule_logic_editor_sandbox_uses_background_worker(monkeypatch):
         assert started["called"] is True
         assert dialog.btn_simulate.isEnabled() is False
         assert "沙盒运转中" in dialog.btn_simulate.text()
+    finally:
+        dialog.close()
+        app.processEvents()
+
+
+def test_rule_logic_editor_save_blocks_when_sandbox_has_too_few_matches(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    captured = {}
+
+    monkeypatch.setattr(
+        "ui_logic_editor.RuleLogicEditorDialog._start_load_worker",
+        lambda self, worker: None,
+    )
+    monkeypatch.setattr(
+        "ui_logic_editor.simulate_rule_performance",
+        lambda logic_dict, limit=500: {
+            "sandbox_samples": 500,
+            "total_matches": 0,
+            "success": 0,
+            "mixed": 0,
+            "fail": 0,
+            "win_rate": 0.0,
+            "score": 0.0,
+        },
+    )
+
+    dialog = RuleLogicEditorDialog(1)
+    try:
+        dialog.save_result_ready.disconnect(dialog._on_save_result)
+        dialog.save_result_ready.connect(lambda payload: captured.update(payload))
+        dialog._run_save_and_activate({"op": "AND", "conditions": [{"field": "signal_side", "op": "==", "value": "long"}]})
+
+        assert captured["ok"] is False
+        assert "沙盒匹配样本不足" in captured["error"]
     finally:
         dialog.close()
         app.processEvents()
@@ -1411,7 +1571,7 @@ def test_sim_trading_panel_shows_short_candidate_when_blocked(monkeypatch):
         assert "点差状态：点差偏宽观察；当前点差仍偏宽，先继续观察别急着追。" in panel.lbl_entry_status.text()
         assert "事件纪律：高影响窗口：美国 CPI 将于 20:30 落地，当前品种先别抢第一脚。" in panel.lbl_entry_status.text()
         assert "拦截原因：" in panel.lbl_entry_status.text()
-        assert "价格尚未回到可执行观察区间附近" in panel.lbl_entry_status.text()
+        assert "事件高敏发布" in panel.lbl_entry_status.text()
         assert "试仓阻塞审计：" in panel.lbl_entry_audit.text()
         assert "本轮阻塞：" in panel.lbl_entry_audit.text()
         assert "最近48小时阻塞：" in panel.lbl_entry_audit.text()
@@ -1934,7 +2094,7 @@ def test_sim_trading_panel_displays_strategy_learning_summary(monkeypatch):
         assert "净盈亏 +$9.00" in panel.lbl_strategy_learning.toolTip()
         assert "策略参数：" in panel.lbl_strategy_params.text()
         assert "回调狙击 1.30R" in panel.lbl_strategy_params.text()
-        assert "方向试仓 1.55R" in panel.lbl_strategy_params.text()
+        assert "方向试仓 1.85R" in panel.lbl_strategy_params.text()
         assert "回调狙击：1.30R / 日上限 8 次 / 冷却 6 分钟" in panel.lbl_strategy_params.toolTip()
         assert "最近调参：04-23 10:15" in panel.lbl_strategy_apply.text()
         assert "日上限已由 3 调整为 2" in panel.lbl_strategy_apply.text()

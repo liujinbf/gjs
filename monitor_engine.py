@@ -5,7 +5,7 @@ from pathlib import Path
 
 from alert_history_store import build_latest_symbol_event_map
 from alert_status_state import apply_alert_state_transitions, read_recent_transitions
-from app_config import EVENT_RISK_MODES
+from app_config import EVENT_RISK_MODES, get_runtime_config
 from macro_focus import build_global_market_focus, build_symbol_macro_focus
 from monitor_cards import build_alert_status_cards, build_event_window_cards, build_macro_data_status_card, build_runtime_status_cards, build_spread_focus_cards
 from regime_classifier import build_snapshot_regime_summary, classify_market_regime
@@ -20,6 +20,8 @@ from monitor_rules import (
 )
 from mt5_gateway import fetch_quotes, initialize_connection
 from runtime_utils import parse_time as _parse_time
+from scalp_signal_engine import detect_scalp_signal
+from multi_symbol_correlation import build_correlation_context
 from signal_side_utils import derive_signal_side_meta
 from signal_enums import AlertTone, EventModeText, QuoteStatus, SignalSide, TradeGrade
 from trade_opportunity import score_trade_opportunity
@@ -221,6 +223,22 @@ def _build_symbol_alert_state(
             "alert_state_rank": 2,
         }
 
+    if (
+        str(trade_grade.get("grade", "") or "").strip() == TradeGrade.LIGHT_POSITION
+        and str(trade_grade.get("setup_kind", "") or "").strip() == "scalp"
+    ):
+        scalp_text = str(trade_grade.get("scalp_signal_text", "") or "").strip()
+        scalp_type = str(trade_grade.get("scalp_setup_kind", "") or "").strip()
+        return {
+            "alert_state_text": "短线就绪",
+            "alert_state_detail": (
+                f"{symbol_key} M5短线信号就绪（{scalp_type}），可轻仓追踪。"
+                f"{(' ' + scalp_text) if scalp_text else ''}"
+            ),
+            "alert_state_tone": AlertTone.SUCCESS.value,
+            "alert_state_rank": 2,
+        }
+
     # 事件窗口优先级最高（高影响事件前 / 后）
     if bool(item_event_meta.get("event_applies")) and event_name:
         if event_mode_text == EventModeText.PRE_EVENT:
@@ -320,6 +338,12 @@ def build_snapshot_from_rows(
         tone, execution_note = build_quote_risk_note(symbol, row)
         enriched_row = dict(row or {})
         enriched_row.update(analyze_risk_reward(enriched_row))
+        # ── 时序修正：在 build_trade_grade 之前提前注入短线信号 ──
+        # 修复时序滞后 Bug：原先 detect_scalp_signal 在第 484 行才注入，
+        # 导致 build_trade_grade 无法感知 scalp_ready 状态。
+        scalp_enabled = bool(getattr(get_runtime_config(), "scalp_enabled", True))
+        scalp_sig = detect_scalp_signal({**row, **enriched_row}) if scalp_enabled else {}
+        enriched_row.update(scalp_sig)
         item_event_meta = _build_symbol_event_meta(symbol, context)
         trade_grade = build_trade_grade(
             symbol,
@@ -364,6 +388,21 @@ def build_snapshot_from_rows(
         ):
             if extra_text:
                 execution_segments.append(extra_text)
+        # ── M5 均线数据透传：供模拟盘动量衰竭判断使用 ──
+        m5_extra = {
+            "ema9_m5": row.get("ema9_m5"),
+            "ema21_m5": row.get("ema21_m5"),
+            "prev_ema9_m5": row.get("prev_ema9_m5"),
+            "prev_ema21_m5": row.get("prev_ema21_m5"),
+            "atr5_m5": row.get("atr5_m5"),
+            "m5_last_high": row.get("m5_last_high"),
+            "m5_last_low": row.get("m5_last_low"),
+            "m5_last_close": row.get("m5_last_close"),
+            "m5_prev_high": row.get("m5_prev_high"),
+            "m5_prev_low": row.get("m5_prev_low"),
+            "m5_prev_close": row.get("m5_prev_close"),
+            "m5_scalp_summary": str(row.get("m5_scalp_summary", "") or "").strip(),
+        }
         item_payload = SnapshotItem(
             symbol=str(symbol).strip().upper(),
             latest_price=latest_price,
@@ -476,8 +515,11 @@ def build_snapshot_from_rows(
                 "macd": row.get("macd"),
                 "macd_signal": row.get("macd_signal"),
                 "macd_histogram": row.get("macd_histogram"),
+                **m5_extra,
             },
         ).to_dict()
+        # 注入 M5 短线信号（复用已在 build_trade_grade 之前计算好的 scalp_sig，避免重复计算）
+        item_payload.update(scalp_sig)
         item_payload.update(score_trade_opportunity(item_payload))
         items.append(item_payload)
 
@@ -491,6 +533,8 @@ def build_snapshot_from_rows(
         event_risk_mode=event_risk_mode,
         event_context=context,
     )
+    # 多品种联动分析（在 items 全部构建完成后执行）
+    correlation_ctx = build_correlation_context(items)
 
     summary_lines = [
         f"当前共观察 {len(symbols)} 个品种，实时报价 {live_count} 个，非活跃或暂无报价 {inactive_count} 个。",
@@ -533,14 +577,29 @@ def build_snapshot_from_rows(
         if str(item.get("retest_context_text", "") or "").strip()
     ]
     if retest_digest:
-        summary_lines.append(f"回踩确认：{'；'.join(retest_digest[:3])}。")
+        summary_lines.append(f"回踩确认：{';​'.join(retest_digest[:3])}。")
     risk_reward_digest = [
         f"{item['symbol']} {item['risk_reward_context_text']}"
         for item in items
         if str(item.get("risk_reward_context_text", "") or "").strip()
     ]
     if risk_reward_digest:
-        summary_lines.append(f"风险回报：{'；'.join(risk_reward_digest[:3])}。")
+        summary_lines.append(f"风险回报：{';​'.join(risk_reward_digest[:3])}。")
+    # 短线信号摘要
+    scalp_digest = [
+        f"{item['symbol']} {item.get('scalp_signal_text', '')}"
+        for item in items
+        if bool(item.get("scalp_ready", False)) and str(item.get("scalp_signal_text", "") or "").strip()
+    ]
+    if scalp_digest:
+        summary_lines.append(f"M5短线信号：{';​'.join(scalp_digest[:2])}。")
+    # 多品种联动摘要
+    correlation_edge_text = str(correlation_ctx.get("multi_symbol_edge_text", "") or "").strip()
+    if correlation_edge_text:
+        summary_lines.append(f"品种联动：{correlation_edge_text}")
+    au_ag_signal_text = str(correlation_ctx.get("au_ag_signal_text", "") or "").strip()
+    if au_ag_signal_text:
+        summary_lines.append(f"Au/Ag套利：{au_ag_signal_text}")
     alert_status_digest = [
         (
             f"{item['symbol']} {item['alert_state_transition_text']}"
@@ -613,6 +672,7 @@ def build_snapshot_from_rows(
         "event_next_name": str(context.get("next_event_name", "") or "").strip(),
         "event_next_time_text": str(context.get("next_event_time_text", "") or "").strip(),
         "items": items,
+        "correlation_context": correlation_ctx,
         "alert_transition_summary_text": transition_summary_text,
         "runtime_status_cards": build_runtime_status_cards(
             connected=connected,

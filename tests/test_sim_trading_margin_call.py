@@ -448,6 +448,104 @@ def test_calculate_optimal_lots_respects_volume_step():
     shutil.rmtree(TEST_DIR, ignore_errors=True)
 
 
+def test_pair_arbitrage_execute_signal_uses_fixed_lots(monkeypatch):
+    test_dir = _prepare_dir()
+    eng = _make_engine(test_dir, "pair_fixed_lots")
+
+    monkeypatch.setattr(
+        "mt5_sim_trading.get_runtime_config",
+        lambda: type(
+            "Cfg",
+            (),
+            {
+                "sim_initial_balance": 1000.0,
+                "sim_no_tp2_lock_r": 0.5,
+                "sim_no_tp2_partial_close_ratio": 0.5,
+                "sim_kelly_enabled": False,
+                "sim_exploratory_base_balance": 1000.0,
+                "sim_strategy_min_rr": {},
+                "sim_strategy_daily_limit": {},
+                "sim_strategy_cooldown_min": {},
+            },
+        )(),
+    )
+
+    ok, msg = eng.execute_signal(
+        {
+            "symbol": "XAGUSD",
+            "action": "long",
+            "price": 52.0,
+            "sl": 51.0,
+            "tp": 54.0,
+            "strategy_family": "au_ag_pair",
+            "setup_kind": "au_ag_zscore",
+            "execution_profile": "exploratory",
+            "fixed_lots": 0.07,
+            "volume_step": 0.01,
+            "volume_min": 0.01,
+        }
+    )
+
+    assert ok, msg
+    with sqlite3.connect(str(test_dir / "pair_fixed_lots.sqlite")) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT quantity FROM sim_positions WHERE symbol='XAGUSD' AND status='open'").fetchone()
+    assert abs(float(row["quantity"]) - 0.07) < 1e-9
+
+    del eng
+    gc.collect()
+    shutil.rmtree(TEST_DIR, ignore_errors=True)
+
+
+def test_idle_probe_execute_signal_uses_fixed_lots(monkeypatch):
+    test_dir = _prepare_dir()
+    eng = _make_engine(test_dir, "idle_probe_fixed_lots")
+
+    monkeypatch.setattr(
+        "mt5_sim_trading.get_runtime_config",
+        lambda: type(
+            "Cfg",
+            (),
+            {
+                "sim_initial_balance": 1000.0,
+                "sim_no_tp2_lock_r": 0.5,
+                "sim_no_tp2_partial_close_ratio": 0.5,
+                "sim_kelly_enabled": False,
+                "sim_exploratory_base_balance": 1000.0,
+                "sim_strategy_min_rr": {},
+                "sim_strategy_daily_limit": {},
+                "sim_strategy_cooldown_min": {},
+            },
+        )(),
+    )
+
+    ok, msg = eng.execute_signal(
+        {
+            "symbol": "XAUUSD",
+            "action": "short",
+            "price": 4469.0,
+            "sl": 4482.0,
+            "tp": 4442.0,
+            "strategy_family": "idle_probe",
+            "setup_kind": "idle_probe",
+            "execution_profile": "exploratory",
+            "fixed_lots": 0.01,
+            "volume_step": 0.01,
+            "volume_min": 0.01,
+        }
+    )
+
+    assert ok, msg
+    with sqlite3.connect(str(test_dir / "idle_probe_fixed_lots.sqlite")) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT quantity FROM sim_positions WHERE symbol='XAUUSD' AND status='open'").fetchone()
+    assert abs(float(row["quantity"]) - 0.01) < 1e-9
+
+    del eng
+    gc.collect()
+    shutil.rmtree(TEST_DIR, ignore_errors=True)
+
+
 def test_long_position_uses_bid_for_stop_loss_trigger():
     test_dir = _prepare_dir()
     eng = _make_engine(test_dir, "bid_stop")
@@ -1040,3 +1138,196 @@ def test_reset_account_clears_positions_trades_and_uses_target_balance():
     assert trade_count == 0
 
     shutil.rmtree(TEST_DIR, ignore_errors=True)
+
+
+def test_scalp_market_closing_protection(monkeypatch):
+    """测试跨市强平保护机制：收市安全期仅强制平掉短线scalp持仓，非短线持仓应保持开仓。"""
+    test_dir = _prepare_dir()
+    eng = _make_engine(test_dir, "closing_protection")
+
+    # 隔离全局配置干扰
+    config = type(
+        "Cfg",
+        (),
+        {
+            "sim_initial_balance": 100000.0,
+            "sim_no_tp2_lock_r": 99.0,
+            "sim_no_tp2_partial_close_ratio": 0.5,
+            "sim_time_protect_minutes": 99999,
+        },
+    )()
+    monkeypatch.setattr(mt5_sim_trading, "get_runtime_config", lambda: config)
+
+    # 1. 模拟开启两个订单：一个是 scalp（短线），一个是 structure（常规）
+    ok1, msg1 = eng.execute_signal(
+        {
+            "symbol": "XAUUSD",
+            "action": "long",
+            "price": 3300.0,
+            "sl": 3280.0,
+            "tp": 3360.0,
+            "strategy_family": "scalp",
+        }
+    )
+    # 使用别的 symbol 开另一个非短线单，防止 unique index (user_id, symbol) 冲突
+    ok2, msg2 = eng.execute_signal(
+        {
+            "symbol": "XAGUSD",
+            "action": "long",
+            "price": 30.0,
+            "sl": 28.0,
+            "tp": 35.0,
+            "strategy_family": "structure",
+        }
+    )
+    assert ok1, msg1
+    assert ok2, msg2
+
+    # 2. 模拟临近收盘
+    monkeypatch.setattr(eng, "_is_market_closing_soon", lambda: (True, "临近周末收盘休市"))
+
+    # 3. 价格更新，触发 update_prices
+    eng.update_prices({"XAUUSD": 3305.0, "XAGUSD": 30.5})
+
+    del eng
+    gc.collect()
+
+    with sqlite3.connect(str(test_dir / "closing_protection.sqlite")) as conn:
+        conn.row_factory = sqlite3.Row
+        open_positions = conn.execute("SELECT * FROM sim_positions WHERE status='open'").fetchall()
+        trades = conn.execute("SELECT reason, symbol FROM sim_trades").fetchall()
+
+    # 4. 验证：XAUUSD (scalp) 应被平仓，XAGUSD (structure) 应依然处于 open
+    assert len(open_positions) == 1
+    assert open_positions[0]["symbol"] == "XAGUSD"
+
+    assert len(trades) == 1
+    assert trades[0]["symbol"] == "XAUUSD"
+    assert "短线收市避险" in trades[0]["reason"]
+
+    shutil.rmtree(TEST_DIR, ignore_errors=True)
+
+
+def test_scalp_break_even_buffer_cushion(monkeypatch):
+    """测试保本移损安全缓冲垫机制：移保本时应加入 12% 初始风险的缓冲，使止损进入盈利区域。"""
+    test_dir = _prepare_dir()
+    eng = _make_engine(test_dir, "be_buffer")
+
+    config = type(
+        "Cfg",
+        (),
+        {
+            "sim_initial_balance": 100000.0,
+            "sim_no_tp2_lock_r": 0.5,
+            "sim_no_tp2_partial_close_ratio": 0.5,
+            "sim_time_protect_minutes": 99999,
+        },
+    )()
+    monkeypatch.setattr(mt5_sim_trading, "get_runtime_config", lambda: config)
+
+    # 开仓 XAUUSD 多单，entry=3300, sl=3280 (初始风险 = 20.0)
+    ok, msg = eng.execute_signal(
+        {
+            "symbol": "XAUUSD",
+            "action": "long",
+            "price": 3300.0,
+            "sl": 3280.0,
+            "tp": 3360.0,
+            "strategy_family": "scalp",
+        }
+    )
+    assert ok, msg
+
+    # 12% 初始风险 = 20.0 * 0.12 = 2.40 USD
+    # 多单保本止损移至 entry + buffer = 3300.0 + 2.4 = 3302.40 USD
+
+    # 价格上涨到 3310.1 (浮盈 10.1 / 20 = 0.505R >= 0.5R)，触发部分止盈与保本移损
+    eng.update_prices({"XAUUSD": {"latest": 3310.1, "bid": 3310.1, "ask": 3310.2}})
+
+    with sqlite3.connect(str(test_dir / "be_buffer.sqlite")) as conn:
+        conn.row_factory = sqlite3.Row
+        pos = conn.execute("SELECT * FROM sim_positions WHERE status='open'").fetchone()
+
+    assert pos is not None
+    assert int(pos["break_even_armed"]) == 1
+    # 验证新止损被成功移动到了 3302.40
+    assert abs(float(pos["stop_loss"]) - 3302.40) < 1e-6
+
+    # 价格回撤，触及保本止损 3302.40
+    eng.update_prices({"XAUUSD": {"latest": 3302.0, "bid": 3302.0, "ask": 3302.1}})
+
+    del eng
+    gc.collect()
+
+    with sqlite3.connect(str(test_dir / "be_buffer.sqlite")) as conn:
+        conn.row_factory = sqlite3.Row
+        trades = conn.execute("SELECT reason, profit FROM sim_trades ORDER BY id DESC LIMIT 1").fetchone()
+
+    # 验证平仓原因和盈亏
+    assert "回撤至保本止损" in trades["reason"]
+    assert float(trades["profit"]) > 0.0  # 确保结算是纯利润！
+
+    shutil.rmtree(TEST_DIR, ignore_errors=True)
+
+
+def test_scalp_trailing_profit_stop_50pct(monkeypatch):
+    """测试高浮盈回撤腰斩强平锁利机制（算法 4）：最高浮盈达到 0.35R 后，一旦回撤 >= 50%，立刻清仓。"""
+    test_dir = _prepare_dir()
+    eng = _make_engine(test_dir, "trailing_profit_stop")
+
+    # 隔离全局配置干扰，防止在此测试中意外触发分批止盈或时间保护
+    config = type(
+        "Cfg",
+        (),
+        {
+            "sim_initial_balance": 100000.0,
+            "sim_no_tp2_lock_r": 99.0,  # 设为极高以防拦截
+            "sim_no_tp2_partial_close_ratio": 0.5,
+            "sim_time_protect_minutes": 99999,
+        },
+    )()
+    monkeypatch.setattr(mt5_sim_trading, "get_runtime_config", lambda: config)
+
+    # 1. 开启一个短线 scalp 订单：entry=3300, sl=3290, tp=3350
+    ok, msg = eng.execute_signal(
+        {
+            "symbol": "XAUUSD",
+            "action": "long",
+            "price": 3300.0,
+            "sl": 3290.0,
+            "tp": 3350.0,
+            "strategy_family": "scalp",
+        }
+    )
+    assert ok, msg
+
+    # 2. 价格推高至 3307.0，使得 favorable_r = 7.0 / 10.0 = 0.70R
+    # 0.70R >= 0.65R，满足最大浮盈启动标准
+    eng.update_prices({"XAUUSD": 3307.0})
+
+    with sqlite3.connect(str(test_dir / "trailing_profit_stop.sqlite")) as conn:
+        conn.row_factory = sqlite3.Row
+        pos_before = conn.execute("SELECT max_favorable_r FROM sim_positions WHERE status='open'").fetchone()
+    assert pos_before is not None
+    assert abs(float(pos_before["max_favorable_r"]) - 0.70) < 1e-6
+
+    # 3. 价格回撤至 3303.0 (favorable_r = 3.0 / 10.0 = 0.30R)
+    # 回撤比例 = 0.30 / 0.70 = 42.8% <= 50%，满足回撤腰斩强平标准
+    eng.update_prices({"XAUUSD": 3303.0})
+
+    del eng
+    gc.collect()
+
+    with sqlite3.connect(str(test_dir / "trailing_profit_stop.sqlite")) as conn:
+        conn.row_factory = sqlite3.Row
+        open_positions = conn.execute("SELECT * FROM sim_positions WHERE status='open'").fetchall()
+        trades = conn.execute("SELECT reason, profit FROM sim_trades").fetchall()
+
+    # 4. 验证已平仓，并且原因为 "短线浮盈回撤锁利"，盈亏为正
+    assert len(open_positions) == 0
+    assert len(trades) == 1
+    assert "短线浮盈回撤锁利" in trades[0]["reason"]
+    assert float(trades[0]["profit"]) > 0.0
+
+    shutil.rmtree(TEST_DIR, ignore_errors=True)
+

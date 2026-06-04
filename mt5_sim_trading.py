@@ -27,6 +27,35 @@ from trade_contracts import RiskDecision, StrategySignal
 
 SIM_DB_PATH = PROJECT_DIR / ".runtime" / "mt5_sim_trading.sqlite"
 
+# 短线套利策略家族标识集合（含 setup_kind 别名）
+_SCALP_FAMILIES: frozenset[str] = frozenset({
+    "scalp", "pullback_ema21", "ema_crossover",
+    "bb_squeeze_breakout", "liquidity_grab",
+})
+_PAIR_FAMILIES: frozenset[str] = frozenset({"au_ag_pair", "au_ag_zscore"})
+_FIXED_LOT_FAMILIES: frozenset[str] = frozenset({"au_ag_pair", "au_ag_zscore", "idle_probe"})
+_STRATEGY_FAMILY_ALIASES: dict[str, str] = {
+    "au_ag_pair": "au_ag_zscore",
+    "gold_silver_pair": "au_ag_zscore",
+}
+
+
+def _canonical_strategy_family(value: object) -> str:
+    family = str(value or "").strip().lower()
+    return _STRATEGY_FAMILY_ALIASES.get(family, family)
+
+
+def _strategy_family_aliases(value: object) -> list[str]:
+    canonical = _canonical_strategy_family(value)
+    if not canonical:
+        return []
+    aliases = {canonical}
+    for alias, target in _STRATEGY_FAMILY_ALIASES.items():
+        if target == canonical:
+            aliases.add(alias)
+    return sorted(aliases)
+
+
 class SimTradingEngine:
     def __init__(self, db_file: str | None = None):
         self.db_file = db_file or str(SIM_DB_PATH)
@@ -72,6 +101,58 @@ class SimTradingEngine:
         except Exception as exc:
             logging.exception(f"读取短线套利落袋配置失败，回退默认值：{exc}")
             return 0.55, 0
+
+    def _get_scalp_full_exit_settings(self) -> tuple[int, float, bool]:
+        """读取三大退出算法参数：(max_hold_min, atr_tp_ratio, decay_exit_enabled)。"""
+        try:
+            config = get_runtime_config()
+            max_hold_min = max(0, min(240, int(getattr(config, "sim_scalp_max_hold_min", 15) or 15)))
+            atr_tp_ratio = max(0.0, min(10.0, float(getattr(config, "sim_scalp_atr_tp_ratio", 1.5) or 1.5)))
+            decay_exit_enabled = bool(getattr(config, "sim_scalp_decay_exit_enabled", True))
+            return max_hold_min, atr_tp_ratio, decay_exit_enabled
+        except Exception as exc:
+            logging.exception(f"读取短线三大退出配置失败，回退默认值：{exc}")
+            return 15, 1.5, True
+
+    def _is_scalp_position(self, pos: dict) -> bool:
+        """判断持仓是否属于短线套利策略家族。"""
+        family = str(pos.get("strategy_family", "") or "").strip().lower()
+        if family in _SCALP_FAMILIES:
+            return True
+        # 从 strategy_param_json 中读取 setup_kind
+        try:
+            param = json.loads(str(pos.get("strategy_param_json", "") or "{}"))
+            setup_kind = str(param.get("setup_kind", "") or "").strip().lower()
+            return setup_kind in _SCALP_FAMILIES
+        except Exception:
+            return False
+
+    def _is_market_closing_soon(self) -> tuple[bool, str]:
+        """
+        判断当前系统时间是否临近收市休市（跨周末、跨每日休市）。
+        夏令时和冬令时下，收盘休市的时间点不同，因此我们使用北京时间的安全窗口：
+        1. 周末收盘前夕（北京时间周六 03:45 至 06:30 之间） -> 强制平仓防跨周末跳空与点差扩大
+        2. 工作日每日收市前夕（北京时间周一至周五 04:45 至 06:15 之间） -> 强制平仓防跨市点差急剧扩张
+        """
+        import datetime
+        now = datetime.datetime.now()
+        weekday = now.weekday()  # 0=Mon, 4=Fri, 5=Sat, 6=Sun
+        hour = now.hour
+        minute = now.minute
+
+        # 周末休市强平：周六早晨 (北京时间周六 03:45 后)
+        # 美东周五 17:00 收盘，对应北京时间周六 05:00 (夏) 或 06:00 (冬)
+        if weekday == 5:
+            if (hour == 3 and minute >= 45) or (hour >= 4):
+                return True, "临近周末收盘休市"
+
+        # 每日休市强平：工作日清晨收市前后保护 (北京时间周一至周五 04:45 至 06:15 之间)
+        # 美东每日 17:00 - 18:00 休市一小时，对应北京时间 05:00-06:00 (夏) 或 06:00-07:00 (冬)
+        if 0 <= weekday <= 4:
+            if (hour == 4 and minute >= 45) or (hour == 5) or (hour == 6 and minute <= 15):
+                return True, "临近每日休市保护期"
+
+        return False, ""
 
     def _position_age_minutes(self, opened_at: object) -> float:
         text = str(opened_at or "").strip()
@@ -136,6 +217,98 @@ class SimTradingEngine:
             f"ATR 风险系数已启用（ATR/价格={atr_ratio:.4%}，风险预算={risk_pct:.2%}）。",
         )
 
+    def _resolve_kelly_risk_pct(self, strategy_family: str) -> tuple[float, str]:
+        """
+        根据 trade_learning_journal 数据库中该策略最近已结算订单的真实战绩计算凯利公式比例。
+        核心算法：
+          1. 提取最近 100 笔已平仓单。
+          2. 计算胜率 p (win_count / total_decided) 极其盈亏比 b (avg_win / avg_loss)。
+          3. 代入凯利公式并实施四分之一降维及上限保护。
+        """
+        config = get_runtime_config()
+        min_samples = getattr(config, "sim_kelly_min_samples", 15)
+        fraction = getattr(config, "sim_kelly_fraction", 0.25)
+        max_risk = getattr(config, "sim_kelly_max_risk_pct", 0.02)
+        family = _canonical_strategy_family(strategy_family or "unknown")
+
+        from knowledge_base import KNOWLEDGE_DB_FILE, open_knowledge_connection
+        # 如果历史库文件不存在，自动安全降级
+        if not Path(KNOWLEDGE_DB_FILE).exists():
+            return self.max_risk_pct, "知识库未就绪，降级使用默认 2% 风险"
+
+        try:
+            with open_knowledge_connection(db_path=KNOWLEDGE_DB_FILE, ensure_schema=True) as conn:
+                # 统计最近 100 笔的盈利笔数、亏损笔数、平均赢利和平均亏损
+                # 已平仓的 label 为 'success' 或 'fail'
+                aliases = _strategy_family_aliases(family)
+                placeholders = ",".join("?" for _ in aliases)
+                rows = conn.execute(
+                    f"""
+                    SELECT profit
+                    FROM trade_learning_journal
+                    WHERE (
+                        COALESCE(NULLIF(setup_kind, ''), NULLIF(json_extract(entry_payload_json, '$.strategy_family'), ''), trade_grade_source, 'unknown') IN ({placeholders})
+                        OR setup_kind IN ({placeholders})
+                        OR trade_grade_source IN ({placeholders})
+                    )
+                      AND outcome_label IN ('success', 'fail')
+                    ORDER BY opened_at DESC
+                    LIMIT 100
+                    """,
+                    tuple(aliases) * 3,
+                ).fetchall()
+        except Exception as exc:
+            logging.exception(f"凯利公式拉取历史战绩失败：{exc}")
+            return self.max_risk_pct, f"拉取历史战绩异常，降级使用默认 2% 风险"
+
+        profits = [float(r[0] or 0.0) for r in rows]
+        total_decided = len(profits)
+
+        if total_decided < min_samples:
+            return self.max_risk_pct, f"历史成交样本不足（当前 {total_decided} 单，少于阈值 {min_samples} 单），降级使用默认 2% 风险"
+
+        win_profits = [p for p in profits if p > 0]
+        loss_losses = [abs(p) for p in profits if p < 0]
+
+        win_count = len(win_profits)
+        loss_count = len(loss_losses)
+
+        if win_count == 0:
+            return 0.0, f"策略 {family} 近期胜率为 0%，进入强制防回撤冬眠锁定状态（暂停开仓）"
+        if loss_count == 0:
+            # 极佳的顺风期，理论无限大，直接以最高上限开仓
+            return max_risk, f"策略 {family} 近期 100% 胜率（{win_count} 战全胜），直接以最大风险预算 {max_risk:.2%} 满额开仓"
+
+        p = win_count / total_decided
+        q = 1.0 - p
+        avg_win = sum(win_profits) / win_count
+        avg_loss = sum(loss_losses) / loss_count
+
+        if avg_loss <= 1e-6:
+            return max_risk, f"策略 {family} 平均亏损极微，直接以最大风险预算 {max_risk:.2%} 开仓"
+
+        b = avg_win / avg_loss
+
+        # 凯利期望值 e = b * p - q
+        expectation = b * p - q
+        if expectation <= 0:
+            return 0.0, f"策略 {family} 期望值为负 ({expectation:.3f}，胜率 {p:.1%}，盈亏比 {b:.2f}:1)，开启防回撤冬眠拦截保护"
+
+        # 凯利计算理论最适比例 f* = expectation / b
+        f_star = expectation / b
+        raw_kelly = f_star * fraction
+        final_risk = min(raw_kelly, max_risk)
+
+        # 兜底不能过小，比如至少允许 0.1% 
+        final_risk = max(0.001, final_risk)
+
+        return (
+            final_risk,
+            f"凯利动态风险预算已启用 [样本数: {total_decided}, 胜率: {p:.1%}, 盈亏比: {b:.2f}:1, 期望值: {expectation:+.3f}]，"
+            f"四分一凯利推荐: {raw_kelly:.2%}，最终执行预算: {final_risk:.2%} (上限: {max_risk:.2%})",
+        )
+
+
     def _resolve_take_profit_2(self, meta: dict) -> float:
         for key in ("tp2", "take_profit_2", "target_2"):
             value = float(meta.get(key, 0.0) or 0.0)
@@ -155,6 +328,13 @@ class SimTradingEngine:
             "min_rr": float(get_sim_strategy_min_rr(family, default=float(getattr(config, "sim_min_rr", 1.6) or 1.6), config=config)),
             "daily_limit": int(get_sim_strategy_daily_limit(family, default=int(getattr(config, "sim_exploratory_daily_limit", 3) or 3), config=config)),
             "cooldown_min": int(get_sim_strategy_cooldown_min(family, default=int(getattr(config, "sim_exploratory_cooldown_min", 10) or 10), config=config)),
+            "atr5_m5": float(meta.get("atr5_m5", 0.0) or 0.0),  # 保存 M5 ATR 供三大退出算法使用
+            "setup_kind": str(meta.get("setup_kind", "") or meta.get("scalp_setup_kind", "") or family or "").strip().lower(),
+            "pair_group_id": str(meta.get("pair_group_id", "") or "").strip(),
+            "pair_signal": str(meta.get("pair_signal", "") or "").strip(),
+            "pair_exit_zscore": float(meta.get("pair_exit_zscore", 0.0) or 0.0),
+            "au_ag_ratio": float(meta.get("au_ag_ratio", 0.0) or 0.0),
+            "au_ag_zscore": float(meta.get("au_ag_zscore", 0.0) or 0.0),
         }
         family_label_map = {
             "pullback_sniper_probe": "回调狙击",
@@ -495,7 +675,9 @@ class SimTradingEngine:
         execution_profile = str(meta.get("execution_profile", "standard") or "standard").strip().lower()
         if execution_profile not in {"standard", "exploratory"}:
             execution_profile = "standard"
-        strategy_family = str(meta.get("strategy_family", "") or meta.get("setup_kind", "") or meta.get("trade_grade_source", "") or "").strip()
+        strategy_family = _canonical_strategy_family(
+            meta.get("strategy_family", "") or meta.get("setup_kind", "") or meta.get("trade_grade_source", "") or ""
+        )
         strategy_param_snapshot, strategy_param_summary = self._build_strategy_param_snapshot(meta)
         meta["strategy_family"] = strategy_family
         meta["strategy_param_snapshot"] = dict(strategy_param_snapshot)
@@ -510,7 +692,35 @@ class SimTradingEngine:
 
         # 根据 2% 资金管理法则计算最优手数
         equity = float(account["equity"])
-        risk_pct_used, risk_note = self._resolve_dynamic_risk_pct(meta, symbol, entry_price)
+        config = get_runtime_config()
+
+        # 优先使用凯利动态资金管理
+        if getattr(config, "sim_kelly_enabled", False):
+            risk_pct_used, risk_note = self._resolve_kelly_risk_pct(strategy_family)
+            if risk_pct_used <= 0.0:
+                logging.info(f"🚫 [KellyRiskManager] 拦截开仓信号: {risk_note}")
+                return False, f"被凯利风控冬眠拦截（{risk_note}）"
+        else:
+            risk_pct_used, risk_note = self._resolve_dynamic_risk_pct(meta, symbol, entry_price)
+
+
+        # 短线套利策略限流降权，压低单笔最大风险敞口
+        strategy_family_lower = strategy_family.lower()
+        setup_kind_lower = str(strategy_param_snapshot.get("setup_kind", "") or "").strip().lower()
+        is_scalp_trade = (strategy_family_lower in _SCALP_FAMILIES or setup_kind_lower in _SCALP_FAMILIES)
+        if is_scalp_trade:
+            orig_risk = risk_pct_used
+            risk_pct_used = min(risk_pct_used, 0.005)
+            risk_note = f"短线套利策略强制风控限流，单笔风险预算上限降至 {risk_pct_used:.2%} (原始建议: {orig_risk:.2%})"
+        if strategy_family_lower in _PAIR_FAMILIES:
+            orig_risk = risk_pct_used
+            risk_pct_used = min(risk_pct_used, 0.003)
+            risk_note = f"金银配对套利双腿风控限流，单腿风险预算上限降至 {risk_pct_used:.2%} (原始建议: {orig_risk:.2%})"
+        if strategy_family_lower == "idle_probe":
+            orig_risk = risk_pct_used
+            risk_pct_used = min(risk_pct_used, 0.002)
+            risk_note = f"空窗低风险试探策略限流，单笔风险预算上限降至 {risk_pct_used:.2%} (原始建议: {orig_risk:.2%})"
+
         sizing_reference_balance = equity
         if execution_profile == "exploratory":
             risk_pct_used = min(risk_pct_used, 0.005)
@@ -528,15 +738,26 @@ class SimTradingEngine:
             sizing_reference_balance=float(sizing_reference_balance),
         ).to_dict()
         self._sync_meta_payload(original_meta, meta)
-        lots = self.calculate_optimal_lots(
-            sizing_reference_balance,
-            entry_price,
-            sl,
-            symbol,
-            risk_pct=risk_pct_used,
-            volume_step=float(meta.get("volume_step", 0.0) or 0.0),
-            volume_min=float(meta.get("volume_min", 0.0) or 0.0),
-        )
+        fixed_lots = float(meta.get("fixed_lots", 0.0) or 0.0)
+        if fixed_lots > 0 and strategy_family_lower in _FIXED_LOT_FAMILIES:
+            step, minimum_lot, decimals = self._normalize_volume_meta(
+                float(meta.get("volume_step", 0.0) or 0.0),
+                float(meta.get("volume_min", 0.0) or 0.0),
+            )
+            lots = max(minimum_lot, round(math.floor(fixed_lots / step) * step, decimals))
+            lots = min(lots, 50.0)
+            meta["fixed_lots_used"] = float(lots)
+            self._sync_meta_payload(original_meta, meta)
+        else:
+            lots = self.calculate_optimal_lots(
+                sizing_reference_balance,
+                entry_price,
+                sl,
+                symbol,
+                risk_pct=risk_pct_used,
+                volume_step=float(meta.get("volume_step", 0.0) or 0.0),
+                volume_min=float(meta.get("volume_min", 0.0) or 0.0),
+            )
 
         # BUG-010 修复：用汇率感知函数计算正确的 USD 保证金
         # current_price = entry_price（开仓瞬间，浮动为零）
@@ -797,7 +1018,7 @@ class SimTradingEngine:
         reason: str,
         user_id: str = "system",
     ) -> float:
-        """分批止盈：减仓一部分，并把剩余仓位止损上移到保本。"""
+        """分批止盈：减仓一部分，并把剩余仓位止损上移到保本（含防滑点缓冲垫）。"""
         conn.row_factory = sqlite3.Row
         pos = conn.execute("SELECT * FROM sim_positions WHERE id=? AND status='open'", (position_id,)).fetchone()
         if not pos:
@@ -825,13 +1046,29 @@ class SimTradingEngine:
         partial_closed_quantity = float(pos["partial_closed_quantity"] or 0.0) + close_quantity
         partial_realized_profit = float(pos["partial_realized_profit"] or 0.0) + pnl
 
+        # 计算初始风险距离并提取安全垫 (12% 初始风险，仅对 scalp 短线策略家族生效)
+        if self._is_scalp_position(dict(pos)):
+            orig_sl = float(pos["stop_loss"] or entry)
+            initial_risk = abs(entry - orig_sl)
+            min_buffer = entry * 0.0001
+            if symbol.startswith("XAU"):
+                min_buffer = 0.35
+            elif symbol.startswith("XAG"):
+                min_buffer = 0.015
+            buffer = max(min_buffer, initial_risk * 0.12)
+        else:
+            buffer = 0.0
+
         conn.execute(
             """
             UPDATE sim_positions
             SET quantity = ?,
                 margin = ?,
                 break_even_armed = 1,
-                stop_loss = entry_price,
+                stop_loss = CASE
+                    WHEN action = 'long' THEN entry_price + ?
+                    ELSE entry_price - ?
+                END,
                 take_profit = CASE
                     WHEN COALESCE(take_profit_2, 0) > 0 THEN take_profit_2
                     ELSE take_profit
@@ -841,7 +1078,7 @@ class SimTradingEngine:
                 floating_pnl = 0.0
             WHERE id = ?
             """,
-            (remaining_quantity, remaining_margin, partial_closed_quantity, partial_realized_profit, position_id),
+            (remaining_quantity, remaining_margin, buffer, buffer, partial_closed_quantity, partial_realized_profit, position_id),
         )
         conn.execute(
             """
@@ -890,25 +1127,46 @@ class SimTradingEngine:
         return pnl
 
     def _arm_break_even_only_with_conn(self, conn: sqlite3.Connection, position_id: int) -> bool:
-        """不上移分批止盈时，也允许把止损抬到保本，避免盈利单重新变大亏。"""
+        """不上移分批止盈时，也允许把止损抬到保本，避免盈利单重新变大亏（含防滑点缓冲垫）。"""
         conn.row_factory = sqlite3.Row
         pos = conn.execute("SELECT * FROM sim_positions WHERE id=? AND status='open'", (position_id,)).fetchone()
         if not pos:
             return False
         if bool(int(pos["break_even_armed"] or 0)):
             return False
+
+        action = str(pos["action"] or "").strip().lower()
+        symbol = str(pos["symbol"] or "").strip().upper()
+        entry = float(pos["entry_price"] or 0.0)
+        # 计算初始风险距离并提取安全垫 (12% 初始风险，仅对 scalp 短线策略家族生效)
+        if self._is_scalp_position(dict(pos)):
+            orig_sl = float(pos["stop_loss"] or entry)
+            initial_risk = abs(entry - orig_sl)
+            min_buffer = entry * 0.0001
+            if symbol.startswith("XAU"):
+                min_buffer = 0.35
+            elif symbol.startswith("XAG"):
+                min_buffer = 0.015
+            buffer = max(min_buffer, initial_risk * 0.12)
+        else:
+            buffer = 0.0
+
         conn.execute(
             """
             UPDATE sim_positions
             SET break_even_armed = 1,
-                stop_loss = entry_price
+                stop_loss = CASE
+                    WHEN action = 'long' THEN entry_price + ?
+                    ELSE entry_price - ?
+                END
             WHERE id = ?
             """,
-            (position_id,),
+            (buffer, buffer, position_id),
         )
+        new_sl = entry + buffer if action == "long" else entry - buffer
         logging.info(
-            f"🟦 模拟盘保本保护：{str(pos['action']).upper()} {str(pos['symbol']).upper()} "
-            f"已将止损上移到保本位 {float(pos['entry_price'] or 0.0):.2f}。"
+            f"🟦 模拟盘保本保护：{action.upper()} {symbol} "
+            f"已将止损上移到保本保护位 {new_sl:.2f} (含缓冲垫 {buffer:.2f})。"
         )
         return True
 
@@ -994,6 +1252,19 @@ class SimTradingEngine:
                     (pnl, max_favorable_r, pos["id"]),
                 )
 
+                # ── 新增：收市安全期强平保护机制 ──
+                closing_soon, close_reason = self._is_market_closing_soon()
+                if closing_soon and self._is_scalp_position(pos):
+                    self._close_position_with_conn(
+                        conn,
+                        pos["id"],
+                        trigger_price,
+                        f"短线收市避险：{close_reason}，强制平仓离场",
+                        user_id,
+                    )
+                    conn.commit()
+                    continue
+
                 lock_r_threshold, partial_close_ratio = self._get_no_tp2_lock_settings()
                 partial_qty = math.floor((qty * partial_close_ratio) * 100) / 100.0
                 can_partial_close = partial_qty >= 0.01 and (qty - partial_qty) >= 0.01
@@ -1018,6 +1289,72 @@ class SimTradingEngine:
                     )
                     conn.commit()
                     continue
+
+                # ── 短线头寸三大退出算法（仅对 scalp 策略家族生效）──
+                if self._is_scalp_position(pos):
+                    max_hold_min, atr_tp_ratio, decay_exit_enabled = self._get_scalp_full_exit_settings()
+
+                    # 算法1：时间止损 — 持仓超过 max_hold_min 且浮盈不足 0.3R，主动离场
+                    # 对短线时间过期进行放宽，兜底至少 25 分钟，防止合理蓄势时被过早扼杀
+                    adjusted_max_hold_min = max(max_hold_min, 25) if max_hold_min > 0 else 0
+                    if adjusted_max_hold_min > 0 and age_minutes >= adjusted_max_hold_min and favorable_r < 0.3:
+                        self._close_position_with_conn(
+                            conn, pos["id"], trigger_price,
+                            f"短线时间止损：持仓已达{age_minutes:.0f}分钟（原上限{max_hold_min}分钟，已放宽至{adjusted_max_hold_min}分钟），浮盈仅{favorable_r:.2f}R，主动离场",
+                            user_id,
+                        )
+                        conn.commit()
+                        continue
+
+                    # 算法2：ATR极速止盈 — 浮盈价差 >= atr5_m5 * ratio（以初始风险距离兜底）
+                    if atr_tp_ratio > 0:
+                        try:
+                            param_snap = json.loads(str(pos.get("strategy_param_json", "") or "{}"))
+                        except Exception:
+                            param_snap = {}
+                        atr5_m5 = float(param_snap.get("atr5_m5", 0.0) or 0.0)
+                        initial_risk = abs(entry - sl)
+                        atr_ref = atr5_m5 if atr5_m5 > 1e-8 else initial_risk  # 兜底使用初始风险距离
+                        if atr_ref > 1e-8:
+                            favorable_dist = (trigger_price - entry) if action == "long" else (entry - trigger_price)
+                            if favorable_dist >= atr_ref * atr_tp_ratio and favorable_dist > 0:
+                                self._close_position_with_conn(
+                                    conn, pos["id"], trigger_price,
+                                    f"短线ATR极速止盈：浮盈{favorable_dist:.5f} >= ATR参考{atr_ref:.5f}×{atr_tp_ratio:.1f}倍",
+                                    user_id,
+                                )
+                                conn.commit()
+                                continue
+
+                    # 算法3：动量衰竭出场 — M5 EMA9/21 发生反向交叉
+                    if decay_exit_enabled:
+                        price_info = price_map.get(symbol, {})
+                        if isinstance(price_info, dict):
+                            ema9_now = float(price_info.get("ema9_m5", 0.0) or 0.0)
+                            ema21_now = float(price_info.get("ema21_m5", 0.0) or 0.0)
+                            if ema9_now > 0 and ema21_now > 0:
+                                decay_long = (action == "long" and ema9_now < ema21_now)
+                                decay_short = (action == "short" and ema9_now > ema21_now)
+                                if decay_long or decay_short:
+                                    cross_dir = "<" if decay_long else ">"
+                                    self._close_position_with_conn(
+                                        conn, pos["id"], trigger_price,
+                                        f"短线动量衰竭：M5 EMA9({ema9_now:.3f}){cross_dir}EMA21({ema21_now:.3f})，反向交叉信号触发主动出场",
+                                        user_id,
+                                    )
+                                    conn.commit()
+                                    continue
+
+                    # 算法4：高浮盈回撤强平锁利 (Trailing Profit Stop)
+                    # 当最高浮盈曾达到 0.65R 以上，若当前浮盈回撤达到最高浮盈的 50% 或以下，立刻强平锁利
+                    if max_favorable_r >= 0.65 and favorable_r <= max_favorable_r * 0.50:
+                        self._close_position_with_conn(
+                            conn, pos["id"], trigger_price,
+                            f"短线浮盈回撤锁利：最高浮盈曾达 {max_favorable_r:.2f}R（阈值放宽至 0.65R），当前回撤至 {favorable_r:.2f}R，回撤率 >= 50%，主动清仓锁利",
+                            user_id,
+                        )
+                        conn.commit()
+                        continue
 
                 if not break_even_armed:
                     if tp2 > 0 and tp_hit:

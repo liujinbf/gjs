@@ -221,6 +221,19 @@ class SnapshotItem:
     model_confidence_text: str = ""
     model_note: str = ""
     snapshot_id: int = 0
+    # M5 短线信号（scalp_signal_engine 输出）
+    scalp_signal_type: str = ""        # pullback_ema21 / ema_crossover / bb_squeeze_breakout / liquidity_grab
+    scalp_direction: str = ""          # long / short
+    scalp_entry_price: float = 0.0
+    scalp_stop_price: float = 0.0
+    scalp_target_price: float = 0.0
+    scalp_target_2_price: float = 0.0
+    scalp_rr: float = 0.0
+    scalp_signal_text: str = ""
+    scalp_invalidation_text: str = ""
+    scalp_confidence: str = ""         # high / medium / low
+    scalp_ready: bool = False
+    scalp_setup_kind: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -308,6 +321,18 @@ class SnapshotItem:
             "model_confidence_text",
             "model_note",
             "snapshot_id",
+            "scalp_signal_type",
+            "scalp_direction",
+            "scalp_entry_price",
+            "scalp_stop_price",
+            "scalp_target_price",
+            "scalp_target_2_price",
+            "scalp_rr",
+            "scalp_signal_text",
+            "scalp_invalidation_text",
+            "scalp_confidence",
+            "scalp_ready",
+            "scalp_setup_kind",
         }
         quote_status_source = {
             "quote_status_code": source.get("quote_status_code", ""),
@@ -394,6 +419,18 @@ class SnapshotItem:
             model_confidence_text=_safe_text(source.get("model_confidence_text", "")),
             model_note=_safe_text(source.get("model_note", "")),
             snapshot_id=_safe_int(source.get("snapshot_id", 0)),
+            scalp_signal_type=_safe_text(source.get("scalp_signal_type", "")),
+            scalp_direction=_safe_text(source.get("scalp_direction", "")),
+            scalp_entry_price=_safe_float(source.get("scalp_entry_price", 0.0)),
+            scalp_stop_price=_safe_float(source.get("scalp_stop_price", 0.0)),
+            scalp_target_price=_safe_float(source.get("scalp_target_price", 0.0)),
+            scalp_target_2_price=_safe_float(source.get("scalp_target_2_price", 0.0)),
+            scalp_rr=_safe_float(source.get("scalp_rr", 0.0)),
+            scalp_signal_text=_safe_text(source.get("scalp_signal_text", "")),
+            scalp_invalidation_text=_safe_text(source.get("scalp_invalidation_text", "")),
+            scalp_confidence=_safe_text(source.get("scalp_confidence", "")),
+            scalp_ready=bool(source.get("scalp_ready", False)),
+            scalp_setup_kind=_safe_text(source.get("scalp_setup_kind", "")),
             extra={key: value for key, value in source.items() if key not in known_keys},
         )
 
@@ -478,6 +515,18 @@ class SnapshotItem:
             "model_confidence_text": self.model_confidence_text,
             "model_note": self.model_note,
             "snapshot_id": self.snapshot_id,
+            "scalp_signal_type": self.scalp_signal_type,
+            "scalp_direction": self.scalp_direction,
+            "scalp_entry_price": self.scalp_entry_price,
+            "scalp_stop_price": self.scalp_stop_price,
+            "scalp_target_price": self.scalp_target_price,
+            "scalp_target_2_price": self.scalp_target_2_price,
+            "scalp_rr": self.scalp_rr,
+            "scalp_signal_text": self.scalp_signal_text,
+            "scalp_invalidation_text": self.scalp_invalidation_text,
+            "scalp_confidence": self.scalp_confidence,
+            "scalp_ready": self.scalp_ready,
+            "scalp_setup_kind": self.scalp_setup_kind,
         }
         payload.update(dict(self.extra))
         return payload

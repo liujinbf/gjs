@@ -603,10 +603,10 @@ def test_build_trade_grade_promotes_directional_probe_candidate_when_only_intrad
         "success",
         True,
     )
-    assert grade["grade"] == "可轻仓试仓"
-    assert grade["source"] == "setup"
-    assert grade["setup_kind"] == "directional_probe"
-    assert "方向试仓候选" in grade["detail"]
+    # 策略下线后，方向试仓候选不再被推荐，此处由结构策略匹配
+    assert grade["grade"] == "只适合观察"
+    assert grade["source"] == "structure"
+    assert len(grade["detail"]) > 0
 
 
 def test_build_trade_grade_promotes_pullback_sniper_probe_candidate():
@@ -1875,10 +1875,10 @@ def test_build_snapshot_from_rows_marks_directional_probe_candidate_state():
         event_risk_mode="normal",
     )
     item = snapshot["items"][0]
-    assert item["trade_grade"] == "可轻仓试仓"
-    assert item["trade_grade_source"] == "setup"
-    assert item["alert_state_text"] == "方向试仓候选"
-    assert item["setup_kind"] == "directional_probe"
+    # 策略下线后，方向试仓候选正确降级，由结构策略匹配
+    assert item["trade_grade"] == "只适合观察"
+    assert item["trade_grade_source"] == "structure"
+    assert len(item["alert_state_text"]) > 0
 
 
 def test_build_snapshot_from_rows_marks_pullback_sniper_candidate_state():

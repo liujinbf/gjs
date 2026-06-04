@@ -1213,11 +1213,188 @@ def _exploratory_cooldown_active(symbol: str = "", action: str = "", meta: dict 
         return False
 
 
+def _float(value) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _get_symbol_exit_price(snapshot: dict, symbol: str, action: str) -> float:
+    for item in list(snapshot.get("items", []) or []):
+        if str(item.get("symbol", "") or "").strip().upper() == str(symbol).strip().upper():
+            if action == "long":
+                return float(item.get("bid", 0.0) or item.get("latest_price", 0.0))
+            else:
+                return float(item.get("ask", 0.0) or item.get("latest_price", 0.0))
+    return 0.0
+
+
+def _resolve_sim_profit_protect_state(config, user_id: str = "system") -> dict:
+    try:
+        from mt5_sim_trading import SIM_ENGINE
+        db_path = getattr(SIM_ENGINE, "db_path", "mt5_sim_trading.db")
+        import sqlite3
+        with sqlite3.connect(db_path) as conn:
+            realized = conn.execute(
+                "SELECT SUM(floating_pnl) FROM sim_positions WHERE status='closed' AND user_id=?",
+                (user_id,)
+            ).fetchone()[0] or 0.0
+            floating = conn.execute(
+                "SELECT SUM(floating_pnl) FROM sim_positions WHERE status='open' AND user_id=?",
+                (user_id,)
+            ).fetchone()[0] or 0.0
+        current_profit = float(realized) + float(floating)
+    except Exception:
+        current_profit = 0.0
+
+    from knowledge_base import kv_get, kv_set
+    peak_key = f"sim_profit_protect_peak_profit_{user_id}"
+    peak_profit = 0.0
+    try:
+        peak_val = kv_get(peak_key)
+        if peak_val is not None:
+            peak_profit = float(peak_val)
+    except Exception:
+        pass
+
+    if current_profit > peak_profit:
+        peak_profit = current_profit
+        try:
+            kv_set(peak_key, str(peak_profit))
+        except Exception:
+            pass
+
+    giveback = 0.0
+    locked = False
+    giveback_limit = float(getattr(config, "sim_profit_protect_giveback", 100.0) or 100.0)
+    peak_min = float(getattr(config, "sim_profit_protect_peak_min", 100.0) or 100.0)
+
+    if peak_profit >= peak_min:
+        giveback = peak_profit - current_profit
+        if giveback >= giveback_limit:
+            locked = True
+
+    return {
+        "locked": locked,
+        "peak_profit": round(peak_profit, 2),
+        "current_profit": round(current_profit, 2),
+        "giveback": round(giveback, 2),
+        "giveback_limit": giveback_limit,
+    }
+
+
+def _resolve_sim_idle_hours(user_id: str = "system") -> float:
+    try:
+        from mt5_sim_trading import SIM_ENGINE
+        db_path = getattr(SIM_ENGINE, "db_path", "mt5_sim_trading.db")
+        import sqlite3
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT created_at FROM sim_positions WHERE user_id=? ORDER BY id DESC LIMIT 1",
+                (user_id,)
+            ).fetchone()
+            if not row:
+                row = conn.execute(
+                    "SELECT closed_at FROM sim_positions WHERE user_id=? ORDER BY id DESC LIMIT 1",
+                    (user_id,)
+                ).fetchone()
+            if row:
+                from runtime_utils import parse_time
+                t_dt = parse_time(row[0])
+                if t_dt:
+                    return (datetime.now() - t_dt).total_seconds() / 3600.0
+    except Exception:
+        pass
+    return 0.0
+
+
+def _count_today_idle_probe_opens(user_id: str = "system") -> int:
+    try:
+        from mt5_sim_trading import SIM_ENGINE
+        db_path = getattr(SIM_ENGINE, "db_path", "mt5_sim_trading.db")
+        import sqlite3
+        from datetime import datetime
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) FROM sim_execution_audits 
+                WHERE user_id=? 
+                  AND source_kind='idle_probe' 
+                  AND decision_status='opened'
+                  AND occurred_at >= ?
+                """,
+                (user_id, today_str + " 00:00:00")
+            ).fetchone()
+            if row:
+                return int(row[0] or 0)
+    except Exception:
+        pass
+    return 0
+
+
+def _build_idle_probe_signal(snapshot: dict, config) -> tuple[dict | None, str]:
+    if not bool(getattr(config, "sim_idle_probe_enabled", False)):
+        return None, "idle_probe_disabled"
+
+    idle_hours = _resolve_sim_idle_hours()
+    threshold_hours = float(getattr(config, "sim_idle_probe_after_hours", 6.0) or 6.0)
+    if idle_hours < threshold_hours:
+        return None, f"空闲时间 {idle_hours:.1f} 小时，未达到门槛 {threshold_hours:.1f} 小时。"
+
+    daily_limit = int(getattr(config, "sim_idle_probe_daily_limit", 2) or 2)
+    today_opens = _count_today_idle_probe_opens()
+    if today_opens >= daily_limit:
+        return None, f"今日空窗试探次数 {today_opens} 已达上限 {daily_limit}。"
+
+    min_rr = float(getattr(config, "sim_idle_probe_min_rr", 1.2) or 1.2)
+    fixed_lots = float(getattr(config, "sim_idle_probe_fixed_lots", 0.01) or 0.01)
+
+    best_item = None
+    best_rr = 0.0
+    for item in list(snapshot.get("items", []) or []):
+        if not bool(item.get("has_live_quote", False)):
+            continue
+        if not bool(item.get("risk_reward_ready", False)):
+            continue
+        rr = float(item.get("risk_reward_ratio", 0.0) or 0.0)
+        if rr < min_rr:
+            continue
+        side = str(item.get("signal_side", "") or "").strip().lower()
+        if side not in {"long", "short"}:
+            continue
+        if rr > best_rr:
+            best_rr = rr
+            best_item = item
+
+    if not best_item:
+        return None, f"无可用的候选探针标的（最低盈亏比门槛 {min_rr}）。"
+
+    symbol = best_item["symbol"]
+    action = best_item["signal_side"]
+    sl = float(best_item.get("risk_reward_stop_price", 0.0))
+    tp = float(best_item.get("risk_reward_target_price", 0.0))
+
+    signal = {
+        "symbol": symbol,
+        "action": action,
+        "sl": sl,
+        "tp": tp,
+        "fixed_lots": fixed_lots,
+        "strategy_family": "idle_probe",
+        "execution_profile": "exploratory",
+    }
+    return signal, "ok"
+
+
 def process_snapshot_side_effects(
     snapshot: dict,
     config,
     run_backtest: bool = False,
 ) -> dict:
+    user_id = "system"
     result = {
         "log_lines": [],
         "notify_status_changed": False,
@@ -1248,6 +1425,14 @@ def process_snapshot_side_effects(
         result["log_lines"].append(f"[知识库] 快照写入失败：{exc}")
 
     history_entries = build_snapshot_history_entries(snapshot)
+    try:
+        from strategic_gold_plan import build_strategic_gold_plan_entries
+        strategic_entries = build_strategic_gold_plan_entries(snapshot, config)
+        if strategic_entries:
+            history_entries.extend(strategic_entries)
+    except Exception as _sgp_exc:
+        result["log_lines"].append(f"[战略黄金计划] 异常（非致命）：{_sgp_exc}")
+
     history_count = append_history_entries(history_entries)
     if history_count:
         result["log_lines"].append(f"[提醒留痕] 新增 {history_count} 条关键提醒。")
@@ -1319,72 +1504,302 @@ def process_snapshot_side_effects(
                     trade_mode="live",
                 )
                 result["log_lines"].append(f"[实盘候选未执行] {rule_reason}")
+            # ── 实盘持仓跟踪止损管理（每轮必执行，与开仓决策无关）──────────
+            try:
+                _pos_logs = LIVE_ENGINE.manage_open_positions()
+                for _pl in _pos_logs:
+                    _pl_ok = bool(_pl.get("ok", False))
+                    _pl_icon = "✅" if _pl_ok else "❌"
+                    _pl_act = _pl.get("action", "")
+                    _pl_sym = _pl.get("symbol", "")
+                    _pl_rsn = _pl.get("reason", "")
+                    _pl_res = _pl.get("result", "")
+                    if _pl_act == "market_close":
+                        result["log_lines"].append(
+                            f"[实盘持仓管理] {_pl_icon} 平仓 {_pl_sym}：{_pl_rsn} → {_pl_res}"
+                        )
+                        if _pl_ok:
+                            result["sim_data_changed"] = True
+                    elif _pl_act == "modify_sl":
+                        result["log_lines"].append(
+                            f"[实盘持仓管理] {_pl_icon} 移损 {_pl_sym}：{_pl_rsn} → {_pl_res}"
+                        )
+            except Exception as _pos_mgr_exc:
+                result["log_lines"].append(
+                    f"[实盘持仓管理] 异常（非致命）：{_pos_mgr_exc}"
+                )
         else:
             SIM_ENGINE.update_prices(live_quotes)
             result["sim_data_changed"] = True
+
+            # 获取活跃持仓
+            sim_positions = list(SIM_ENGINE.get_open_positions() or [])
             open_symbols = {
                 str(item.get("symbol", "") or "").strip().upper()
-                for item in list(SIM_ENGINE.get_open_positions() or [])
+                for item in sim_positions
                 if str(item.get("symbol", "") or "").strip()
             }
+            au_ag_positions = [
+                pos for pos in sim_positions
+                if pos.get("strategy_family") == "au_ag_pair" and pos.get("status") == "open"
+            ]
+
+            # ── 1. 黄金计划中长线分批提醒 ──
+            try:
+                from strategic_gold_plan import build_strategic_gold_plan_entries
+                strategic_entries = build_strategic_gold_plan_entries(snapshot, config)
+                if strategic_entries:
+                    # 黄金计划推送
+                    history_count = append_history_entries(strategic_entries)
+                    if history_count:
+                        result["log_lines"].append(f"[提醒留痕] 新增 {history_count} 条黄金计划提醒。")
+                        result["refresh_histories"] = True
+                    notify_res = send_notifications(strategic_entries, config)
+                    for line in notify_res.get("messages", []):
+                        result["log_lines"].append(f"[消息推送] {line}")
+                    for line in notify_res.get("errors", []):
+                        result["log_lines"].append(f"[消息推送失败] {line}")
+                    if notify_res.get("messages") or notify_res.get("errors"):
+                        result["notify_status_changed"] = True
+                        result["refresh_histories"] = True
+            except Exception as _sgp_exc:
+                result["log_lines"].append(f"[战略黄金计划] 异常（非致命）：{_sgp_exc}")
+
+            # ── 2. 金银配对套利逻辑 ──
+            # 2.1 强方向接管
+            has_direction_takeover = False
             rule_signal, rule_reason = build_rule_sim_signal_decision(snapshot, allow_exploratory=True)
+            if rule_signal and rule_signal.get("execution_profile") == "standard" and rule_signal.get("trade_grade") != "只适合观察":
+                conflict = False
+                for pos in au_ag_positions:
+                    if (pos["symbol"] == rule_signal["symbol"] 
+                        and pos["action"] != rule_signal["action"]):
+                        conflict = True
+                        break
+                if conflict:
+                    for pos in au_ag_positions:
+                        exit_p = _get_symbol_exit_price(snapshot, pos["symbol"], pos["action"])
+                        SIM_ENGINE.close_position(pos["id"], exit_p, reason="方向接管配对")
+                        open_symbols.discard(pos["symbol"])
+                    result["log_lines"].append(
+                        f"[模拟盘跟单] 强方向信号 {rule_signal['symbol']} {rule_signal['action']} 与套利冲突，方向接管配对平仓。"
+                    )
+                    au_ag_positions = []
+                    has_direction_takeover = True
+
+            # 2.2 均值回归退出判断
+            if au_ag_positions and not has_direction_takeover:
+                context = snapshot.get("correlation_context", {})
+                if context and context.get("au_ag_zscore") is not None:
+                    zscore = _float(context.get("au_ag_zscore"))
+                    exit_zscore = abs(_float(context.get("au_ag_exit_zscore")) or 0.35)
+                    if abs(zscore) < exit_zscore:
+                        for pos in au_ag_positions:
+                            exit_p = _get_symbol_exit_price(snapshot, pos["symbol"], pos["action"])
+                            SIM_ENGINE.close_position(pos["id"], exit_p, reason="Z-Score 回归退出")
+                        result["log_lines"].append(
+                            f"[模拟盘跟单] Au/Ag配对套利均值回归平仓（Z-Score={zscore:.2f} 绝对值小于出场阈值 {exit_zscore}）。"
+                        )
+                        au_ag_positions = []
+
+            # 2.3 配对偏离套利开仓
+            if not au_ag_positions:
+                try:
+                    from pair_arbitrage import build_au_ag_pair_signals
+                    pair_signals, pair_reason = build_au_ag_pair_signals(snapshot)
+                    if pair_signals:
+                        # 计算保证金
+                        required_margin = 0.0
+                        for sig in pair_signals:
+                            symbol = sig["symbol"]
+                            lots = sig["fixed_lots"]
+                            price = sig["price"]
+                            action = sig["action"]
+                            leg_margin, _ = SIM_ENGINE._calculate_margin_and_pnl(
+                                symbol, lots, price, price, action == "long"
+                            )
+                            required_margin += leg_margin
+                        
+                        account = SIM_ENGINE.get_account(user_id)
+                        balance = float(account.get("balance", 0.0))
+                        used_margin = float(account.get("used_margin", 0.0))
+                        available_margin = balance - used_margin
+                        
+                        max_drawdown_pct = float(getattr(config, "pair_arbitrage_max_drawdown_pct", 0.08) or 0.08)
+                        account_drawdown = 0.0
+                        if balance > 0:
+                            equity = float(account.get("equity", balance))
+                            account_drawdown = (balance - equity) / balance
+                        
+                        if account_drawdown > max_drawdown_pct:
+                            record_execution_audit(
+                                source_kind="pair_arbitrage",
+                                decision_status="blocked",
+                                snapshot=snapshot,
+                                meta=pair_signals[0],
+                                reason_key="drawdown_exceeded",
+                                result_message=f"配对交易净值回撤 {account_drawdown:.2%} 超过硬止损限制 {max_drawdown_pct:.2%}，拒绝开仓。",
+                                trade_mode="simulation",
+                            )
+                            result["log_lines"].append(
+                                f"[模拟盘跟单] 拒绝配对开仓：模拟盘净值亏损回撤已达到硬止损限制。"
+                            )
+                        elif required_margin > available_margin:
+                            record_execution_audit(
+                                source_kind="pair_arbitrage",
+                                decision_status="blocked",
+                                snapshot=snapshot,
+                                meta=pair_signals[0],
+                                reason_key="margin_precheck",
+                                result_message=f"保证金预检失败：所需保证金 {required_margin:.2f} > 可用 {available_margin:.2f}",
+                                trade_mode="simulation",
+                            )
+                            result["log_lines"].append(f"[模拟盘跟单] 保证金预检失败，拒绝配对开仓。")
+                        elif bool(getattr(config, "sim_kelly_enabled", False)) and SIM_ENGINE._resolve_kelly_risk_pct("au_ag_pair")[0] <= 0:
+                            kelly_pct, kelly_reason = SIM_ENGINE._resolve_kelly_risk_pct("au_ag_pair")
+                            record_execution_audit(
+                                source_kind="pair_arbitrage",
+                                decision_status="blocked",
+                                snapshot=snapshot,
+                                meta=pair_signals[0],
+                                reason_key="kelly_frozen",
+                                result_message=f"凯利公式风控锁定：{kelly_reason}",
+                                trade_mode="simulation",
+                            )
+                            result["log_lines"].append(f"[模拟盘跟单] 学习期冻结，跳过配对开仓。")
+                        else:
+                            pair_success = True
+                            pair_group_id = pair_signals[0]["pair_group_id"]
+                            for sig in pair_signals:
+                                sig["snapshot_id"] = result["snapshot_bindings"].get(sig["symbol"], 0)
+                                success, msg = SIM_ENGINE.execute_signal(sig, user_id=user_id)
+                                record_execution_audit(
+                                    source_kind="pair_arbitrage",
+                                    decision_status="opened" if success else "rejected",
+                                    snapshot=snapshot,
+                                    meta=sig,
+                                    result_message=msg,
+                                    trade_mode="simulation",
+                                )
+                                if not success:
+                                    pair_success = False
+                            if pair_success:
+                                result["sim_data_changed"] = True
+                                result["log_lines"].append(
+                                    f"[模拟盘跟单] Au/Ag配对套利开仓完成（组ID {pair_group_id}）。"
+                                )
+                except Exception as _pair_exc:
+                    result["log_lines"].append(f"[配对套利] 异常（非致命）：{_pair_exc}")
+
+            # ── 3. 空闲探针逻辑 ──
+            if not rule_signal and not au_ag_positions:
+                try:
+                    idle_sig, idle_reason = _build_idle_probe_signal(snapshot, config)
+                    if idle_sig:
+                        idle_sig["snapshot_id"] = result["snapshot_bindings"].get(idle_sig["symbol"], 0)
+                        success, msg = SIM_ENGINE.execute_signal(idle_sig, user_id=user_id)
+                        record_execution_audit(
+                            source_kind="idle_probe",
+                            decision_status="opened" if success else "rejected",
+                            snapshot=snapshot,
+                            meta=idle_sig,
+                            result_message=msg,
+                            trade_mode="simulation",
+                        )
+                        if success:
+                            result["sim_data_changed"] = True
+                            result["log_lines"].append(
+                                f"[模拟盘跟单] 空窗试探开仓：{idle_sig['symbol']} {idle_sig['action']}。"
+                            )
+                            rule_reason = None
+                except Exception as _idle_exc:
+                    result["log_lines"].append(f"[空闲探针] 异常（非致命）：{_idle_exc}")
+
+            # ── 4. 模拟盘规则跟单与利润保护 ──
             if rule_signal and str(rule_signal.get("symbol", "") or "").strip().upper() not in open_symbols:
                 symbol = str(rule_signal.get("symbol", "") or "").strip().upper()
                 if symbol in result["snapshot_bindings"]:
                     rule_signal["snapshot_id"] = result["snapshot_bindings"][symbol]
                 action = str(rule_signal.get("action", "") or "").strip().lower()
-                if _is_exploratory_signal(rule_signal) and _exploratory_cooldown_active(symbol, action, meta=rule_signal):
-                    cooldown_min = _resolve_exploratory_cooldown_min(rule_signal)
-                    strategy_family = _resolve_exploratory_strategy_family(rule_signal)
-                    strategy_hint = f"{strategy_family} " if strategy_family else ""
-                    record_execution_audit(
-                        source_kind="rule_engine",
-                        decision_status="blocked",
-                        snapshot=snapshot,
-                        meta=rule_signal,
-                        reason_key="exploratory_cooldown",
-                        result_message=(
-                            f"{symbol} {action} {strategy_hint}探索试仓仍在 {cooldown_min} 分钟同向冷却内，"
-                            "本轮只记录机会，不重复试错。"
-                        ),
-                        trade_mode="simulation",
-                    )
-                    result["log_lines"].append(
-                        f"[模拟盘探索试仓冷却] {symbol} {action} {strategy_hint}仍在 {cooldown_min} 分钟同向冷却内。"
-                    )
-                elif _is_exploratory_signal(rule_signal) and _exploratory_daily_limit_reached(symbol, meta=rule_signal):
-                    exploratory_limit = _resolve_exploratory_daily_limit(rule_signal)
-                    strategy_family = _resolve_exploratory_strategy_family(rule_signal)
-                    strategy_hint = f"{strategy_family} " if strategy_family else ""
-                    record_execution_audit(
-                        source_kind="rule_engine",
-                        decision_status="blocked",
-                        snapshot=snapshot,
-                        meta=rule_signal,
-                        reason_key="exploratory_daily_limit",
-                        result_message=(
-                            f"{symbol} 今日{strategy_hint}探索试仓已达到 {exploratory_limit} 次上限，"
-                            "本轮只记录机会，不继续加仓试错。"
-                        ),
-                        trade_mode="simulation",
-                    )
-                    result["log_lines"].append(
-                        f"[模拟盘探索试仓暂停] {symbol} 今日{strategy_hint}已达到 {exploratory_limit} 次上限。"
-                    )
-                else:
-                    sim_success, sim_message = _attempt_sim_execution(
-                        source_kind="rule_engine",
-                        snapshot=snapshot,
-                        meta=rule_signal,
-                    )
-                    if sim_success:
-                        result["sim_data_changed"] = True
-                        profile_text = "探索试仓" if _is_exploratory_signal(rule_signal) else "结构候选"
+
+                # 利润保护拦截
+                profit_locked = False
+                if bool(getattr(config, "sim_profit_protect_enabled", False)):
+                    protect_state = _resolve_sim_profit_protect_state(config)
+                    if protect_state.get("locked", False):
+                        profit_locked = True
+                        record_execution_audit(
+                            source_kind="rule_engine",
+                            decision_status="blocked",
+                            snapshot=snapshot,
+                            meta=rule_signal,
+                            reason_key="profit_protect",
+                            result_message=(
+                                f"模拟盘利润保护熔断：历史最高利润 ${protect_state['peak_profit']:.2f}，"
+                                f"当前 ${protect_state['current_profit']:.2f}，回吐 ${protect_state['giveback']:.2f} "
+                                f"超出允许限制 ${protect_state['giveback_limit']:.2f}。"
+                            ),
+                            trade_mode="simulation",
+                        )
                         result["log_lines"].append(
-                            f"[模拟盘规则跟单] 已按{profile_text}开仓：{rule_signal.get('action')} {rule_signal.get('symbol')}。"
+                            f"[模拟盘利润保护] 利润保护熔断已锁死，拒绝跟单。"
+                        )
+
+                if not profit_locked:
+                    # 冷却拦截与每日限制拦截（适用于所有信号）
+                    profile_desc = "探索试仓" if _is_exploratory_signal(rule_signal) else "规则试仓"
+
+                    if _exploratory_cooldown_active(symbol, action, meta=rule_signal):
+                        cooldown_min = _resolve_exploratory_cooldown_min(rule_signal)
+                        strategy_family = _resolve_exploratory_strategy_family(rule_signal)
+                        strategy_hint = f"{strategy_family} " if strategy_family else ""
+                        record_execution_audit(
+                            source_kind="rule_engine",
+                            decision_status="blocked",
+                            snapshot=snapshot,
+                            meta=rule_signal,
+                            reason_key="exploratory_cooldown",
+                            result_message=(
+                                f"{symbol} {action} {strategy_hint}{profile_desc}仍在 {cooldown_min} 分钟同向冷却内，"
+                                "本轮只记录机会，不重复试错。"
+                            ),
+                            trade_mode="simulation",
+                        )
+                        result["log_lines"].append(
+                            f"[模拟盘{profile_desc}冷却] {symbol} {action} {strategy_hint}仍在 {cooldown_min} 分钟同向冷却内。"
+                        )
+                    elif _exploratory_daily_limit_reached(symbol, meta=rule_signal):
+                        exploratory_limit = _resolve_exploratory_daily_limit(rule_signal)
+                        strategy_family = _resolve_exploratory_strategy_family(rule_signal)
+                        strategy_hint = f"{strategy_family} " if strategy_family else ""
+                        record_execution_audit(
+                            source_kind="rule_engine",
+                            decision_status="blocked",
+                            snapshot=snapshot,
+                            meta=rule_signal,
+                            reason_key="exploratory_daily_limit",
+                            result_message=(
+                                f"{symbol} 今日{strategy_hint}{profile_desc}已达到 {exploratory_limit} 次上限，"
+                                "本轮只记录机会，不继续加仓试错。"
+                            ),
+                            trade_mode="simulation",
+                        )
+                        result["log_lines"].append(
+                            f"[模拟盘{profile_desc}暂停] {symbol} 今日{strategy_hint}已达到 {exploratory_limit} 次上限。"
                         )
                     else:
-                        result["log_lines"].append(f"[模拟盘规则跟单被拒] {sim_message}")
+                        sim_success, sim_message = _attempt_sim_execution(
+                            source_kind="rule_engine",
+                            snapshot=snapshot,
+                            meta=rule_signal,
+                        )
+                        if sim_success:
+                            result["sim_data_changed"] = True
+                            result["log_lines"].append(
+                                f"[模拟盘规则跟单] 已按{profile_desc}开仓：{rule_signal.get('action')} {rule_signal.get('symbol')}。"
+                            )
+                        else:
+                            result["log_lines"].append(f"[模拟盘规则跟单被拒] {sim_message}")
             elif rule_signal:
                 record_execution_audit(
                     source_kind="rule_engine",

@@ -335,11 +335,16 @@ def test_request_ai_brief_parses_response(monkeypatch):
     assert "方向判断" in result["content"]
     assert result["model"] == "deepseek-ai/DeepSeek-R1"
     assert captured["url"] == "https://api.siliconflow.cn/v1/chat/completions"
-    assert captured["payloads"][0]["response_format"] == {"type": "json_object"}
+    # 辩论模式下共 3 次调用：看多视角 + 看空视角 + 仲裁（带 json_object）
+    assert len(captured["payloads"]) == 3
+    # 仲裁阶段（第 3 次）是正式 JSON 格式调用
+    assert captured["payloads"][2]["response_format"] == {"type": "json_object"}
     assert result["signal_meta"]["action"] == "neutral"
     assert result["signal_schema_version"] == "signal-meta-v1"
     assert result["signal_meta_valid"] is True
     assert result["rulebook_summary_text"] == "当前优先遵守 1 条已验证规则。"
+    # 验证辩论模式元数据
+    assert result.get("debate_mode") is True
 
 
 def test_request_ai_brief_extracts_markdown_wrapped_json_without_json_repair(monkeypatch):
@@ -381,7 +386,8 @@ def test_request_ai_brief_extracts_markdown_wrapped_json_without_json_repair(mon
 
     result = request_ai_brief({"summary_text": "测试快照", "items": []}, _build_config())
 
-    assert len(captured["payloads"]) == 1
+    # 辩论模式：看多(1) + 看空(2) + 仲裁带 json_mode(3)
+    assert len(captured["payloads"]) >= 3
     assert result["content"] == "当前结论：轻仓试多。"
     assert result["signal_meta"]["action"] == "long"
     assert result["signal_meta"]["price"] == 2350.0
@@ -437,10 +443,11 @@ def test_request_ai_brief_retries_invalid_json_once(monkeypatch):
     result = request_ai_brief({"summary_text": "测试快照", "items": []}, _build_config())
 
     assert result["signal_meta"]["action"] == "neutral"
-    assert len(captured["payloads"]) == 2
-    retry_messages = captured["payloads"][1]["messages"]
-    assert retry_messages[-1]["role"] == "user"
-    assert "只返回一个 JSON 对象" in retry_messages[-1]["content"]
+    # 辩论模式：看多(1) + 看空(2) + 仲裁 json_mode(3)
+    # fake_post 在 payloads==1 时才返回非JSON，后续均返回有效JSON；
+    # 仲裁是第3次调用，返回有效 JSON，不触发内部重试，共 3 次。
+    assert len(captured["payloads"]) == 3
+    # 仲裁结果包含正确内容
     assert "当前结论：只适合观察" in result["content"]
 
 
@@ -529,9 +536,10 @@ def test_request_ai_brief_retries_invalid_json_for_anthropic(monkeypatch):
     result = request_ai_brief({"summary_text": "测试快照", "items": []}, config)
 
     assert result["signal_meta"]["action"] == "neutral"
-    assert len(captured["payloads"]) == 2
-    assert captured["payloads"][1]["messages"][-1]["role"] == "user"
-    assert "只返回一个 JSON 对象" in captured["payloads"][1]["messages"][-1]["content"]
+    # 辩论模式：看多(1，非JSON→作为论据文本使用) + 看空(2) + 仲裁(3，返回有效JSON不触发重试)
+    assert len(captured["payloads"]) == 3
+    # 仲裁结果正确
+    assert "当前结论：只适合观察" in result["content"]
 
 
 def test_request_ai_brief_plain_text_response_gracefully_degrades(monkeypatch):
@@ -625,3 +633,296 @@ def test_post_json_with_headers_does_not_mutate_global_socket_timeout(monkeypatc
     assert result["ok"] is True
     assert captured["timeout"] == 12
     assert captured["url"] == "https://example.com/v1/chat/completions"
+
+
+def test_build_snapshot_prompt_scalp_adaptive():
+    snapshot = {
+        "summary_text": "当前共观察 1 个品种。",
+        "alert_text": "短线就绪测试中。",
+        "market_text": "等待短线机会。",
+        "regime_tag": "trend_expansion",
+        "items": [
+            {
+                "symbol": "XAUUSD",
+                "latest_text": "2350.50",
+                "quote_text": "Bid 2350.40 | Ask 2350.60 | 点差 20点",
+                "status_text": "实时报价",
+                "quote_status_code": "live",
+                "regime_text": "趋势扩张",
+                "trade_grade": "可轻仓试仓",
+                "trade_grade_source": "scalp",
+                "trade_grade_detail": "短线回调完成。",
+                "signal_side": "long",
+                "setup_kind": "scalp",
+                "scalp_ready": True,
+                "scalp_rr": 1.5,
+                "scalp_confidence": "high",
+                "scalp_signal_type": "pullback_ema21",
+                "scalp_signal_text": "回踩M5均线EMA21",
+                "m5_scalp_summary": "多头排列",
+                "ema9_m5": 2349.50,
+                "ema21_m5": 2348.00,
+                "atr5_m5": 2.50,
+            }
+        ],
+    }
+
+    prompt = build_snapshot_prompt(snapshot, rulebook={})
+
+    assert "XAUUSD" in prompt
+    assert "【短线指令：" in prompt
+    assert "[短线就绪数据]" in prompt
+    assert "形态:pullback_ema21" in prompt
+    assert "置信度:high" in prompt
+    assert "短线盈亏比:1.50" in prompt
+    assert "信号描述:回踩M5均线EMA21" in prompt
+    assert "M5均线:EMA9(2349.50) vs EMA21(2348.00)" in prompt
+    assert "M5_ATR5:2.5000" in prompt
+    assert "极速止盈：浮盈价差达到" in prompt
+    assert "时间止损：持仓达" in prompt
+    assert "动量衰竭：当 M5 EMA9 与 EMA21" in prompt
+
+
+def test_request_ai_brief_scalp_openai_payload(monkeypatch):
+    captured = {"payloads": []}
+
+    def fake_post(url, payload, api_key, timeout=30):
+        captured["payloads"].append(payload)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"summary_text":"短线做多！",'
+                            '"signal_meta":{"symbol":"XAUUSD","action":"long","price":2350.50,"sl":2340.00,"tp":2370.00}}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr("ai_briefing._post_json", fake_post)
+    monkeypatch.setattr(
+        "ai_briefing.build_rulebook",
+        lambda **_kwargs: {
+            "summary_text": "规则库还在学习中。",
+            "active_rules_text": "暂无已验证规则。",
+            "candidate_rules_text": "暂无候选规则。",
+            "rejected_rules_text": "暂无明确淘汰规则。",
+        },
+    )
+
+    snapshot = {
+        "summary_text": "当前共观察 1 个品种。",
+        "alert_text": "点差正常。",
+        "market_text": "无重大事件。",
+        "items": [
+            {
+                "symbol": "XAUUSD",
+                "latest_text": "2350.50",
+                "quote_text": "Bid 2350.40 | Ask 2350.60 | 点差 20点",
+                "status_text": "实时报价",
+                "quote_status_code": "live",
+                "scalp_ready": True,
+                "scalp_rr": 1.5,
+                "scalp_confidence": "high",
+                "scalp_signal_type": "pullback_ema21",
+                "scalp_signal_text": "回踩M5均线EMA21",
+            }
+        ],
+    }
+
+    result = request_ai_brief(snapshot, _build_config())
+
+    assert len(captured["payloads"]) == 1
+    messages = captured["payloads"][0]["messages"]
+    system_message = next(msg for msg in messages if msg["role"] == "system")
+    assert "针对 M5/M1 快速轨道的" in system_message["content"] or "短线套利/极速交易教练" in system_message["content"]
+    assert "多周期共振等量化描述" in system_message["content"]
+    assert result["signal_meta"]["action"] == "long"
+    assert result["content"] == "短线做多！"
+
+
+def test_request_ai_brief_scalp_anthropic_payload(monkeypatch):
+    captured = {"payloads": []}
+
+    def fake_post(url, payload, headers, timeout=30):
+        captured["payloads"].append(payload)
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        '{"summary_text":"短线做多！",'
+                        '"signal_meta":{"symbol":"XAUUSD","action":"long","price":2350.50,"sl":2340.00,"tp":2370.00}}'
+                    ),
+                }
+            ]
+        }
+
+    monkeypatch.setattr("ai_briefing._post_json_with_headers", fake_post)
+    monkeypatch.setattr(
+        "ai_briefing.build_rulebook",
+        lambda **_kwargs: {
+            "summary_text": "规则库还在学习中。",
+            "active_rules_text": "暂无已验证规则。",
+            "candidate_rules_text": "暂无候选规则。",
+            "rejected_rules_text": "暂无明确淘汰规则。",
+        },
+    )
+
+    config = _build_config()
+    config.ai_api_base = "https://api.anthropic.com/v1"
+    config.ai_model = "claude-3-5-sonnet-20241022"
+
+    snapshot = {
+        "summary_text": "当前共观察 1 个品种。",
+        "alert_text": "点差正常。",
+        "market_text": "无重大事件。",
+        "items": [
+            {
+                "symbol": "XAUUSD",
+                "latest_text": "2350.50",
+                "quote_text": "Bid 2350.40 | Ask 2350.60 | 点差 20点",
+                "status_text": "实时报价",
+                "quote_status_code": "live",
+                "scalp_ready": True,
+                "scalp_rr": 1.5,
+                "scalp_confidence": "high",
+                "scalp_signal_type": "pullback_ema21",
+                "scalp_signal_text": "回踩M5均线EMA21",
+            }
+        ],
+    }
+
+    result = request_ai_brief(snapshot, config)
+
+    assert len(captured["payloads"]) == 1
+    system_prompt = captured["payloads"][0]["system"]
+    assert "针对 M5/M1 快速轨道的" in system_prompt or "短线套利/极速交易教练" in system_prompt
+    assert "多周期共振等量化描述" in system_prompt
+    assert result["signal_meta"]["action"] == "long"
+
+
+# ─── 辩论模式专项测试 ─────────────────────────────────────────────────────────
+
+def test_debate_mode_makes_three_calls_for_non_scalp(monkeypatch):
+    """非 scalp 研判时，辩论模式自动触发 3 次 LLM 调用（看多 + 看空 + 仲裁）。"""
+    captured = {"payloads": [], "calls": 0}
+
+    def fake_post(url, payload, api_key, timeout=30):
+        captured["calls"] += 1
+        captured["payloads"].append(payload)
+        if captured["calls"] <= 2:
+            # 前两次（看多/看空）：返回纯文本，max_tokens 限制在 500
+            return {
+                "choices": [{"message": {"content": f"视角{captured['calls']}论据：黄金技术面偏强。"}}]
+            }
+        # 第三次（仲裁）：返回合法 JSON
+        return {
+            "choices": [{
+                "message": {
+                    "content": (
+                        '{"summary_text":"⚖️ 综合双方论据，当前观望为宜。",'
+                        '"signal_meta":{"symbol":"XAUUSD","action":"neutral","price":0,"sl":0,"tp":0}}'
+                    )
+                }
+            }]
+        }
+
+    monkeypatch.setattr("ai_briefing._post_json", fake_post)
+    monkeypatch.setattr(
+        "ai_briefing.build_rulebook",
+        lambda **_: {"summary_text": "", "active_rules_text": "",
+                     "candidate_rules_text": "", "rejected_rules_text": ""},
+    )
+
+    snapshot = {"summary_text": "测试快照", "items": []}
+    result = request_ai_brief(snapshot, _build_config())
+
+    # 辩论模式：3 次调用（看多 + 看空 + 仲裁 json_mode）
+    assert captured["calls"] == 3
+    assert captured["payloads"][0]["max_tokens"] == 500  # 看多视角：省 token
+    assert captured["payloads"][1]["max_tokens"] == 500  # 看空视角：省 token
+    assert captured["payloads"][2].get("response_format") == {"type": "json_object"}  # 仲裁带 JSON mode
+    assert result.get("debate_mode") is True
+    assert "debate_bull_excerpt" in result
+    assert "debate_bear_excerpt" in result
+    assert "视角1论据" in result["debate_bull_excerpt"]
+    assert "视角2论据" in result["debate_bear_excerpt"]
+    assert result["content"] == "⚖️ 综合双方论据，当前观望为宜。"
+
+
+def test_debate_mode_skipped_for_scalp(monkeypatch):
+    """scalp 研判时，跳过辩论模式，只调用 1 次 LLM。"""
+    captured = {"calls": 0}
+
+    def fake_post(url, payload, api_key, timeout=30):
+        captured["calls"] += 1
+        return {
+            "choices": [{
+                "message": {
+                    "content": (
+                        '{"summary_text":"短线做多！",'
+                        '"signal_meta":{"symbol":"XAUUSD","action":"long","price":2350.0,"sl":2340.0,"tp":2370.0}}'
+                    )
+                }
+            }]
+        }
+
+    monkeypatch.setattr("ai_briefing._post_json", fake_post)
+    monkeypatch.setattr(
+        "ai_briefing.build_rulebook",
+        lambda **_: {"summary_text": "", "active_rules_text": "",
+                     "candidate_rules_text": "", "rejected_rules_text": ""},
+    )
+
+    snapshot = {
+        "summary_text": "短线测试",
+        "items": [{"symbol": "XAUUSD", "scalp_ready": True,
+                   "scalp_rr": 1.5, "scalp_confidence": "high",
+                   "scalp_signal_type": "pullback_ema21"}],
+    }
+    result = request_ai_brief(snapshot, _build_config())
+
+    # scalp 跳过辩论，仅 1 次调用
+    assert captured["calls"] == 1
+    assert result.get("debate_mode") is not True
+    assert result["signal_meta"]["action"] == "long"
+
+
+def test_debate_mode_fallback_on_error(monkeypatch):
+    """辩论模式任何阶段异常时，静默降级到标准单轨模式，不影响主流程。"""
+    captured = {"calls": 0}
+
+    def fake_post(url, payload, api_key, timeout=30):
+        captured["calls"] += 1
+        if captured["calls"] == 1:
+            raise RuntimeError("模拟辩论阶段网络超时")
+        # 降级到标准单轨后的调用：返回合法 JSON
+        return {
+            "choices": [{
+                "message": {
+                    "content": (
+                        '{"summary_text":"标准单轨降级研判：当前观望。",'
+                        '"signal_meta":{"symbol":"XAUUSD","action":"neutral","price":0,"sl":0,"tp":0}}'
+                    )
+                }
+            }]
+        }
+
+    monkeypatch.setattr("ai_briefing._post_json", fake_post)
+    monkeypatch.setattr(
+        "ai_briefing.build_rulebook",
+        lambda **_: {"summary_text": "", "active_rules_text": "",
+                     "candidate_rules_text": "", "rejected_rules_text": ""},
+    )
+
+    snapshot = {"summary_text": "降级测试", "items": []}
+    result = request_ai_brief(snapshot, _build_config())
+
+    # 辩论第 1 次失败 → 降级到标准单轨（json_mode 调用）→ 成功
+    assert result["content"] == "标准单轨降级研判：当前观望。"
+    assert result["signal_meta"]["action"] == "neutral"
+    # 降级后不带 debate_mode 标记
+    assert result.get("debate_mode") is not True

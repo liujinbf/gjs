@@ -8,13 +8,14 @@ import threading
 import time
 from pathlib import Path
 
-from app_config import load_project_env
+from app_config import get_runtime_config, load_project_env
 from broker_gateway import resolve_broker_symbol
 from breakout_context import analyze_breakout_signal, build_empty_breakout_context
 from intraday_context import analyze_intraday_bars, analyze_multi_timeframe_context, build_empty_intraday_context
 from key_levels import analyze_key_levels, build_empty_key_level_context
 from quote_models import QuoteRow
 from technical_indicators import build_technical_indicators
+from tick_shock_detector import build_empty_tick_shock_state, update_tick_shock_state
 
 try:
     import MetaTrader5 as mt5
@@ -56,8 +57,9 @@ _broker_utc_offset_sec: float | None = None   # 经纪商 UTC 偏移（秒），
 _BROKER_OFFSET_SNAP_HOUR = 1800.0             # 将估算值对齐到最近 30 分钟，兼容半小时偏移的服务器时区
 
 INTRADAY_CONTEXT_SPECS = [
+    ("m1",  "TIMEFRAME_M1",  30,  "最近30分钟"),   # 30 M1 bars → ATR5 极速止损锚
     ("m5",  "TIMEFRAME_M5",  288, "近24小时"),   # 288 M5 bars = 24h
-    ("m15", "TIMEFRAME_M15", 12,  "近3小时"),
+    ("m15", "TIMEFRAME_M15", 96,  "近24小时"),
     ("h1",  "TIMEFRAME_H1",  60,  "近12小时"),   # 60 H1 bars for MA50+RSI
     ("h4",  "TIMEFRAME_H4",  120, "近20天"),   # 120 H4 bars ≈ 20d，用于趋势判断
 ]
@@ -471,6 +473,20 @@ def fetch_quotes(symbols: list[str], include_inactive: bool = True) -> list[dict
             else:
                 spread = float(getattr(info, "spread", 0.0) or 0.0) if info is not None else 0.0
             tick_time = int(getattr(tick, "time", 0) or 0) if tick is not None else 0
+            try:
+                runtime_config = get_runtime_config()
+                tick_shock_context = update_tick_shock_state(
+                    symbol_key,
+                    bid=bid,
+                    ask=ask,
+                    last=last,
+                    enabled=bool(getattr(runtime_config, "tick_shock_guard_enabled", True)),
+                    window_sec=float(getattr(runtime_config, "tick_shock_window_sec", 5.0) or 5.0),
+                    cooldown_sec=float(getattr(runtime_config, "tick_shock_cooldown_sec", 60.0) or 60.0),
+                    thresholds=getattr(runtime_config, "tick_shock_thresholds", None),
+                )
+            except Exception:  # noqa: BLE001
+                tick_shock_context = build_empty_tick_shock_state()
             intraday_context = build_empty_intraday_context()
             multi_timeframe_context = {
                 "multi_timeframe_context_ready": False,
@@ -483,6 +499,7 @@ def fetch_quotes(symbols: list[str], include_inactive: bool = True) -> list[dict
                 "m15_context_text": "",
                 "h1_context_text": "",
                 "h4_context_text": "",
+                "m5_scalp_summary": "",
             }
             key_level_context = build_empty_key_level_context()
             breakout_context = build_empty_breakout_context()
@@ -504,7 +521,13 @@ def fetch_quotes(symbols: list[str], include_inactive: bool = True) -> list[dict
                         timeframe_contexts[key] = build_empty_intraday_context()
                 intraday_context = dict(timeframe_contexts.get("m5", build_empty_intraday_context()))
                 multi_timeframe_context = analyze_multi_timeframe_context(timeframe_contexts)
-                multi_timeframe_context["m15_context_text"] = str(timeframe_contexts.get("m15", {}).get("intraday_context_text", "") or "").strip()
+                m15_context = dict(timeframe_contexts.get("m15", {}) or {})
+                multi_timeframe_context["m15_context_text"] = str(m15_context.get("intraday_context_text", "") or "").strip()
+                multi_timeframe_context["m15_price_structure_ready"] = bool(m15_context.get("price_structure_ready", False))
+                multi_timeframe_context["m15_price_structure_direction"] = str(m15_context.get("price_structure_direction", "unknown") or "unknown").strip()
+                multi_timeframe_context["m15_price_structure_strength"] = int(m15_context.get("price_structure_strength", 0) or 0)
+                multi_timeframe_context["m15_price_structure_state"] = str(m15_context.get("price_structure_state", "unknown") or "unknown").strip()
+                multi_timeframe_context["m15_price_structure_text"] = str(m15_context.get("price_structure_text", "") or "").strip()
                 multi_timeframe_context["h1_context_text"] = str(timeframe_contexts.get("h1", {}).get("intraday_context_text", "") or "").strip()
                 multi_timeframe_context["h4_context_text"] = str(timeframe_contexts.get("h4", {}).get("intraday_context_text", "") or "").strip()
                 try:
@@ -516,10 +539,15 @@ def fetch_quotes(symbols: list[str], include_inactive: bool = True) -> list[dict
                 except Exception:  # noqa: BLE001
                     breakout_context = build_empty_breakout_context()
                 tech_indicators = build_technical_indicators({
+                    "m1": timeframe_rates.get("m1"),
                     "m5": timeframe_rates.get("m5"),
                     "h1": timeframe_rates.get("h1"),
                     "h4": timeframe_rates.get("h4"),
                 })
+                # 将 M5 短线摘要写入 multi_timeframe_context
+                multi_timeframe_context["m5_scalp_summary"] = str(
+                    tech_indicators.get("m5_scalp_summary", "") or ""
+                ).strip()
             else:
                 tech_indicators = {}
 
@@ -561,6 +589,7 @@ def fetch_quotes(symbols: list[str], include_inactive: bool = True) -> list[dict
                         "broker_symbol_mapped": bool(resolved_symbol.is_mapped),
                         "volume_step": float(getattr(info, "volume_step", 0.0) or 0.0) if info is not None else 0.0,
                         "volume_min": float(getattr(info, "volume_min", 0.0) or 0.0) if info is not None else 0.0,
+                        "contract_size": float(getattr(info, "trade_contract_size", 0.0) or 0.0) if info is not None else 0.0,
                         "quote_live_reason": str(tick_activity.get("reason", "") or "").strip(),
                         "quote_live_reason_text": str(tick_activity.get("reason_text", "") or "").strip(),
                         "quote_live_diagnostic_text": str(tick_activity.get("diagnostic_text", "") or "").strip(),
@@ -571,6 +600,7 @@ def fetch_quotes(symbols: list[str], include_inactive: bool = True) -> list[dict
                         "quote_broker_offset_sec": float(tick_activity.get("broker_offset_sec", 0.0) or 0.0),
                         "quote_offset_recalibrated": bool(tick_activity.get("offset_recalibrated", False)),
                         "quote_price_available": bool(tick_activity.get("price_available", False)),
+                        **tick_shock_context,
                         **intraday_context,
                         **multi_timeframe_context,
                         **key_level_context,

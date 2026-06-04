@@ -1,5 +1,6 @@
 import os
 import sys
+import sqlite3
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -48,3 +49,68 @@ def test_build_trade_grade_uses_status_code_instead_of_text():
 
     assert payload["source"] == "inactive"
     assert payload["grade"] == "当前不宜出手"
+
+
+def test_scalp_candidate_respects_global_disabled_switch(monkeypatch):
+    monkeypatch.setattr(
+        app_config,
+        "get_runtime_config",
+        lambda: app_config.MetalMonitorConfig(
+            symbols=["XAUUSD"],
+            refresh_interval_sec=30,
+            event_risk_mode="normal",
+            mt5_path="",
+            mt5_login="",
+            mt5_password="",
+            mt5_server="",
+            dingtalk_webhook="",
+            pushplus_token="",
+            notify_cooldown_min=30,
+            ai_api_key="",
+            ai_api_base="https://api.demo.com",
+            ai_model="demo",
+            ai_push_enabled=False,
+            ai_push_summary_only=True,
+            scalp_enabled=False,
+        ),
+    )
+
+    result = monitor_rules._build_scalp_ready_candidate(
+        "XAUUSD",
+        {
+            "scalp_ready": True,
+            "scalp_direction": "long",
+            "scalp_rr": 2.0,
+            "scalp_confidence": "high",
+            "spread_points": 10.0,
+            "point": 0.01,
+            "atr5_m5": 2.0,
+        },
+    )
+
+    assert result is None
+
+
+def test_get_24h_avg_spread_reads_market_snapshots(tmp_path, monkeypatch):
+    db_path = tmp_path / "knowledge.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE market_snapshots (
+                snapshot_time TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                spread_points REAL NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO market_snapshots (snapshot_time, symbol, spread_points) VALUES (?, ?, ?)",
+            [
+                ("2099-01-01 00:00:00", "XAUUSD", 20.0),
+                ("2099-01-01 00:01:00", "XAUUSD", 24.0),
+            ],
+        )
+    monitor_rules._SPREAD_AVG_CACHE.clear()
+    monkeypatch.setattr("knowledge_base.KNOWLEDGE_DB_FILE", db_path)
+
+    assert monitor_rules._get_24h_avg_spread("XAUUSD") == 22.0

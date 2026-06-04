@@ -12,7 +12,18 @@ from urllib import error, request
 
 from app_config import MetalMonitorConfig, PROJECT_DIR
 from knowledge_rulebook import build_rulebook
-from prompt_templates import AI_BRIEF_SYSTEM_PROMPT, build_metal_brief_prompt
+from prompt_templates import (
+    AI_BRIEF_SYSTEM_PROMPT,
+    AI_SCALP_SYSTEM_PROMPT,
+    AI_BULL_PERSPECTIVE_SYSTEM_PROMPT,
+    AI_BEAR_PERSPECTIVE_SYSTEM_PROMPT,
+    AI_DEBATE_ARBITRATOR_SYSTEM_PROMPT,
+    build_metal_brief_prompt,
+    build_scalp_brief_prompt,
+    build_bull_perspective_prompt,
+    build_bear_perspective_prompt,
+    build_arbitrator_prompt,
+)
 from backtest_engine import extract_signal_meta, get_historical_win_rate
 from signal_protocol import SIGNAL_SCHEMA_VERSION, build_empty_signal_meta, normalize_signal_meta, validate_signal_meta
 
@@ -64,6 +75,22 @@ def build_snapshot_prompt(snapshot: dict, rulebook: dict | None = None) -> str:
         rulebook
         or build_rulebook(current_regime_tag=str(snapshot_copy.get("regime_tag", "") or "").strip())
     )
+    items = list(snapshot_copy.get("items", []) or [])
+    has_scalp = False
+    for item in items:
+        val = False
+        if isinstance(item, dict):
+            val = item.get("scalp_ready", False)
+        elif hasattr(item, "scalp_ready"):
+            val = getattr(item, "scalp_ready", False)
+        elif hasattr(item, "to_dict"):
+            val = item.to_dict().get("scalp_ready", False)
+        if bool(val):
+            has_scalp = True
+            break
+
+    if has_scalp:
+        return build_scalp_brief_prompt(snapshot_copy, rulebook=effective_rulebook)
     return build_metal_brief_prompt(snapshot_copy, rulebook=effective_rulebook)
 
 
@@ -509,6 +536,121 @@ def _request_anthropic_brief_result(api_base: str, payload: dict, api_key: str) 
         )
 
 
+def _request_text_only(system_prompt: str, user_prompt: str, config: "MetalMonitorConfig") -> str:
+    """
+    单次 LLM 调用，返回纯文本（不做 JSON 解析）。
+    用于辩论模式的看多/看空两个视角阶段。
+    """
+    api_key = str(config.ai_api_key or "").strip()
+    api_base = str(config.ai_api_base or "https://api.siliconflow.cn/v1").strip().rstrip("/")
+    model = str(config.ai_model or "deepseek-ai/DeepSeek-R1").strip()
+
+    if _is_anthropic_api(api_base):
+        url = f"{api_base}/messages"
+        payload = {
+            "model": model,
+            "max_tokens": 500,
+            "temperature": 0.3,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_prompt}],
+        }
+        headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        }
+        response = _post_json_with_headers(url, payload, headers=headers)
+        return _extract_anthropic_content(response)
+    else:
+        url = _build_chat_completions_url(api_base)
+        payload = {
+            "model": model,
+            "temperature": 0.3,
+            "max_tokens": 500,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        response = _post_json(url, payload, api_key=api_key)
+        return _extract_openai_content(response)
+
+
+def _request_debate_brief(
+    snapshot: dict,
+    config: "MetalMonitorConfig",
+    rulebook: dict | None = None,
+) -> dict:
+    """
+    三阶段辩论研判：
+      阶段一：看多分析师找利多证据（纯文本，省 token）
+      阶段二：看空/谨慎分析师找利空/观望证据（纯文本）
+      阶段三：仲裁者综合双方论据 + 完整快照 → 最终研判（JSON 输出）
+
+    只在非 scalp 中长线研判时调用，任何阶段异常均由调用方捕获并降级到标准单轨模式。
+    """
+    api_base = str(config.ai_api_base or "https://api.siliconflow.cn/v1").strip().rstrip("/")
+    model = str(config.ai_model or "deepseek-ai/DeepSeek-R1").strip()
+    api_key = str(config.ai_api_key or "").strip()
+
+    logger.info("辩论研判 阶段一：看多视角分析")
+    bull_text = _request_text_only(
+        AI_BULL_PERSPECTIVE_SYSTEM_PROMPT,
+        build_bull_perspective_prompt(snapshot),
+        config,
+    )
+
+    logger.info("辩论研判 阶段二：看空/谨慎视角分析")
+    bear_text = _request_text_only(
+        AI_BEAR_PERSPECTIVE_SYSTEM_PROMPT,
+        build_bear_perspective_prompt(snapshot),
+        config,
+    )
+
+    logger.info("辩论研判 阶段三：仲裁者综合输出最终研判")
+    arbitrator_prompt = build_arbitrator_prompt(snapshot, bull_text, bear_text, rulebook=rulebook)
+
+    if _is_anthropic_api(api_base):
+        payload = {
+            "model": model,
+            "max_tokens": 1000,
+            "temperature": 0.2,
+            "system": AI_DEBATE_ARBITRATOR_SYSTEM_PROMPT,
+            "messages": [{"role": "user", "content": arbitrator_prompt}],
+        }
+        normalized = _request_anthropic_brief_result(api_base, payload, api_key=api_key)
+    else:
+        payload = {
+            "model": model,
+            "temperature": 0.2,
+            "messages": [
+                {"role": "system", "content": AI_DEBATE_ARBITRATOR_SYSTEM_PROMPT},
+                {"role": "user", "content": arbitrator_prompt},
+            ],
+        }
+        normalized = _request_openai_brief_result(api_base, payload, api_key=api_key)
+
+    return {
+        "content": normalized["content"],
+        "signal_meta": normalized["signal_meta"],
+        "signal_schema_version": normalized["signal_schema_version"],
+        "signal_meta_valid": normalized["signal_meta_valid"],
+        "signal_meta_reason": normalized["signal_meta_reason"],
+        "used_structured_payload": bool(normalized.get("used_structured_payload", False)),
+        "ai_parse_mode": str(normalized.get("ai_parse_mode", "") or "").strip(),
+        "ai_raw_response_logged": bool(normalized.get("ai_raw_response_logged", False)),
+        "ai_raw_response_length": int(normalized.get("ai_raw_response_length", 0) or 0),
+        "ai_raw_response_excerpt": str(normalized.get("ai_raw_response_excerpt", "") or ""),
+        "model": model,
+        "api_base": api_base,
+        "rulebook_summary_text": str((rulebook or {}).get("summary_text", "") or "").strip(),
+        # 辩论模式元数据
+        "debate_mode": True,
+        "debate_bull_excerpt": str(bull_text or "")[:300],
+        "debate_bear_excerpt": str(bear_text or "")[:300],
+    }
+
+
 def request_ai_brief(
     snapshot: dict,
     config: MetalMonitorConfig,
@@ -536,13 +678,41 @@ def request_ai_brief(
     rulebook = build_rulebook(current_regime_tag=str(snapshot.get("regime_tag", "") or "").strip())
     prompt = build_snapshot_prompt(snapshot, rulebook=rulebook)
 
+    items = list(snapshot.get("items", []) or [])
+    has_scalp = False
+    for item in items:
+        val = False
+        if isinstance(item, dict):
+            val = item.get("scalp_ready", False)
+        elif hasattr(item, "scalp_ready"):
+            val = getattr(item, "scalp_ready", False)
+        elif hasattr(item, "to_dict"):
+            val = item.to_dict().get("scalp_ready", False)
+        if bool(val):
+            has_scalp = True
+            break
+
+    system_prompt = AI_SCALP_SYSTEM_PROMPT if has_scalp else AI_BRIEF_SYSTEM_PROMPT
+
+    # ── 辩论模式（仅对非 scalp 中长线研判启用）────────────────────────────────
+    # 短线(scalp)时效要求极高，保持原有单轨，不走辩论；
+    # 非 scalp 研判自动启用三阶段辩论，任何阶段失败则静默降级到标准单轨。
+    if not has_scalp:
+        try:
+            return _request_debate_brief(snapshot, config, rulebook=rulebook)
+        except Exception as debate_exc:  # noqa: BLE001
+            logger.warning(
+                "辩论研判模式异常，自动降级到标准单轨模式：%s", debate_exc
+            )
+            # 降级后继续执行下方标准单轨逻辑
+    # ── 标准单轨模式（scalp 或辩论降级后的备用路径）──────────────────────────
     try:
         if _is_anthropic_api(api_base):
             payload = {
                 "model": model,
                 "max_tokens": 800,
                 "temperature": 0.2,
-                "system": AI_BRIEF_SYSTEM_PROMPT,
+                "system": system_prompt,
                 "messages": [{"role": "user", "content": prompt}],
             }
             normalized = _request_anthropic_brief_result(api_base, payload, api_key=api_key)
@@ -551,7 +721,7 @@ def request_ai_brief(
                 "model": model,
                 "temperature": 0.2,
                 "messages": [
-                    {"role": "system", "content": AI_BRIEF_SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt},
                 ],
             }

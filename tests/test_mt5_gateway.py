@@ -78,6 +78,46 @@ def test_analyze_intraday_bars_marks_bullish_upper_zone():
     assert context["intraday_location"] == "upper"
 
 
+def test_analyze_intraday_bars_detects_m15_higher_high_higher_low_structure():
+    bars = []
+    close = 74.0
+    path = [
+        74.0,
+        74.4,
+        74.2,
+        74.8,
+        75.0,
+        74.7,
+        75.2,
+        75.5,
+        75.3,
+        75.9,
+        76.2,
+        76.7,
+        76.5,
+        76.8,
+        76.6,
+        76.4,
+    ]
+    for index, close in enumerate(path, start=1):
+        bars.append(
+            {
+                "time": index,
+                "open": path[index - 2] if index > 1 else close - 0.1,
+                "high": close + 0.12,
+                "low": close - 0.12,
+                "close": close,
+            }
+        )
+
+    context = analyze_intraday_bars("XAGUSD", bars, lookback_label="近4小时")
+
+    assert context["price_structure_ready"] is True
+    assert context["price_structure_direction"] == "bullish"
+    assert context["price_structure_strength"] >= 4
+    assert "结构多头" in context["intraday_context_text"]
+
+
 def test_analyze_multi_timeframe_context_marks_alignment():
     payload = analyze_multi_timeframe_context(
         {
@@ -157,7 +197,7 @@ def test_fetch_quotes_includes_intraday_context(monkeypatch):
 
         @staticmethod
         def symbol_info(symbol):
-            return SimpleNamespace(spread=17.0, point=0.01, volume_step=0.1, volume_min=0.1)
+            return SimpleNamespace(spread=17.0, point=0.01, volume_step=0.1, volume_min=0.1, trade_contract_size=100.0)
 
         @staticmethod
         def symbol_info_tick(symbol):
@@ -219,8 +259,78 @@ def test_fetch_quotes_includes_intraday_context(monkeypatch):
     assert "retest_state" in rows[0]
     assert rows[0]["volume_step"] == 0.1
     assert rows[0]["volume_min"] == 0.1
+    assert rows[0]["contract_size"] == 100.0
     assert rows[0]["quote_live_reason"] == "live"
     assert "阈值" in rows[0]["quote_live_diagnostic_text"]
+
+
+def test_fetch_quotes_includes_tick_shock_context(monkeypatch):
+    class FakeMt5:
+        TIMEFRAME_M1 = 1
+        TIMEFRAME_M5 = 5
+        TIMEFRAME_M15 = 15
+        TIMEFRAME_H1 = 60
+        TIMEFRAME_H4 = 240
+
+        @staticmethod
+        def symbol_select(symbol, enable):
+            return True
+
+        @staticmethod
+        def symbol_info(symbol):
+            return SimpleNamespace(spread=17.0, point=0.01, volume_step=0.1, volume_min=0.1)
+
+        @staticmethod
+        def symbol_info_tick(symbol):
+            return SimpleNamespace(time=1_000, bid=4476.70, ask=4476.80, last=4476.75)
+
+        @staticmethod
+        def copy_rates_from_pos(symbol, timeframe, start_pos, count):
+            return [
+                {"time": index, "open": 4470.0 + index, "high": 4471.0 + index, "low": 4469.5 + index, "close": 4470.5 + index}
+                for index in range(1, max(5, min(count, 20)))
+            ]
+
+    monkeypatch.setattr(mt5_gateway, "mt5", FakeMt5)
+    monkeypatch.setattr(mt5_gateway, "HAS_MT5", True)
+    monkeypatch.setattr(mt5_gateway, "initialize_connection", lambda: (True, "ok"))
+    monkeypatch.setattr(
+        mt5_gateway,
+        "_inspect_tick_activity",
+        lambda tick, now_ts=None, max_age_sec=180: {
+            "is_live": True,
+            "reason": "live",
+            "reason_text": "报价活跃",
+            "diagnostic_text": "最新 tick 仍在活跃阈值内。",
+            "delta_sec": 2.0,
+            "max_age_sec": 180.0,
+            "tick_utc_text": "2026-04-22 12:00:00 UTC",
+            "now_utc_text": "2026-04-22 12:00:02 UTC",
+            "broker_offset_sec": 0.0,
+            "offset_recalibrated": False,
+            "price_available": True,
+        },
+    )
+    monkeypatch.setattr(
+        mt5_gateway,
+        "update_tick_shock_state",
+        lambda *args, **kwargs: {
+            "tick_shock_ready": True,
+            "tick_shock_active": True,
+            "tick_shock_direction": "bullish",
+            "tick_shock_move": 0.75,
+            "tick_shock_threshold": 0.50,
+            "tick_shock_window_sec": 5.0,
+            "tick_shock_cooldown_until_ts": 1060.0,
+            "tick_shock_text": "XAUUSD Tick 异动冷却中",
+        },
+    )
+
+    rows = mt5_gateway.fetch_quotes(["XAUUSD"])
+
+    assert rows[0]["tick_shock_active"] is True
+    assert rows[0]["tick_shock_direction"] == "bullish"
+    assert "Tick 异动" in rows[0]["tick_shock_text"]
 
 
 def test_fetch_quotes_prefers_live_bid_ask_spread_over_symbol_info(monkeypatch):

@@ -252,6 +252,7 @@ class MetalSettingsDialog(QDialog):
 
         self.tabs.addTab(self._wrap_scroll_tab(tab_ai), "AI与推送")
 
+
         # --- Tab 4: 交易与风控 ---
         tab_trading = QWidget()
         form_trading = QFormLayout(tab_trading)
@@ -262,6 +263,10 @@ class MetalSettingsDialog(QDialog):
         self.chk_live_trade.setChecked(self._config.trade_mode == "live")
         self.chk_live_trade.clicked.connect(self._on_live_trade_clicked)
         form_trading.addRow("交易模式：", self.chk_live_trade)
+
+        self.chk_adaptive_evolution = QCheckBox("启用策略闲置期自适应门槛下调与防御收紧自动演化")
+        self.chk_adaptive_evolution.setChecked(bool(getattr(self._config, "sim_adaptive_evolution_enabled", False)))
+        form_trading.addRow("自适应演化：", self.chk_adaptive_evolution)
 
         self.spin_max_drawdown = QSpinBox()
         self.spin_max_drawdown.setRange(1, 100)
@@ -617,6 +622,7 @@ class MetalSettingsDialog(QDialog):
                     else 10
                 ),
             },
+            sim_adaptive_evolution_enabled=bool(self.chk_adaptive_evolution.isChecked()) if getattr(self, "chk_adaptive_evolution", None) else False,
         )
 
     def _on_live_trade_clicked(self, checked: bool):
